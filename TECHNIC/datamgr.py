@@ -71,7 +71,7 @@ class DataManager:
         self.model_mev = self._mev_loader.model_mev
         self.scenario_mevs = self._mev_loader.scenario_mevs
 
-    def get_drivers(self, driver_names: List[str]) -> pd.DataFrame:
+    def get_vars(self, driver_names: List[str]) -> pd.DataFrame:
         parts = []
         int_cols = [c for c in driver_names if c in self.internal_data.columns]
         if int_cols:
