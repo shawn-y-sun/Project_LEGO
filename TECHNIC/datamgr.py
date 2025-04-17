@@ -1,10 +1,10 @@
 # TECHNIC/datamgr.py
+
 import pandas as pd
 from typing import List, Callable, Optional, Dict
 
-from data.internal import InternalDataLoader
-from data.mev import MEVLoader
-
+from .internal import InternalDataLoader
+from .mev import MEVLoader
 
 class DataManager:
     """
@@ -14,22 +14,28 @@ class DataManager:
     - Interpolates MEV tables to match internal data frequency.
     - Applies transformations to MEV tables.
     - Selects specified drivers from both data sources.
+    - Optionally splits into in-sample and out-of-sample based on a cutoff date.
     """
     def __init__(
         self,
+        # Internal loader inputs
         internal_loader: Optional[InternalDataLoader] = None,
-        mev_loader: Optional[MEVLoader] = None,
         internal_source: Optional[str] = None,
-        internal_df: Optional[pd.DataFrame] = None,
-        internal_date_col: Optional[str] = None,
-        internal_start: Optional[str] = None,
-        internal_end: Optional[str] = None,
-        internal_freq: str = 'M',
-        model_workbook: Optional[str] = None,
-        model_sheet: Optional[str] = None,
+        internal_df: Optional[pd.DataFrame]     = None,
+        internal_date_col: Optional[str]        = None,
+        internal_start: Optional[str]           = None,
+        internal_end: Optional[str]             = None,
+        internal_freq: str                      = 'M',
+        # MEV loader inputs
+        mev_loader: Optional[MEVLoader]         = None,
+        model_workbook: Optional[str]           = None,
+        model_sheet: Optional[str]              = None,
         scenario_workbooks: Optional[List[str]] = None,
-        scenario_sheets: Optional[Dict[str, str]] = None,
+        scenario_sheets:   Optional[Dict[str,str]] = None,
+        # Split parameter
+        in_sample_end: Optional[str]            = None,
     ):
+        # Build or accept InternalDataLoader
         if internal_loader is None:
             internal_loader = InternalDataLoader(
                 source=internal_source,
@@ -43,6 +49,7 @@ class DataManager:
         self._internal_loader = internal_loader
         self.internal_data = internal_loader.internal_data
 
+        # Build or accept MEVLoader
         if mev_loader is None:
             if model_workbook is None or model_sheet is None:
                 raise ValueError("model_workbook and model_sheet must be provided if mev_loader is not.")
@@ -53,9 +60,14 @@ class DataManager:
                 scenario_sheets=scenario_sheets,
             )
         mev_loader.load()
-        self._mev_loader = mev_loader
-        self.model_mev = mev_loader.model_mev
+        self._mev_loader   = mev_loader
+        self.model_mev     = mev_loader.model_mev
         self.scenario_mevs = mev_loader.scenario_mevs
+
+        # Optional in-sample/out-of-sample split
+        self.in_sample_end = pd.to_datetime(in_sample_end).normalize() if in_sample_end else None
+        if self.in_sample_end is not None:
+            self._split(self.in_sample_end)
 
     def interpolate_mevs(self, freq: str = 'M'):
         current_freq = pd.infer_freq(self.internal_data.index)
@@ -68,7 +80,7 @@ class DataManager:
 
     def apply_to_mevs(self, func: Callable[[pd.DataFrame], pd.DataFrame]) -> None:
         self._mev_loader.apply_to_all(func)
-        self.model_mev = self._mev_loader.model_mev
+        self.model_mev     = self._mev_loader.model_mev
         self.scenario_mevs = self._mev_loader.scenario_mevs
 
     def get_vars(self, driver_names: List[str]) -> pd.DataFrame:
@@ -94,26 +106,39 @@ class DataManager:
         df_interp.index = df_interp.index.normalize()
         return df_interp
 
+    def _split(self, cutoff: pd.Timestamp):
+        # Internal
+        mask = self.internal_data.index <= cutoff
+        self.internal_in  = self.internal_data.loc[mask]
+        self.internal_out = self.internal_data.loc[~mask]
+        # Model MEV
+        mask = self.model_mev.index <= cutoff
+        self.model_in  = self.model_mev.loc[mask]
+        self.model_out = self.model_mev.loc[~mask]
+        # Scenario MEVs
+        self.scenario_in  = {}
+        self.scenario_out = {}
+        for scen, df in self.scenario_mevs.items():
+            mask = df.index <= cutoff
+            self.scenario_in[scen]  = df.loc[mask]
+            self.scenario_out[scen] = df.loc[~mask]
+
+    # Delegate properties from loaders
     @property
     def source(self) -> Optional[str]:
         return self._internal_loader.source
-
     @property
     def raw_df(self) -> Optional[pd.DataFrame]:
         return self._internal_loader.raw_df
-
     @property
     def date_col(self) -> Optional[str]:
         return self._internal_loader.date_col
-
     @property
     def start(self) -> Optional[str]:
         return self._internal_loader.start
-
     @property
     def end(self) -> Optional[str]:
         return self._internal_loader.end
-
     @property
     def freq(self) -> str:
         return self._internal_loader.freq
@@ -121,23 +146,18 @@ class DataManager:
     @property
     def model_workbook(self) -> str:
         return self._mev_loader.model_workbook
-
     @property
     def model_sheet(self) -> str:
         return self._mev_loader.model_sheet
-
     @property
     def scenario_workbooks(self) -> List[str]:
         return self._mev_loader.scenario_workbooks
-
     @property
-    def scenario_sheets(self) -> Dict[str, str]:
+    def scenario_sheets(self) -> Dict[str,str]:
         return self._mev_loader.scenario_sheets
-
     @property
-    def model_map(self) -> Dict[str, str]:
+    def model_map(self) -> Dict[str,str]:
         return self._mev_loader.model_map
-
     @property
-    def scenario_maps(self) -> Dict[str, Dict[str, str]]:
+    def scenario_maps(self) -> Dict[str,Dict[str,str]]:
         return self._mev_loader.scenario_maps
