@@ -5,6 +5,7 @@ from typing import List, Callable, Optional, Dict
 
 from .internal import InternalDataLoader
 from .mev import MEVLoader
+from .transform import TSFM
 
 class DataManager:
     """
@@ -21,19 +22,19 @@ class DataManager:
         # Internal loader inputs
         internal_loader: Optional[InternalDataLoader] = None,
         internal_source: Optional[str] = None,
-        internal_df: Optional[pd.DataFrame]     = None,
-        internal_date_col: Optional[str]        = None,
-        internal_start: Optional[str]           = None,
-        internal_end: Optional[str]             = None,
-        internal_freq: str                      = 'M',
+        internal_df: Optional[pd.DataFrame] = None,
+        internal_date_col: Optional[str] = None,
+        internal_start: Optional[str] = None,
+        internal_end: Optional[str] = None,
+        internal_freq: str = 'M',
         # MEV loader inputs
-        mev_loader: Optional[MEVLoader]         = None,
-        model_workbook: Optional[str]           = None,
-        model_sheet: Optional[str]              = None,
+        mev_loader: Optional[MEVLoader] = None,
+        model_workbook: Optional[str] = None,
+        model_sheet: Optional[str] = None,
         scenario_workbooks: Optional[List[str]] = None,
-        scenario_sheets:   Optional[Dict[str,str]] = None,
+        scenario_sheets: Optional[Dict[str,str]] = None,
         # Split parameter
-        in_sample_end: Optional[str]            = None,
+        in_sample_end: Optional[str] = None,
     ):
         # Build or accept InternalDataLoader
         if internal_loader is None:
@@ -122,6 +123,61 @@ class DataManager:
             mask = df.index <= cutoff
             self.scenario_in[scen]  = df.loc[mask]
             self.scenario_out[scen] = df.loc[~mask]
+
+    def _flatten_specs(self, specs):
+        for spec in specs:
+            if isinstance(spec, list):
+                yield from self._flatten_specs(spec)
+            else:
+                yield spec
+    
+    def build_indep_vars(self, specs):
+        """
+        From a mix of variable names (str) and {var: TSFM} dicts (nested in lists),
+        create transformed features and return a DataFrame of all requested vars.
+        """
+        specs_flat = list(self._flatten_specs(specs))
+
+        strings = []
+        transforms = {}
+        for item in specs_flat:
+            if isinstance(item, str):
+                strings.append(item)
+            elif isinstance(item, dict):
+                transforms.update(item)
+            else:
+                raise ValueError(f"Invalid spec: {item}")
+
+        # apply transformations
+        for var, tsfm in transforms.items():
+            if var in self.internal_data.columns:
+                base = self.internal_data[var]
+                transformed = tsfm.transform_fn(base)
+                col = transformed.shift(tsfm.max_lag) if tsfm.max_lag > 0 else transformed
+                name = f"{var}_{tsfm.suffix}"
+                self.internal_data[name] = col
+            elif var in self.model_mev.columns:
+                base = self.model_mev[var]
+                transformed = tsfm.transform_fn(base)
+                col = transformed.shift(tsfm.max_lag) if tsfm.max_lag > 0 else transformed
+                name = f"{var}_{tsfm.suffix}"
+                self.model_mev[name] = col
+            else:
+                raise KeyError(f"Variable '{var}' not found in internal or MEV data.")
+
+        # collect final set of series
+        series_list = []
+        for v in strings + [f"{v}_{tsfm.suffix}" for v, tsfm in transforms.items()]:
+            if v in self.internal_data.columns:
+                series_list.append(self.internal_data[v])
+            elif v in self.model_mev.columns:
+                series_list.append(self.model_mev[v])
+            else:
+                raise KeyError(f"Variable '{v}' not found after transformation.")
+        
+        X = pd.concat(series_list, axis=1)
+        X.index = X.index.normalize()
+        return X
 
     # Delegate properties from loaders
     @property
