@@ -2,8 +2,10 @@
 from abc import ABC, abstractmethod
 import pandas as pd
 from typing import Callable, Dict, Any
+import statsmodels.api as sm
+from statsmodels.stats.outliers_influence import variance_inflation_factor
 
-class MoedlBase(ABC):
+class ModelBase(ABC):
     """
     Abstract base class for statistical models.
     """
@@ -25,8 +27,7 @@ class MoedlBase(ABC):
         pass
 
 
-import statsmodels.api as sm
-from statsmodels.stats.outliers_influence import variance_inflation_factor
+
 
 class OLS(ModelBase):
     """
