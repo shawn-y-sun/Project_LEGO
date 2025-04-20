@@ -2,25 +2,33 @@
 import pandas as pd
 from typing import List, Dict, Optional, Tuple, Callable
 
-class MEVLoader:
-    """Load and preprocess macro-economic variables (MEV) from Excel workbooks
-    for modeling and scenario analyses."""
 
+
+class MEVLoader:
+    """
+    Load and preprocess macro‑economic variable tables for modeling and scen testing.
+
+    Attributes:
+      model_mev: DataFrame for the primary modeling scen.
+      scen_mevs: Dict of DataFrames for each scen.
+      model_map: Dict mapping variable codes → descriptive names.
+      scen_maps: Dict mapping each scen → its code→name map.
+    """
     def __init__(
         self,
         model_workbook: str,
         model_sheet: str,
-        scen_workbooks: Optional[List[str]]    = None,
-        scen_sheets:    Optional[Dict[str,str]] = None,
+        scen_workbooks: Optional[List[str]] = None,
+        scen_sheets: Optional[Dict[str, str]] = None,
     ):
-        self.model_workbook    = model_workbook
-        self.model_sheet       = model_sheet
-        self.scen_workbooks    = scen_workbooks or []
-        self.scen_sheets       = scen_sheets    or {}
-        self._model_mev:    Optional[pd.DataFrame]      = None
-        self._scen_mevs:    Dict[str,pd.DataFrame]      = {}
-        self.model_map:     Dict[str,str]               = {}
-        self.scen_maps:     Dict[str,Dict[str,str]]     = {}
+        self.model_workbook = model_workbook
+        self.model_sheet    = model_sheet
+        self.scen_workbooks = scen_workbooks or []
+        self.scen_sheets    = scen_sheets    or {}
+        self._model_mev: Optional[pd.DataFrame]      = None
+        self._scen_mevs: Dict[str, pd.DataFrame]     = {}
+        self._model_map: Dict[str, str]              = {}
+        self._scen_maps: Dict[str, Dict[str, str]]   = {}
 
     def load(self) -> None:
         self._model_mev, self._model_map = self._load_and_preprocess(
