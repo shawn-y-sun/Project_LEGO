@@ -39,7 +39,6 @@ class InternalDataLoader:
         else:
             raise ValueError("No source file or DataFrame provided.")
         self._internal_data = self._standardize_index(df)
-        return self._internal_data
 
     def _load_from_file(self, path: str) -> pd.DataFrame:
         if path.lower().endswith('.csv'):
@@ -69,17 +68,30 @@ class InternalDataLoader:
 
     def _add_period_dummies(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Append quarter dummies Q1–Q4, and if monthly, month dummies M1–M12.
+        Append quarter dummies Q1–Q4, and if monthly, month dummies M1–M12
+        without underscores. Remove any existing dummy columns first.
         """
+        df = df.copy()
+        # Define dummy column names
+        q_cols = [f"Q{i}" for i in range(1, 5)]
+        m_cols = [f"M{i}" for i in range(1, 13)] if self.freq.upper() == 'M' else []
+
+        # Drop any existing dummy columns
+        drop_cols = [col for col in q_cols + m_cols if col in df.columns]
+        if drop_cols:
+            df = df.drop(columns=drop_cols)
+
         # Quarter dummies
         quarters = df.index.quarter
-        qd = pd.get_dummies(quarters, prefix='Q')
+        qd = pd.get_dummies(quarters, prefix='Q', prefix_sep='')
+        qd.index = df.index
         df = pd.concat([df, qd], axis=1)
 
-        # Monthly dummies if freq='M'
+        # Monthly dummies
         if self.freq.upper() == 'M':
             months = df.index.month
-            md = pd.get_dummies(months, prefix='M')
+            md = pd.get_dummies(months, prefix='M', prefix_sep='')
+            md.index = df.index
             df = pd.concat([df, md], axis=1)
 
         return df
