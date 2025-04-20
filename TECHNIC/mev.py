@@ -1,38 +1,40 @@
 # TECHNIC/mev.py
 import pandas as pd
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Callable
 
 class MEVLoader:
     """Load and preprocess macro-economic variables (MEV) from Excel workbooks
     for modeling and scenario analyses."""
 
-    def __init__(self,
-                 model_workbook: str,
-                 model_sheet: str,
-                 scenario_workbooks: Optional[List[str]] = None,
-                 scenario_sheets: Optional[Dict[str, str]] = None):
-        self.model_workbook = model_workbook
-        self.model_sheet = model_sheet
-        self.scenario_workbooks = scenario_workbooks or []
-        self.scenario_sheets = scenario_sheets or {}
-        self._model_mev: Optional[pd.DataFrame] = None
-        self._scenario_mevs: Dict[str, pd.DataFrame] = {}
-        self._model_map: Dict[str, str] = {}
-        self._scenario_maps: Dict[str, Dict[str, str]] = {}
+    def __init__(
+        self,
+        model_workbook: str,
+        model_sheet: str,
+        scen_workbooks: Optional[List[str]]    = None,
+        scen_sheets:    Optional[Dict[str,str]] = None,
+    ):
+        self.model_workbook    = model_workbook
+        self.model_sheet       = model_sheet
+        self.scen_workbooks    = scen_workbooks or []
+        self.scen_sheets       = scen_sheets    or {}
+        self._model_mev:    Optional[pd.DataFrame]      = None
+        self._scen_mevs:    Dict[str,pd.DataFrame]      = {}
+        self.model_map:     Dict[str,str]               = {}
+        self.scen_maps:     Dict[str,Dict[str,str]]     = {}
 
     def load(self) -> None:
         self._model_mev, self._model_map = self._load_and_preprocess(
             self.model_workbook, self.model_sheet
         )
-        for wb in self.scenario_workbooks:
-            for scen, sheet in self.scenario_sheets.items():
+        for wb in self.scen_workbooks:
+            for scen, sheet in self.scen_sheets.items():
                 df, mapping = self._load_and_preprocess(wb, sheet)
-                self._scenario_mevs[scen] = df
-                self._scenario_maps[scen] = mapping
+                self._scen_mevs[scen] = df
+                self._scen_maps[scen] = mapping
 
     def _load_and_preprocess(self, workbook: str, sheet: str) -> Tuple[pd.DataFrame, Dict[str, str]]:
         raw = pd.read_excel(workbook, sheet_name=sheet)
-        # TODO: drop initial header rows, extract codes/names, build mapping
+        # drop initial header rows, extract codes/names, build mapping
         df = raw.copy()
         df_mev_prc = df.iloc[1:,:]
         df_mev_prc.columns = df_mev_prc.iloc[0]
@@ -66,18 +68,18 @@ class MEVLoader:
         return self._model_mev
 
     @property
-    def scenario_mevs(self) -> Dict[str, pd.DataFrame]:
-        return self._scenario_mevs
+    def scen_mevs(self) -> Dict[str, pd.DataFrame]:
+        return self._scen_mevs
 
     @property
     def model_map(self) -> Dict[str, str]:
         return self._model_map
 
     @property
-    def scenario_maps(self) -> Dict[str, Dict[str, str]]:
-        return self._scenario_maps
+    def scen_maps(self) -> Dict[str, Dict[str, str]]:
+        return self._scen_maps
     
     def apply_to_all(self, func: Callable[[pd.DataFrame], pd.DataFrame]) -> None:
         self._model_mev = func(self._model_mev.copy())
-        for scen, df in self._scenario_mevs.items():
-            self._scenario_mevs[scen] = func(df.copy())
+        for scen, df in self._scen_mevs.items():
+            self._scen_mevs[scen] = func(df.copy())

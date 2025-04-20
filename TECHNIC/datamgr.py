@@ -1,7 +1,9 @@
 # TECHNIC/datamgr.py
 
 import pandas as pd
-from typing import List, Callable, Optional, Dict
+from typing import (
+    List, Callable, Optional, Dict, Any
+)
 
 from .internal import InternalDataLoader
 from .mev import MEVLoader
@@ -11,32 +13,35 @@ class DataManager:
     """
     Manage and combine internal and MEV data for modeling.
 
-    - Loads and stores internal and MEV data via their loaders or directly via parameters.
+    - Builds or accepts InternalDataLoader and MEVLoader.
     - Interpolates MEV tables to match internal data frequency.
-    - Applies transformations to MEV tables.
-    - Selects specified drivers from both data sources.
-    - Optionally splits into in-sample and out-of-sample based on a cutoff date.
+    - Applies arbitrary transforms to MEV tables.
+    - Builds independent-variable DataFrames from specs.
+    - Supports separate in-sample split for modeling (in_sample_end)
+      and scenario testing (scen_in_sample_end).
     """
     def __init__(
         self,
         # Internal loader inputs
         internal_loader: Optional[InternalDataLoader] = None,
-        internal_source: Optional[str] = None,
-        internal_df: Optional[pd.DataFrame] = None,
-        internal_date_col: Optional[str] = None,
-        internal_start: Optional[str] = None,
-        internal_end: Optional[str] = None,
-        internal_freq: str = 'M',
+        internal_source: Optional[str]               = None,
+        internal_df: Optional[pd.DataFrame]          = None,
+        internal_date_col: Optional[str]             = None,
+        internal_start: Optional[str]                = None,
+        internal_end: Optional[str]                  = None,
+        internal_freq: str                           = 'M',
         # MEV loader inputs
-        mev_loader: Optional[MEVLoader] = None,
-        model_workbook: Optional[str] = None,
-        model_sheet: Optional[str] = None,
-        scenario_workbooks: Optional[List[str]] = None,
-        scenario_sheets: Optional[Dict[str,str]] = None,
-        # Split parameter
-        in_sample_end: Optional[str] = None,
+        mev_loader: Optional[MEVLoader]              = None,
+        model_workbook: Optional[str]                = None,
+        model_sheet: Optional[str]                   = None,
+        scen_workbooks: Optional[List[str]]          = None,
+        scen_sheets: Optional[Dict[str,str]]         = None,
+        # Modeling in-sample cutoff
+        in_sample_end: Optional[str]                 = None,
+        # Scenario-testing in-sample cutoff
+        scen_in_sample_end: Optional[str]            = None,
     ):
-        # Build or accept InternalDataLoader
+        # Internal data
         if internal_loader is None:
             internal_loader = InternalDataLoader(
                 source=internal_source,
@@ -48,153 +53,161 @@ class DataManager:
             )
         internal_loader.load()
         self._internal_loader = internal_loader
-        self.internal_data = internal_loader.internal_data
+        self.internal_data    = internal_loader.internal_data
 
-        # Build or accept MEVLoader
+        # MEV data
         if mev_loader is None:
             if model_workbook is None or model_sheet is None:
-                raise ValueError("model_workbook and model_sheet must be provided if mev_loader is not.")
+                raise ValueError(
+                    "model_workbook and model_sheet required if mev_loader not provided"
+                )
             mev_loader = MEVLoader(
                 model_workbook=model_workbook,
                 model_sheet=model_sheet,
-                scenario_workbooks=scenario_workbooks,
-                scenario_sheets=scenario_sheets,
+                scenario_workbooks=scen_workbooks,
+                scenario_sheets=scen_sheets,
             )
         mev_loader.load()
-        self._mev_loader   = mev_loader
-        self.model_mev     = mev_loader.model_mev
-        self.scenario_mevs = mev_loader.scenario_mevs
+        self._mev_loader = mev_loader
+        self.model_mev   = mev_loader.model_mev
 
-        # Optional in-sample/out-of-sample split
-        self.in_sample_end = pd.to_datetime(in_sample_end).normalize() if in_sample_end else None
-        if self.in_sample_end is not None:
-            self._split(self.in_sample_end)
+        # Cutoff dates (stored but not auto‐split)
+        self.in_sample_end      = (
+            pd.to_datetime(in_sample_end).normalize()
+            if in_sample_end else None
+        )
+        self.scen_in_sample_end = (
+            pd.to_datetime(scen_in_sample_end).normalize()
+            if scen_in_sample_end else None
+        )
+
+    # Modeling in‑sample/out‑of‑sample splits
+    @property
+    def internal_in(self) -> pd.DataFrame:
+        if self.in_sample_end is None:
+            return self.internal_data
+        return self.internal_data.loc[: self.in_sample_end]
+
+    @property
+    def internal_out(self) -> pd.DataFrame:
+        if self.in_sample_end is None:
+            return pd.DataFrame()
+        return self.internal_data.loc[self.in_sample_end + pd.Timedelta(days=1) :]
+
+    @property
+    def model_in(self) -> pd.DataFrame:
+        if self.in_sample_end is None:
+            return self.model_mev
+        return self.model_mev.loc[: self.in_sample_end]
+
+    @property
+    def model_out(self) -> pd.DataFrame:
+        if self.in_sample_end is None:
+            return pd.DataFrame()
+        return self.model_mev.loc[self.in_sample_end + pd.Timedelta(days=1) :]
+
+    # Scenario MEVs, trimmed by scen_in_sample_end
+    @property
+    def scen_mevs(self) -> Dict[str, pd.DataFrame]:
+        raw = self._mev_loader.scenario_mevs
+        if self.scen_in_sample_end is None:
+            return raw
+        cutoff = self.scen_in_sample_end
+        return {name: df.loc[:cutoff] for name, df in raw.items()}
 
     def interpolate_mevs(self, freq: str = 'M'):
         current_freq = pd.infer_freq(self.internal_data.index)
         if current_freq != freq:
             raise ValueError(f"Internal data frequency is not {freq}")
-        target_idx = self.internal_data.index.normalize()
+        target_idx     = self.internal_data.index.normalize()
         self.model_mev = self._interpolate_df(self.model_mev, target_idx)
-        for scen, df in self.scenario_mevs.items():
-            self.scenario_mevs[scen] = self._interpolate_df(df, target_idx)
 
     def apply_to_mevs(self, func: Callable[[pd.DataFrame], pd.DataFrame]) -> None:
         self._mev_loader.apply_to_all(func)
-        self.model_mev     = self._mev_loader.model_mev
-        self.scenario_mevs = self._mev_loader.scenario_mevs
+        self.model_mev = self._mev_loader.model_mev
 
-    def get_vars(self, driver_names: List[str]) -> pd.DataFrame:
-        parts = []
-        int_cols = [c for c in driver_names if c in self.internal_data.columns]
-        if int_cols:
-            parts.append(self.internal_data[int_cols])
-        mev_cols = [c for c in driver_names if c in self.model_mev.columns]
-        if mev_cols:
-            parts.append(self.model_mev[mev_cols])
-        if not parts:
-            raise ValueError("No driver names found in internal or MEV data.")
-        result = pd.concat(parts, axis=1)
-        result.index = result.index.normalize()
-        return result
+    def build_indep_vars(
+        self,
+        specs: Any,
+        internal_df: Optional[pd.DataFrame] = None,
+        mev_df: Optional[pd.DataFrame]      = None
+    ) -> pd.DataFrame:
+        internal = internal_df or self.internal_data
+        mev      = mev_df      or self.model_mev
 
-    @staticmethod
-    def _interpolate_df(df: pd.DataFrame, target_idx: pd.DatetimeIndex) -> pd.DataFrame:
-        df_interp = df.copy()
-        df_interp.index = pd.to_datetime(df_interp.index).normalize()
-        df_interp = df_interp.reindex(target_idx)
-        df_interp = df_interp.interpolate(method='cubic')
-        df_interp.index = df_interp.index.normalize()
-        return df_interp
+        def _flatten(items):
+            for it in items:
+                if isinstance(it, list):
+                    yield from _flatten(it)
+                else:
+                    yield it
 
-    def _split(self, cutoff: pd.Timestamp):
-        # Internal
-        mask = self.internal_data.index <= cutoff
-        self.internal_in  = self.internal_data.loc[mask]
-        self.internal_out = self.internal_data.loc[~mask]
-        # Model MEV
-        mask = self.model_mev.index <= cutoff
-        self.model_in  = self.model_mev.loc[mask]
-        self.model_out = self.model_mev.loc[~mask]
-        # Scenario MEVs
-        self.scenario_in  = {}
-        self.scenario_out = {}
-        for scen, df in self.scenario_mevs.items():
-            mask = df.index <= cutoff
-            self.scenario_in[scen]  = df.loc[mask]
-            self.scenario_out[scen] = df.loc[~mask]
-
-    def _flatten_specs(self, specs):
-        for spec in specs:
-            if isinstance(spec, list):
-                yield from self._flatten_specs(spec)
+        flat_specs = list(_flatten(specs))
+        names, transforms = [], {}
+        for itm in flat_specs:
+            if isinstance(itm, str):
+                names.append(itm)
+            elif isinstance(itm, dict):
+                transforms.update(itm)
             else:
-                yield spec
-    
-    def build_indep_vars(self, specs):
-        """
-        From a mix of variable names (str) and {var: TSFM} dicts (nested in lists),
-        create transformed features and return a DataFrame of all requested vars.
-        """
-        specs_flat = list(self._flatten_specs(specs))
+                raise ValueError(f"Invalid spec element: {itm}")
 
-        strings = []
-        transforms = {}
-        for item in specs_flat:
-            if isinstance(item, str):
-                strings.append(item)
-            elif isinstance(item, dict):
-                transforms.update(item)
-            else:
-                raise ValueError(f"Invalid spec: {item}")
-
-        # apply transformations
         for var, tsfm in transforms.items():
-            if var in self.internal_data.columns:
-                base = self.internal_data[var]
-                transformed = tsfm.transform_fn(base)
-                col = transformed.shift(tsfm.max_lag) if tsfm.max_lag > 0 else transformed
-                name = f"{var}_{tsfm.suffix}"
-                self.internal_data[name] = col
-            elif var in self.model_mev.columns:
-                base = self.model_mev[var]
-                transformed = tsfm.transform_fn(base)
-                col = transformed.shift(tsfm.max_lag) if tsfm.max_lag > 0 else transformed
-                name = f"{var}_{tsfm.suffix}"
-                self.model_mev[name] = col
+            if var in internal.columns:
+                target = internal
+            elif var in mev.columns:
+                target = mev
             else:
-                raise KeyError(f"Variable '{var}' not found in internal or MEV data.")
+                raise KeyError(f"Variable '{var}' not found.")
+            series      = target[var]
+            transformed = tsfm.transform_fn(series)
+            col         = transformed.shift(tsfm.max_lag) if tsfm.max_lag > 0 else transformed
+            name        = f"{var}_{tsfm.suffix}"
+            target[name] = col
 
-        # collect final set of series
-        series_list = []
-        for v in strings + [f"{v}_{tsfm.suffix}" for v, tsfm in transforms.items()]:
-            if v in self.internal_data.columns:
-                series_list.append(self.internal_data[v])
-            elif v in self.model_mev.columns:
-                series_list.append(self.model_mev[v])
+        final_cols = names + [f"{v}_{tsfm.suffix}" for v, tsfm in transforms.items()]
+        pieces = []
+        for col in final_cols:
+            if col in internal.columns:
+                pieces.append(internal[col])
+            elif col in mev.columns:
+                pieces.append(mev[col])
             else:
-                raise KeyError(f"Variable '{v}' not found after transformation.")
-        
-        X = pd.concat(series_list, axis=1)
+                raise KeyError(f"Column '{col}' not found after transformation.")
+        X = pd.concat(pieces, axis=1)
         X.index = X.index.normalize()
         return X
 
-    # Delegate properties from loaders
+    @staticmethod
+    def _interpolate_df(df: pd.DataFrame, target_idx: pd.DatetimeIndex) -> pd.DataFrame:
+        df2 = df.copy()
+        df2.index = pd.to_datetime(df2.index).normalize()
+        df2 = df2.reindex(target_idx)
+        df2 = df2.interpolate(method='cubic')
+        df2.index = df2.index.normalize()
+        return df2
+
+    # Delegated loader properties
     @property
     def source(self) -> Optional[str]:
         return self._internal_loader.source
+
     @property
     def raw_df(self) -> Optional[pd.DataFrame]:
         return self._internal_loader.raw_df
+
     @property
     def date_col(self) -> Optional[str]:
         return self._internal_loader.date_col
+
     @property
     def start(self) -> Optional[str]:
         return self._internal_loader.start
+
     @property
     def end(self) -> Optional[str]:
         return self._internal_loader.end
+
     @property
     def freq(self) -> str:
         return self._internal_loader.freq
@@ -202,18 +215,23 @@ class DataManager:
     @property
     def model_workbook(self) -> str:
         return self._mev_loader.model_workbook
+
     @property
     def model_sheet(self) -> str:
         return self._mev_loader.model_sheet
+
     @property
-    def scenario_workbooks(self) -> List[str]:
+    def scen_workbooks(self) -> List[str]:
         return self._mev_loader.scenario_workbooks
+
     @property
-    def scenario_sheets(self) -> Dict[str,str]:
+    def scen_sheets(self) -> Dict[str,str]:
         return self._mev_loader.scenario_sheets
+
     @property
     def model_map(self) -> Dict[str,str]:
         return self._mev_loader.model_map
+
     @property
-    def scenario_maps(self) -> Dict[str,Dict[str,str]]:
+    def scen_maps(self) -> Dict[str,Dict[str,str]]:
         return self._mev_loader.scenario_maps
