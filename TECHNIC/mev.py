@@ -2,8 +2,6 @@
 import pandas as pd
 from typing import List, Dict, Optional, Tuple, Callable
 
-
-
 class MEVLoader:
     """
     Load and preprocess macro‑economic variable tables for modeling and scen testing.

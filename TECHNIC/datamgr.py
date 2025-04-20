@@ -64,8 +64,8 @@ class DataManager:
             mev_loader = MEVLoader(
                 model_workbook=model_workbook,
                 model_sheet=model_sheet,
-                scenario_workbooks=scen_workbooks,
-                scenario_sheets=scen_sheets,
+                scen_workbooks=scen_workbooks,
+                scen_sheets=scen_sheets,
             )
         mev_loader.load()
         self._mev_loader = mev_loader
