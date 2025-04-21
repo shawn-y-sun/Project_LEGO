@@ -138,7 +138,7 @@ class CM:
             f"{self.model_id}_full_test_tbl":pd.json_normalize(self.measure_full.testing_measures),
         }
 
-    def generate_report(self) -> Dict[str, Any]:
+    def show_report(self) -> Dict[str, Any]:
         """
         If report_cls was provided, returns all tables and plots:
           {
