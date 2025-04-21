@@ -140,18 +140,46 @@ class CM:
             f"{self.model_id}_full_test_tbl":pd.json_normalize(self.measure_full.testing_measures),
         }
 
-    def show_report(self) -> None:
+    def show_report(
+        self,
+        show_tests: bool = False,
+        show_full: bool = False,
+        perf_kwargs: dict = None,
+        test_kwargs: dict = None
+    ) -> None:
         """
-        Print in‑sample and full‑sample reports by delegating
-        to each report’s own show_report(). Does not return.
+        Delegate to in‑sample (always) and full‑sample (optional) reports’ show_report().
+
+        Parameters
+        ----------
+        show_tests : bool
+            If True, include test metrics & test plots in each report.
+        show_full : bool
+            If True, also show the full‑sample report. Default is False.
+        perf_kwargs : dict, optional
+            Passed to each report’s performance plot.
+        test_kwargs : dict, optional
+            Passed to each report’s test plot.
         """
         if not self.report_cls:
             raise ValueError("No report_cls provided at init.")
 
-        # In‑sample
-        print(f"--- {self.model_id} — In‑Sample Report ---")
-        self.report_in.show_report()
+        perf_kwargs = perf_kwargs or {}
+        test_kwargs = test_kwargs or {}
 
-        # # Full‑sample
-        # print(f"\n--- {self.model_id} — Full‑Sample Report ---")
-        # self.report_full.show_report()
+        # In‑sample report (always shown)
+        print(f"--- {self.model_id} — In‑Sample Report ---")
+        self.report_in.show_report(
+            show_tests=show_tests,
+            perf_kwargs=perf_kwargs,
+            test_kwargs=test_kwargs
+        )
+
+        # Full‑sample report (only if requested)
+        if show_full:
+            print(f"\n--- {self.model_id} — Full‑Sample Report ---")
+            self.report_full.show_report(
+                show_tests=show_tests,
+                perf_kwargs=perf_kwargs,
+                test_kwargs=test_kwargs
+            )
