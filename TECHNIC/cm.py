@@ -67,23 +67,41 @@ class CM:
         # Assign
         self.X, self.y = X, y
 
-        # Validate no NaN or infinite values
-        bad_cols = []
+        # --- Validate X for NaNs and Infs ---
+        nan_cols = []
+        inf_cols = []
+
         for col in self.X.columns:
             ser = self.X[col]
-            # check for NaNs
             if ser.isna().any():
-                bad_cols.append(col)
-                continue
-            # for numeric columns, also check for infinite values
-            if is_numeric_dtype(ser):
+                nan_cols.append(col)
+            elif is_numeric_dtype(ser):
                 if not np.isfinite(ser.dropna()).all():
-                    bad_cols.append(col)
+                    inf_cols.append(col)
 
-        if bad_cols:
-            raise ValueError(
-                f"Independent variable columns contain NaN or infinite values: {bad_cols}"
-            )
+        # --- Validate y for NaNs and Infs ---
+        nan_y = False
+        inf_y = False
+
+        if self.y.isna().any():
+            nan_y = True
+        elif is_numeric_dtype(self.y):
+            if not np.isfinite(self.y.dropna()).all():
+                inf_y = True
+
+        # --- Raise combined error if any issues found ---
+        errors = []
+        if nan_cols:
+            errors.append(f"X contains NaNs in columns: {nan_cols}")
+        if inf_cols:
+            errors.append(f"X contains infinite values in columns: {inf_cols}")
+        if nan_y:
+            errors.append("y (target) contains NaN values")
+        if inf_y:
+            errors.append("y (target) contains infinite values")
+
+        if errors:
+            raise ValueError("Data validation error – " + "; ".join(errors))
 
         # Split in‑sample / full
         cutoff = self.dm.in_sample_end
