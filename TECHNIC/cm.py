@@ -1,4 +1,6 @@
 # TECHNIC/cm.py
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 import pandas as pd
 from pandas.api.types import is_numeric_dtype
