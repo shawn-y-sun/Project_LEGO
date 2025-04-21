@@ -18,19 +18,19 @@ class CM:
 
     Parameters:
       model_id: unique identifier for this candidate model (e.g. "CM1")
+      target: name of the dependent variable (must be in internal_data)
       data_manager: DataManager instance with loaded data
       model_cls: subclass of ModelBase (e.g., OLS)
       measure_cls: subclass of MeasureBase (e.g., OLSMeasures)
       report_cls: optional subclass of ReportBase (e.g., OLSReport)
-      target: name of the dependent variable (must be in internal_data)
     """
     def __init__(
         self,
         model_id: str,
+        target: str,
         data_manager: Any,
         model_cls: Type[ModelBase],
         measure_cls: Type[MeasureBase],
-        target: str,
         report_cls: Optional[Type[ModelReportBase]] = None
     ):
         self.model_id = model_id
@@ -51,13 +51,32 @@ class CM:
 
     def build(self, specs: List[Union[str, Dict[str, TSFM]]]) -> None:
         """
-        Define drivers, split data, fit models, and build measures/reports.
+        Define drivers, clip to internal index range, validate data,
+        split data, fit models, and build measures/reports.
         """
-        # build predictors and target
-        self.X = self.dm.build_indep_vars(specs)
-        self.y = self.dm.internal_data[self.target].copy()
+        # Build predictors and target
+        X = self.dm.build_indep_vars(specs)
+        y = self.dm.internal_data[self.target].copy()
 
-        # split in-sample / full
+        # Restrict to the internal data index range
+        idx = self.dm.internal_data.index
+        X = X.reindex(idx)
+        y = y.reindex(idx)
+
+        # Assign
+        self.X, self.y = X, y
+
+        # Validate no NaN or infinite values in independent vars
+        bad_cols = [
+            col for col in self.X.columns
+            if self.X[col].isna().any() or np.isinf(self.X[col]).any()
+        ]
+        if bad_cols:
+            raise ValueError(
+                f"Independent variable columns contain NaN or infinite values: {bad_cols}"
+            )
+
+        # Split in‑sample / full
         cutoff = self.dm.in_sample_end
         if cutoff is not None:
             self.X_in = self.X.loc[:cutoff]
@@ -66,19 +85,19 @@ class CM:
             self.X_in, self.y_in = self.X, self.y
         self.X_full, self.y_full = self.X, self.y
 
-        # fit models
-        self.model_in = self.model_cls(self.X_in, self.y_in)
-        fitted_in = self.model_in.fit()
+        # Fit in‑sample and full models
+        self.model_in   = self.model_cls(self.X_in,  self.y_in)
+        fitted_in       = self.model_in.fit()
         self.model_full = self.model_cls(self.X_full, self.y_full)
-        fitted_full = self.model_full.fit()
+        fitted_full     = self.model_full.fit()
 
-        # build measures
-        self.measure_in = self.measure_cls(fitted_in, self.X_in, self.y_in)
-        self.measure_full = self.measure_cls(fitted_full, self.X_full, self.y_full)
+        # Compute measures
+        self.measure_in   = self.measure_cls(fitted_in,  self.X_in,  self.y_in)
+        self.measure_full = self.measure_cls(fitted_full,self.X_full,self.y_full)
 
-        # build reports if requested
+        # Build reports if requested
         if self.report_cls:
-            self.report_in = self.report_cls(self.measure_in)
+            self.report_in   = self.report_cls(self.measure_in)
             self.report_full = self.report_cls(self.measure_full)
 
     def summary_tables(self) -> Dict[str, pd.DataFrame]:
