@@ -82,57 +82,50 @@ class OLSReport(ModelReportBase):
 
     def show_params(self) -> pd.DataFrame:
         """
-        Return a DataFrame of model parameters including VIF.
-        Columns: Variable, Coef (4 dp), Pvalue (3 dp), Sig, VIF (2 dp)
+        Build a DataFrame of all parameters:
+           Variable | Coef  | Pvalue | Sig   | VIF   | Std
+        with rounding: Coef 3dp, Pvalue 3dp, VIF 2dp, Std 2dp.
         """
         model = self.measure.model
         X = self.measure.X
 
-        # 1) Names & coefficients
-        if hasattr(model, "coef_"):
-            names = list(X.columns)
-            coefs = np.array(model.coef_)
-        elif hasattr(model, "params"):
-            names = list(model.params.index)
-            coefs = np.array(model.params.values)
-        else:
-            raise AttributeError("Model has neither .coef_ nor .params")
+        # Must be a statsmodels RegressionResults
+        params = model.params          # pandas Series
+        pvals  = model.pvalues        # pandas Series
+        ses    = getattr(model, "bse", pd.Series(np.nan, index=params.index))
 
-        # 2) P‑values
-        if hasattr(model, "pvalues_"):
-            pvals = np.array(model.pvalues_)
-        elif hasattr(model, "pvalues"):
-            pvals = np.array(model.pvalues.values)
-        else:
-            pvals = np.full_like(coefs, np.nan, dtype=float)
+        # Assemble into DataFrame
+        df = pd.DataFrame({
+            "Coef":   params,
+            "Pvalue": pvals,
+            "Std":    ses
+        })
 
-        # 3) VIFs
-        vifs = [
+        # Compute VIF only for the features (exclude intercept if named "const")
+        features = list(X.columns)
+        vif_vals = [
             variance_inflation_factor(X.values, i)
-            for i in range(X.shape[1])
+            for i in range(len(features))
         ]
+        vif = pd.Series(vif_vals, index=features)
 
-        # 4) Build rows (no intercept row here; assume intercept not in X.columns)
-        rows = []
-        if hasattr(model, "intercept_"):
-            rows.append({
-                "Variable": "Intercept",
-                "Coef": round(float(model.intercept_), 4),
-                "Pvalue": np.nan,
-                "Sig": False,
-                "VIF": np.nan
-            })
+        # Map VIF into the params DataFrame
+        df["VIF"] = df.index.map(lambda name: vif.get(name, np.nan))
 
-        for name, coef, p, vif in zip(names, coefs, pvals, vifs):
-            rows.append({
-                "Variable": name,
-                "Coef": round(float(coef), 4),
-                "Pvalue": round(float(p), 3) if not np.isnan(p) else np.nan,
-                "Sig": bool(p <= 0.05) if not np.isnan(p) else False,
-                "VIF": round(float(vif), 2)
-            })
+        # Significance flag
+        df["Sig"] = df["Pvalue"] <= 0.05
 
-        return pd.DataFrame(rows, columns=["Variable", "Coef", "Pvalue", "Sig", "VIF"])
+        # Reset index into a column called "Variable"
+        df = df.reset_index().rename(columns={"index": "Variable"})
+
+        # Reorder & format columns
+        df = df[["Variable", "Coef", "Pvalue", "Sig", "VIF", "Std"]]
+        df["Coef"]   = df["Coef"].round(3)
+        df["Pvalue"] = df["Pvalue"].round(3)
+        df["VIF"]    = df["VIF"].round(2)
+        df["Std"]    = df["Std"].round(2)
+
+        return df
 
     def show_report(
         self,
