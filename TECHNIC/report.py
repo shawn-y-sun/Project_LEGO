@@ -64,93 +64,106 @@ class ModelReportBase(ABC):
 
 class OLSReport(ModelReportBase):
     """
-    OLS‐specific report class that uses an OLSMeasures object.
+    OLS‐specific report: implements table methods and its own show_report().
     """
 
     def __init__(self, measures: OLS_Measures):
         super().__init__(
             measure=measures,
             perf_plot_fn=ols_perf_plot,
-            test_plot_fn=ols_test_plot,
+            test_plot_fn=ols_test_plot
         )
 
     def show_perf_tbl(self) -> pd.DataFrame:
-        # Wrap the performance_measures dict into a single‐row DF
-        df = pd.DataFrame([self.measure.performance_measures])
-        return df
+        return pd.DataFrame([self.measure.performance_measures])
 
     def show_test_tbl(self) -> pd.DataFrame:
-        # Normalize the testing_measures dict into a single‐row DF
-        df = pd.DataFrame([self.measure.testing_measures])
-        return df
+        return pd.json_normalize(self.measure.testing_measures)
 
     def show_params(self) -> pd.DataFrame:
+        """
+        Return a DataFrame of model parameters including VIF.
+        Columns: Variable, Coef (4 dp), Pvalue (3 dp), Sig, VIF (2 dp)
+        """
         model = self.measure.model
         X = self.measure.X
 
-        # Collect names and coef values
+        # 1) Names & coefficients
         if hasattr(model, "coef_"):
             names = list(X.columns)
-            coefs = np.asarray(model.coef_)
+            coefs = np.array(model.coef_)
         elif hasattr(model, "params"):
             names = list(model.params.index)
-            coefs = np.asarray(model.params.values)
+            coefs = np.array(model.params.values)
         else:
             raise AttributeError("Model has neither .coef_ nor .params")
 
-        # Collect p-values
+        # 2) P‑values
         if hasattr(model, "pvalues_"):
-            pvals = np.asarray(model.pvalues_)
+            pvals = np.array(model.pvalues_)
         elif hasattr(model, "pvalues"):
-            pvals = np.asarray(model.pvalues.values)
+            pvals = np.array(model.pvalues.values)
         else:
             pvals = np.full_like(coefs, np.nan, dtype=float)
 
-        # Build parameter rows
+        # 3) VIFs
+        vifs = [
+            variance_inflation_factor(X.values, i)
+            for i in range(X.shape[1])
+        ]
+
+        # 4) Build rows (no intercept row here; assume intercept not in X.columns)
         rows = []
         if hasattr(model, "intercept_"):
             rows.append({
-                "driver": "intercept",
-                "coef": float(model.intercept_),
-                "pvalue": np.nan,
-                "significant": False
+                "Variable": "Intercept",
+                "Coef": round(float(model.intercept_), 4),
+                "Pvalue": np.nan,
+                "Sig": False,
+                "VIF": np.nan
             })
 
-        for name, coef, p in zip(names, coefs, pvals):
-            sig = bool((p <= 0.05) if not np.isnan(p) else False)
+        for name, coef, p, vif in zip(names, coefs, pvals, vifs):
             rows.append({
-                "driver": name,
-                "coef": float(coef),
-                "pvalue": float(p) if not np.isnan(p) else np.nan,
-                "significant": sig
+                "Variable": name,
+                "Coef": round(float(coef), 4),
+                "Pvalue": round(float(p), 3) if not np.isnan(p) else np.nan,
+                "Sig": bool(p <= 0.05) if not np.isnan(p) else False,
+                "VIF": round(float(vif), 2)
             })
 
-        return pd.DataFrame(rows)
+        return pd.DataFrame(rows, columns=["Variable", "Coef", "Pvalue", "Sig", "VIF"])
 
     def show_report(
         self,
+        show_tests: bool = False,
         perf_kwargs: dict = None,
         test_kwargs: dict = None
-    ):
+    ) -> None:
         """
-        Print tables, parameters, and render plots.
+        1) Print performance metrics
+        2) Print parameter table
+        3) Render performance plot
+        4) Optionally: print test metrics & render test plot
         """
         perf_kwargs = perf_kwargs or {}
         test_kwargs = test_kwargs or {}
 
-        # 1) Print performance & test tables
+        # 1) Performance metrics
         print("=== Performance Metrics ===")
         print(self.show_perf_tbl().to_string(index=False))
-        print("\n=== Test Metrics ===")
-        print(self.show_test_tbl().to_string(index=False))
 
-        # 2) Print parameter table
+        # 2) Parameter table
         print("\n=== Model Parameters ===")
         print(self.show_params().to_string(index=False))
 
-        # 3) Render plots
+        # 3) Performance plot
         fig1 = self.plot_perf(**perf_kwargs)
         plt.show()
-        fig2 = self.plot_tests(**test_kwargs)
-        plt.show()
-    
+
+        # 4) Optional testing
+        if show_tests:
+            print("\n=== Test Metrics ===")
+            print(self.show_test_tbl().to_string(index=False))
+            fig2 = self.plot_tests(**test_kwargs)
+            plt.show()
