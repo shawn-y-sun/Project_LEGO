@@ -84,32 +84,73 @@ class OLSReport(ModelReportBase):
         df = pd.DataFrame([self.measure.testing_measures])
         return df
 
+    def show_params(self) -> pd.DataFrame:
+        model = self.measure.model
+        X = self.measure.X
+
+        # Collect names and coef values
+        if hasattr(model, "coef_"):
+            names = list(X.columns)
+            coefs = np.asarray(model.coef_)
+        elif hasattr(model, "params"):
+            names = list(model.params.index)
+            coefs = np.asarray(model.params.values)
+        else:
+            raise AttributeError("Model has neither .coef_ nor .params")
+
+        # Collect p-values
+        if hasattr(model, "pvalues_"):
+            pvals = np.asarray(model.pvalues_)
+        elif hasattr(model, "pvalues"):
+            pvals = np.asarray(model.pvalues.values)
+        else:
+            pvals = np.full_like(coefs, np.nan, dtype=float)
+
+        # Build parameter rows
+        rows = []
+        if hasattr(model, "intercept_"):
+            rows.append({
+                "driver": "intercept",
+                "coef": float(model.intercept_),
+                "pvalue": np.nan,
+                "significant": False
+            })
+
+        for name, coef, p in zip(names, coefs, pvals):
+            sig = bool((p <= 0.05) if not np.isnan(p) else False)
+            rows.append({
+                "driver": name,
+                "coef": float(coef),
+                "pvalue": float(p) if not np.isnan(p) else np.nan,
+                "significant": sig
+            })
+
+        return pd.DataFrame(rows)
+
     def show_report(
         self,
         perf_kwargs: dict = None,
         test_kwargs: dict = None
     ):
         """
-        Print tables and render plots in one call.
+        Print tables, parameters, and render plots.
         """
         perf_kwargs = perf_kwargs or {}
         test_kwargs = test_kwargs or {}
 
-        # 1) Print tables
-        perf_df = self.show_perf_tbl()
-        test_df = self.show_test_tbl()
-
+        # 1) Print performance & test tables
         print("=== Performance Metrics ===")
-        print(perf_df.to_string(index=False))
+        print(self.show_perf_tbl().to_string(index=False))
         print("\n=== Test Metrics ===")
-        print(test_df.to_string(index=False))
+        print(self.show_test_tbl().to_string(index=False))
 
-        # 2) Render plots
+        # 2) Print parameter table
+        print("\n=== Model Parameters ===")
+        print(self.show_params().to_string(index=False))
+
+        # 3) Render plots
         fig1 = self.plot_perf(**perf_kwargs)
         plt.show()
         fig2 = self.plot_tests(**test_kwargs)
         plt.show()
-
-        # Return objects in case the user wants to inspect or save them
-        return perf_df, test_df, fig1, fig2
     
