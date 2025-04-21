@@ -61,8 +61,8 @@ class CM:
 
         # Restrict to the internal data index range
         idx = self.dm.internal_data.index
-        X = X.reindex(idx)
-        y = y.reindex(idx)
+        X = X.reindex(idx).astype(float)
+        y = y.reindex(idx).astype(float)
 
         # Assign
         self.X, self.y = X, y
