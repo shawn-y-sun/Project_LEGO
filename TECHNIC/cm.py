@@ -138,27 +138,18 @@ class CM:
             f"{self.model_id}_full_test_tbl":pd.json_normalize(self.measure_full.testing_measures),
         }
 
-    def show_report(self) -> Dict[str, Any]:
+    def show_report(self) -> None:
         """
-        If report_cls was provided, returns all tables and plots:
-          {
-            'in': {'perf_tbl': ..., 'test_tbl': ..., 'perf_plot': ..., 'test_plot': ...},
-            'full': {...}
-          }
+        Print in‑sample and full‑sample reports by delegating
+        to each report’s own show_report(). Does not return.
         """
         if not self.report_cls:
             raise ValueError("No report_cls provided at init.")
-        return {
-            'in': {
-                'perf_tbl':  self.report_in.show_perf_tbl(),
-                'test_tbl':  self.report_in.show_test_tbl(),
-                'perf_plot': self.report_in.plot_perf(),
-                'test_plot': self.report_in.plot_tests(),
-            },
-            'full': {
-                'perf_tbl':  self.report_full.show_perf_tbl(),
-                'test_tbl':  self.report_full.show_test_tbl(),
-                'perf_plot': self.report_full.plot_perf(),
-                'test_plot': self.report_full.plot_tests(),
-            }
-        }
+
+        # In‑sample
+        print(f"--- {self.model_id} — In‑Sample Report ---")
+        self.report_in.show_report()
+
+        # # Full‑sample
+        # print(f"\n--- {self.model_id} — Full‑Sample Report ---")
+        # self.report_full.show_report()
