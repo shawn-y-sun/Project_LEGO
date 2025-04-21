@@ -1,6 +1,7 @@
 # TECHNIC/cm.py
 
 import pandas as pd
+from pandas.api.types import is_numeric_dtype
 from typing import (
     Type, List, Dict, Any, Union
 )
@@ -66,11 +67,19 @@ class CM:
         # Assign
         self.X, self.y = X, y
 
-        # Validate no NaN or infinite values in independent vars
-        bad_cols = [
-            col for col in self.X.columns
-            if self.X[col].isna().any() or np.isinf(self.X[col]).any()
-        ]
+        # Validate no NaN or infinite values
+        bad_cols = []
+        for col in self.X.columns:
+            ser = self.X[col]
+            # check for NaNs
+            if ser.isna().any():
+                bad_cols.append(col)
+                continue
+            # for numeric columns, also check for infinite values
+            if is_numeric_dtype(ser):
+                if not np.isfinite(ser.dropna()).all():
+                    bad_cols.append(col)
+
         if bad_cols:
             raise ValueError(
                 f"Independent variable columns contain NaN or infinite values: {bad_cols}"
