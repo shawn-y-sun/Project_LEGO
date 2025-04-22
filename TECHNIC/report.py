@@ -1,16 +1,16 @@
-# TECHNIC/report.py
-from abc import ABC, abstractmethod
-from typing import Callable, Any
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+from abc import ABC, abstractmethod
+from typing import Callable, Any
 from .measure import *
-from .plot import *
+from .plot import ols_perf_plot, ols_test_plot
 
 class ModelReportBase(ABC):
     """
     Abstract base for model‐specific reports. Subclasses must implement
     methods to display in‑sample performance, out‑of‑sample performance,
-    testing measures, and parameter tables.
+    testing measures, parameter tables, and plotting.
     """
     def __init__(
         self,
@@ -42,17 +42,13 @@ class ModelReportBase(ABC):
         """Return parameter measures (coef, pvalue, sig, VIF, Std) as a DataFrame."""
         ...
 
+    @abstractmethod
     def plot_perf(self, **kwargs) -> Any:
-        """Render the in‑sample performance plot via injected function."""
-        return self.perf_plot_fn(
-            self.measure.model,
-            self.measure.X,
-            self.measure.y,
-            **kwargs
-        )
+        """Plot performance metrics; implementation must be provided by subclass."""
+        ...
 
     def plot_tests(self, **kwargs) -> Any:
-        """Render the test diagnostics plot via injected function."""
+        """Render diagnostic plot via injected test_plot_fn."""
         return self.test_plot_fn(
             self.measure.model,
             self.measure.X,
@@ -60,11 +56,10 @@ class ModelReportBase(ABC):
             **kwargs
         )
     
-
 class OLSReport(ModelReportBase):
     """
     OLS-specific report: implements display methods for in-sample performance,
-    out-of-sample performance, testing measures, and parameter tables.
+    out-of-sample performance, testing measures, parameter tables, and plotting.
     """
     def __init__(self, measures: OLS_Measures):
         super().__init__(
@@ -92,7 +87,6 @@ class OLSReport(ModelReportBase):
         df = pd.DataFrame.from_dict(pm, orient='index')
         df.index.name = 'Variable'
         df = df.reset_index()
-        # Rename to proper column headers
         df = df.rename(columns={
             'coef': 'Coef',
             'pvalue': 'Pvalue',
@@ -100,10 +94,29 @@ class OLSReport(ModelReportBase):
             'vif': 'VIF',
             'std': 'Std'
         })
-        # Standardize column order
         cols = ['Variable', 'Coef', 'Pvalue', 'Sig', 'VIF', 'Std']
         cols_existing = [c for c in cols if c in df.columns]
         return df[cols_existing]
+
+    def plot_perf(self, **kwargs) -> Any:
+        """
+        Plot actual vs. fitted (in-sample) and predicted (out-of-sample) values,
+        with absolute errors as a bar chart (alpha=0.7).
+        """
+        # Build full target series
+        y_list = [self.measure.y]
+        if getattr(self.measure, 'y_out', None) is not None:
+            y_list.append(self.measure.y_out)
+        y_full = pd.concat(y_list).sort_index()
+
+        return self.perf_plot_fn(
+            self.measure.model,
+            self.measure.X,
+            y_full,
+            X_out=getattr(self.measure, 'X_out', None),
+            y_pred_out=getattr(self.measure, 'y_pred_out', None),
+            **kwargs
+        )
 
     def show_report(
         self,
@@ -115,7 +128,7 @@ class OLSReport(ModelReportBase):
         """
         Display report sections sequentially:
           1) In-sample performance
-          2) Optional out-of-sample performance (default on if data exists)
+          2) Optional out-of-sample performance
           3) Parameter table
           4) In-sample performance plot
           5) Optional testing metrics & plot
@@ -123,26 +136,21 @@ class OLSReport(ModelReportBase):
         perf_kwargs = perf_kwargs or {}
         test_kwargs = test_kwargs or {}
 
-        # Always check if out-of-sample data exists; disable if not
-        if not self.measure.out_perf_measures:
+        if not getattr(self.measure, 'out_perf_measures', None):
             show_out = False
-        # else keep the user's preference (default True)
 
-        # 1) In-sample performance
         print('=== In-Sample Performance ===')
         print(self.show_perf_tbl().to_string(index=False))
 
-        # 2) Out-of-sample performance
         if show_out:
             print('\n=== Out-of-Sample Performance ===')
             print(self.show_out_perf_tbl().to_string(index=False))
 
-        # 3) Parameters
-        # Custom formatters: scientific notation for large/small values
+        # Parameters
         def fmt_coef(x):
             try:
                 val = float(x)
-            except Exception:
+            except:
                 return str(x)
             if abs(val) >= 1e5 or (abs(val) > 0 and abs(val) < 1e-3):
                 return f"{val:.4e}"
@@ -151,7 +159,7 @@ class OLSReport(ModelReportBase):
         def fmt_std(x):
             try:
                 val = float(x)
-            except Exception:
+            except:
                 return str(x)
             if abs(val) >= 1e5 or (abs(val) > 0 and abs(val) < 1e-3):
                 return f"{val:.4e}"
@@ -171,14 +179,12 @@ class OLSReport(ModelReportBase):
             )
         )
 
-        # 4) In-sample performance plot
-        fig1 = self.plot_perf(**perf_kwargs)
+        # Performance plot
+        fig1 = self.plot_perf(**(perf_kwargs or {}))
         plt.show()
 
-        # 5) Optional testing metrics & plot
         if show_tests:
             print('\n=== Test Metrics ===')
             print(self.show_test_tbl().to_string(index=False))
-            fig2 = self.plot_tests(**test_kwargs)
+            fig2 = self.plot_tests(**(test_kwargs or {}))
             plt.show()
-
