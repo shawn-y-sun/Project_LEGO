@@ -82,50 +82,41 @@ class OLSReport(ModelReportBase):
 
     def show_params(self) -> pd.DataFrame:
         """
-        Build a DataFrame of all parameters:
-           Variable | Coef  | Pvalue | Sig   | VIF   | Std
-        with rounding: Coef 3dp, Pvalue 3dp, VIF 2dp, Std 2dp.
+        Return exact parameter estimates, p‑values, VIFs, and standard errors.
+        No rounding is applied here.
         """
         model = self.measure.model
         X = self.measure.X
 
-        # Must be a statsmodels RegressionResults
-        params = model.params          # pandas Series
-        pvals  = model.pvalues        # pandas Series
+        # pull statsmodels objects directly
+        params = model.params           # pandas Series
+        pvals  = model.pvalues         # pandas Series
         ses    = getattr(model, "bse", pd.Series(np.nan, index=params.index))
 
-        # Assemble into DataFrame
+        # assemble base DataFrame
         df = pd.DataFrame({
-            "Coef":   params,
-            "Pvalue": pvals,
-            "Std":    ses
+            "Variable": params.index,
+            "Coef":      params.values,
+            "Pvalue":    pvals.values,
+            "Std":       ses.values
         })
 
-        # Compute VIF only for the features (exclude intercept if named "const")
-        features = list(X.columns)
+        # compute VIF for features (const/intercept excluded if index name is "const")
+        features = [v for v in params.index if v in X.columns]
         vif_vals = [
             variance_inflation_factor(X.values, i)
-            for i in range(len(features))
+            for i, v in enumerate(X.columns) if v in features
         ]
         vif = pd.Series(vif_vals, index=features)
 
-        # Map VIF into the params DataFrame
-        df["VIF"] = df.index.map(lambda name: vif.get(name, np.nan))
+        # map VIF back onto full df (others as NaN)
+        df["VIF"] = df["Variable"].map(lambda v: vif.get(v, np.nan))
 
-        # Significance flag
+        # add significance flag
         df["Sig"] = df["Pvalue"] <= 0.05
 
-        # Reset index into a column called "Variable"
-        df = df.reset_index().rename(columns={"index": "Variable"})
-
-        # Reorder & format columns
-        df = df[["Variable", "Coef", "Pvalue", "Sig", "VIF", "Std"]]
-        df["Coef"]   = df["Coef"].round(3)
-        df["Pvalue"] = df["Pvalue"].round(3)
-        df["VIF"]    = df["VIF"].round(2)
-        df["Std"]    = df["Std"].round(2)
-
-        return df
+        # ensure column order
+        return df[["Variable", "Coef", "Pvalue", "Sig", "VIF", "Std"]]
 
     def show_report(
         self,
@@ -135,26 +126,56 @@ class OLSReport(ModelReportBase):
     ) -> None:
         """
         1) Print performance metrics
-        2) Print parameter table
+        2) Print formatted parameter table
         3) Render performance plot
         4) Optionally: print test metrics & render test plot
         """
         perf_kwargs = perf_kwargs or {}
         test_kwargs = test_kwargs or {}
 
+        # Custom formatters: scientific notation for large/small values
+        def fmt_coef(x):
+            try:
+                val = float(x)
+            except Exception:
+                return str(x)
+            if abs(val) >= 1e5 or (abs(val) > 0 and abs(val) < 1e-3):
+                return f"{val:.4e}"
+            return f"{val:.4f}"
+
+        def fmt_std(x):
+            try:
+                val = float(x)
+            except Exception:
+                return str(x)
+            if abs(val) >= 1e5 or (abs(val) > 0 and abs(val) < 1e-3):
+                return f"{val:.4e}"
+            return f"{val:.4f}"
+
         # 1) Performance metrics
         print("=== Performance Metrics ===")
         print(self.show_perf_tbl().to_string(index=False))
 
-        # 2) Parameter table
+        # 2) Model parameters formatted for display
         print("\n=== Model Parameters ===")
-        print(self.show_params().to_string(index=False))
+        params_df = self.show_params()
+        print(
+            params_df.to_string(
+                index=False,
+                formatters={
+                    "Coef":   fmt_coef,
+                    "Pvalue": "{:.3f}".format,
+                    "VIF":    "{:.2f}".format,
+                    "Std":    fmt_std
+                }
+            )
+        )
 
         # 3) Performance plot
         fig1 = self.plot_perf(**perf_kwargs)
         plt.show()
 
-        # 4) Optional testing
+        # 4) Optional tests
         if show_tests:
             print("\n=== Test Metrics ===")
             print(self.show_test_tbl().to_string(index=False))

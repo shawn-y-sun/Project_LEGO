@@ -25,7 +25,7 @@ class CM:
       data_manager: DataManager instance with loaded data
       model_cls: subclass of ModelBase (e.g., OLS)
       measure_cls: subclass of MeasureBase (e.g., OLSMeasures)
-      report_cls: optional subclass of ReportBase (e.g., OLSReport)
+      report_cls: optional subclass of ModelReportBase (e.g., OLSReport)
     """
     def __init__(
         self,

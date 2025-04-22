@@ -80,7 +80,6 @@ class OLS_Measures(MeasureBase):
         }
         testing = {
             "jb_stat":   lambda m, X, y: float(jarque_bera(m.resid)[0]),
-            "jb_pvalue": lambda m, X, y: float(jarque_bera(m.resid)[1]),
-            "vif":       compute_vif
+            "jb_pvalue": lambda m, X, y: float(jarque_bera(m.resid)[1])
         }
         super().__init__(model, X, y, filtering, performance, testing)
