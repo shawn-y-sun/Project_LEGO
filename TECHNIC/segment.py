@@ -37,7 +37,7 @@ class Segment:
         self.dm          = data_manager
         self.model_cls   = model_cls
         self.measure_cls = measure_cls
-        self.self.report_cls  = report_cls  # should be a SegmentReportBase subclass
+        self.report_cls  = report_cls  # should be a SegmentReportBase subclass
         self.cms: Dict[str, CM] = {}
 
     def build_cm(
@@ -62,3 +62,42 @@ class Segment:
         cm.build(specs)
         self.cms[cm_id] = cm
         return cm
+    
+    def show_report(
+        self,
+        show_full: bool = False,
+        show_tests: bool = False,
+        **kwargs: Any
+    ) -> Dict[str, Any]:
+        """
+        Generate segment-level reports: in-sample performance, optional full-sample performance,
+        and optional diagnostic tests.
+
+        Parameters
+        ----------
+        show_full : bool
+            If True, include full-sample performance plots.
+        show_tests : bool
+            If True, include diagnostic test plots.
+        **kwargs : Any
+            Additional keyword arguments passed to plotting methods.
+
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary of figures: 'in_sample', optionally 'full_sample', 'tests'.
+        """
+        if self.report_cls is None:
+            raise ValueError("No report class specified for this segment.")
+        # Instantiate segment report
+        seg_report = self.report_cls(self.cms)
+        figs: Dict[str, Any] = {}
+        # In-sample performance
+        figs['in_sample'] = seg_report.plot_perf(**kwargs)
+        # Full-sample performance
+        if show_full:
+            figs['full_sample'] = seg_report.plot_full_perf(**kwargs)
+        # Diagnostic tests
+        if show_tests:
+            figs['tests'] = seg_report.plot_tests(**kwargs)
+        return figs
