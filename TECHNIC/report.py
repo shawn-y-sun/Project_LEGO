@@ -25,7 +25,7 @@ class ModelReportBase(ABC):
         self.test_plot_fn = test_plot_fn
 
     @abstractmethod
-    def show_perf_tbl(self) -> pd.DataFrame:
+    def show_in_perf_tbl(self) -> pd.DataFrame:
         """Return in‑sample performance measures as a DataFrame."""
         ...
 

@@ -1,6 +1,7 @@
 # TECHNIC/plot.py
 import numpy as np
 import pandas as pd
+from typing import Dict, Any
 import matplotlib.pyplot as plt
 import statsmodels.api as sm
 from statsmodels.stats.stattools import jarque_bera

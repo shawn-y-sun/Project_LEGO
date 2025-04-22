@@ -56,7 +56,6 @@ class Segment:
             data_manager=self.dm,
             model_cls=self.model_cls,
             measure_cls=self.measure_cls,
-            report_cls=self.report_cls,
             target=self.target
         )
         cm.build(specs)
