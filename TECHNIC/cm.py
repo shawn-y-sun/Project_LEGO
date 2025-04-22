@@ -91,21 +91,23 @@ class CM:
             self.X_out, self.y_out = pd.DataFrame(), pd.Series(dtype=float)
         self.X_full, self.y_full = X, y
 
-        # 4) Fit models
-        self.model_in = self.model_cls(self.X_in, self.y_in)
-        fitted_in = self.model_in.fit()
-        self.model_full = self.model_cls(self.X_full, self.y_full)
-        fitted_full = self.model_full.fit()
+                # 4) Fit models
+        # fit in-sample model and store directly
+        self.model_in = self.model_cls(self.X_in, self.y_in).fit()
+        # fit full-sample model
+        self.model_full = self.model_cls(self.X_full, self.y_full).fit()
 
-        # 5) Compute measures
-        # in_measure handles out-of-sample using provided X_out, y_out
+                # 5) Compute measures
+        # use fitted model objects directly
         self.measure_in = self.measure_cls(
-            fitted_in, self.X_in, self.y_in,
-            X_out=self.X_out, y_out=self.y_out,
-            y_pred_out=fitted_in.predict(self.X_out) if not self.X_out.empty else None
+            self.model_in, self.X_in, self.y_in,
+            X_out=self.X_out,
+            y_out=self.y_out,
+            y_pred_out=(self.model_in.predict(self.X_out) if not self.X_out.empty else None)
         )
-        # full-sample measure
-        self.measure_full = self.measure_cls(fitted_full, self.X_full, self.y_full)
+        self.measure_full = self.measure_cls(
+            self.model_full, self.X_full, self.y_full
+        )
 
         # 6) Instantiate reports
         if self.report_cls:

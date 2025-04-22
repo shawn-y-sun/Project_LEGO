@@ -1,5 +1,5 @@
 # TECHNIC/report.py
-from abc import ABC
+from abc import ABC, abstractmethod
 from typing import Callable, Any
 import pandas as pd
 import numpy as np
