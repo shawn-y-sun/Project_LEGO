@@ -1,31 +1,31 @@
 # TECHNIC/cm.py
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
 
 import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
 from pandas.api.types import is_numeric_dtype
-from typing import (
-    Type, List, Dict, Any, Union
-)
-from .internal import *
-from .mev import *
-from .model import *
-from .measure import *
-from .transform import TSFM
-from .report import *
+from typing import Type, List, Dict, Any, Union, Optional
 
+from .internal import InternalDataLoader
+from .mev import MEVLoader
+from .model import ModelBase
+from .measure import MeasureBase
+from .transform import TSFM
 
 class CM:
     """
     Candidate Model wrapper.
 
+    Manages in-sample, out-of-sample, and full-sample model fitting,
+    measures, and reporting.
+
     Parameters:
-      model_id: unique identifier for this candidate model (e.g. "CM1")
-      target: name of the dependent variable (must be in internal_data)
-      data_manager: DataManager instance with loaded data
-      model_cls: subclass of ModelBase (e.g., OLS)
-      measure_cls: subclass of MeasureBase (e.g., OLSMeasures)
-      report_cls: optional subclass of ModelReportBase (e.g., OLSReport)
+      model_id: unique identifier (e.g. "CM1")
+      target: name of dependent variable
+      data_manager: DataManager instance
+      model_cls: subclass of ModelBase
+      measure_cls: subclass of MeasureBase
+      report_cls: optional subclass of report for display
     """
     def __init__(
         self,
@@ -34,152 +34,154 @@ class CM:
         data_manager: Any,
         model_cls: Type[ModelBase],
         measure_cls: Type[MeasureBase],
-        report_cls: Optional[Type[ModelReportBase]] = None
+        report_cls: Optional[Type] = None
     ):
         self.model_id = model_id
+        self.target = target
         self.dm = data_manager
         self.model_cls = model_cls
         self.measure_cls = measure_cls
         self.report_cls = report_cls
-        self.target = target
 
         # placeholders
         self.X = self.y = None
         self.X_in = self.y_in = None
+        self.X_out = self.y_out = None
         self.X_full = self.y_full = None
-
         self.model_in = self.model_full = None
         self.measure_in = self.measure_full = None
         self.report_in = self.report_full = None
 
     def build(self, specs: List[Union[str, Dict[str, TSFM]]]) -> None:
         """
-        Define drivers, clip to internal index range, validate data,
-        split data, fit models, and build measures/reports.
+        Build features/target, validate, split, fit models,
+        compute measures using MeasureBase (handles both in- and out-of-sample),
+        and instantiate reports.
         """
-        # Build predictors and target
+        # 1) Prepare X and y
         X = self.dm.build_indep_vars(specs)
         y = self.dm.internal_data[self.target].copy()
-
-        # Restrict to the internal data index range
         idx = self.dm.internal_data.index
         X = X.reindex(idx).astype(float)
         y = y.reindex(idx).astype(float)
-
-        # Assign
         self.X, self.y = X, y
 
-        # --- Validate X for NaNs and Infs ---
-        nan_cols = []
-        inf_cols = []
-
-        for col in self.X.columns:
-            ser = self.X[col]
-            if ser.isna().any():
-                nan_cols.append(col)
-            elif is_numeric_dtype(ser):
-                if not np.isfinite(ser.dropna()).all():
-                    inf_cols.append(col)
-
-        # --- Validate y for NaNs and Infs ---
-        nan_y = False
-        inf_y = False
-
-        if self.y.isna().any():
-            nan_y = True
-        elif is_numeric_dtype(self.y):
-            if not np.isfinite(self.y.dropna()).all():
-                inf_y = True
-
-        # --- Raise combined error if any issues found ---
+        # 2) Data validation
+        nan_cols, inf_cols = [], []
+        for col in X.columns:
+            ser = X[col]
+            if ser.isna().any(): nan_cols.append(col)
+            elif is_numeric_dtype(ser) and not np.isfinite(ser.dropna()).all(): inf_cols.append(col)
+        nan_y = y.isna().any()
+        inf_y = is_numeric_dtype(y) and not np.isfinite(y.dropna()).all()
         errors = []
-        if nan_cols:
-            errors.append(f"X contains NaNs in columns: {nan_cols}")
-        if inf_cols:
-            errors.append(f"X contains infinite values in columns: {inf_cols}")
-        if nan_y:
-            errors.append("y (target) contains NaN values")
-        if inf_y:
-            errors.append("y (target) contains infinite values")
+        if nan_cols: errors.append(f"X contains NaNs: {nan_cols}")
+        if inf_cols: errors.append(f"X contains infinite: {inf_cols}")
+        if nan_y: errors.append("y contains NaNs")
+        if inf_y: errors.append("y contains infinite values")
+        if errors: raise ValueError("Data validation error – " + "; ".join(errors))
 
-        if errors:
-            raise ValueError("Data validation error – " + "; ".join(errors))
-
-        # Split in‑sample / full
+        # 3) Split data
         cutoff = self.dm.in_sample_end
         if cutoff is not None:
-            self.X_in = self.X.loc[:cutoff]
-            self.y_in = self.y.loc[:cutoff]
+            self.X_in = X.loc[:cutoff];   self.y_in = y.loc[:cutoff]
+            self.X_out = X.loc[cutoff + pd.Timedelta(days=1):]; self.y_out = y.loc[cutoff + pd.Timedelta(days=1):]
         else:
-            self.X_in, self.y_in = self.X, self.y
-        self.X_full, self.y_full = self.X, self.y
+            self.X_in, self.y_in = X, y
+            self.X_out, self.y_out = pd.DataFrame(), pd.Series(dtype=float)
+        self.X_full, self.y_full = X, y
 
-        # Fit in‑sample and full models
-        self.model_in   = self.model_cls(self.X_in,  self.y_in)
-        fitted_in       = self.model_in.fit()
+        # 4) Fit models
+        self.model_in = self.model_cls(self.X_in, self.y_in)
+        fitted_in = self.model_in.fit()
         self.model_full = self.model_cls(self.X_full, self.y_full)
-        fitted_full     = self.model_full.fit()
+        fitted_full = self.model_full.fit()
 
-        # Compute measures
-        self.measure_in   = self.measure_cls(fitted_in,  self.X_in,  self.y_in)
-        self.measure_full = self.measure_cls(fitted_full,self.X_full,self.y_full)
+        # 5) Compute measures
+        # in_measure handles out-of-sample using provided X_out, y_out
+        self.measure_in = self.measure_cls(
+            fitted_in, self.X_in, self.y_in,
+            X_out=self.X_out, y_out=self.y_out,
+            y_pred_out=fitted_in.predict(self.X_out) if not self.X_out.empty else None
+        )
+        # full-sample measure
+        self.measure_full = self.measure_cls(fitted_full, self.X_full, self.y_full)
 
-        # Build reports if requested
+        # 6) Instantiate reports
         if self.report_cls:
-            self.report_in   = self.report_cls(self.measure_in)
+            self.report_in = self.report_cls(self.measure_in)
             self.report_full = self.report_cls(self.measure_full)
 
     def summary_tables(self) -> Dict[str, pd.DataFrame]:
         """
-        Returns performance & test tables for in-sample and full-sample.
+        Return performance and test tables for in-sample, out-of-sample, and full-sample.
         """
-        return {
-            f"{self.model_id}_in_perf_tbl":  pd.DataFrame([self.measure_in.performance_measures]),
-            f"{self.model_id}_in_test_tbl":  pd.json_normalize(self.measure_in.testing_measures),
-            f"{self.model_id}_full_perf_tbl":pd.DataFrame([self.measure_full.performance_measures]),
-            f"{self.model_id}_full_test_tbl":pd.json_normalize(self.measure_full.testing_measures),
+        tables = {
+            f"{self.model_id}_in_perf":  pd.DataFrame([self.measure_in.in_perf_measures]),
+            f"{self.model_id}_in_test":  pd.json_normalize(self.measure_in.test_measures),
+            f"{self.model_id}_out_perf": pd.DataFrame([self.measure_in.out_perf_measures]) if self.measure_in.out_perf_measures else pd.DataFrame(),
+            f"{self.model_id}_full_perf": pd.DataFrame([self.measure_full.in_perf_measures]),
+            f"{self.model_id}_full_test": pd.json_normalize(self.measure_full.test_measures)
         }
+        return tables
 
     def show_report(
         self,
+        show_out: bool = True,
         show_tests: bool = False,
-        show_full: bool = False,
         perf_kwargs: dict = None,
         test_kwargs: dict = None
     ) -> None:
         """
-        Delegate to in‑sample (always) and full‑sample (optional) reports’ show_report().
-
-        Parameters
-        ----------
-        show_tests : bool
-            If True, include test metrics & test plots in each report.
-        show_full : bool
-            If True, also show the full‑sample report. Default is False.
-        perf_kwargs : dict, optional
-            Passed to each report’s performance plot.
-        test_kwargs : dict, optional
-            Passed to each report’s test plot.
+        Display sequentially:
+          1) In-sample performance
+          2) Optional out-of-sample performance
+          3) Model parameters
+          4) In-sample performance plot
+          5) Optional testing metrics & plot
         """
-        if not self.report_cls:
-            raise ValueError("No report_cls provided at init.")
-
         perf_kwargs = perf_kwargs or {}
         test_kwargs = test_kwargs or {}
 
-        # In‑sample report (always shown)
-        print(f"--- {self.model_id} — In‑Sample Report ---")
-        self.report_in.show_report(
-            show_tests=show_tests,
-            perf_kwargs=perf_kwargs,
-            test_kwargs=test_kwargs
-        )
+        # disable out-of-sample if none
+        if not self.measure_in.out_perf_measures:
+            show_out = False
 
-        # Full‑sample report (only if requested)
-        if show_full:
-            print(f"\n--- {self.model_id} — Full‑Sample Report ---")
-            self.report_full.show_report(
-                show_tests=show_tests,
-                perf_kwargs=perf_kwargs,
-                test_kwargs=test_kwargs
-            )
+        # 1) In-sample performance
+        print(f"--- {self.model_id} — In-Sample Performance ---")
+        print(self.report_in.show_perf_tbl().to_string(index=False))
+
+        # 2) Out-of-sample performance
+        if show_out:
+            print(f"\n--- {self.model_id} — Out-of-Sample Performance ---")
+            print(self.report_in.show_out_perf_tbl().to_string(index=False))
+
+        # 3) Parameters
+        def fmt_coef(x):
+            try: val = float(x)
+            except: return str(x)
+            if abs(val)>=1e5 or (0<abs(val)<1e-3): return f"{val:.4e}"
+            return f"{val:.4f}"
+        def fmt_std(x):
+            try: val = float(x)
+            except: return str(x)
+            if abs(val)>=1e5 or (0<abs(val)<1e-3): return f"{val:.4e}"
+            return f"{val:.4f}"
+
+        print(f"\n--- {self.model_id} — Model Parameters ---")
+        params_df = self.report_in.show_params_tbl()
+        print(params_df.to_string(index=False, formatters={
+            'Coef': fmt_coef, 'Pvalue': '{:.3f}'.format,
+            'VIF': '{:.2f}'.format, 'Std': fmt_std
+        }))
+
+        # 4) In-sample performance plot
+        fig1 = self.report_in.plot_perf(**perf_kwargs)
+        plt.show()
+
+        # 5) Optional tests
+        if show_tests:
+            print(f"\n--- {self.model_id} — Test Metrics ---")
+            print(self.report_in.show_test_tbl().to_string(index=False))
+            fig2 = self.report_in.plot_tests(**test_kwargs)
+            plt.show()
