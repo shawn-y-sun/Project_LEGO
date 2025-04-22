@@ -56,7 +56,7 @@ class ModelReportBase(ABC):
             **kwargs
         )
     
-class OLSReport(ModelReportBase):
+class OLS_ModelReport(ModelReportBase):
     """
     OLS-specific report: implements display methods for in-sample performance,
     out-of-sample performance, testing measures, parameter tables, and plotting.
