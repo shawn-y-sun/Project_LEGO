@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from typing import Callable, Any
 from .measure import *
 from .plot import ols_perf_plot, ols_test_plot
+from .cm import CM
 
 class ModelReportBase(ABC):
     """
@@ -56,6 +57,54 @@ class ModelReportBase(ABC):
             **kwargs
         )
     
+
+class SegmentReportBase(ABC):
+    """
+    Abstract base for segment reports. Takes a dict of CM objects (keyed by model_id) and provides
+    methods to display combined performance, out-of-sample results,
+    testing measures, parameter summaries, and plotting across segments.
+    """
+    def __init__(
+        self,
+        cms: Dict[str, CM],
+        perf_plot_fn: Callable[..., Any],
+        test_plot_fn: Callable[..., Any]
+    ):
+        self.cms = cms
+        self.perf_plot_fn = perf_plot_fn
+        self.test_plot_fn = test_plot_fn
+
+    @abstractmethod
+    def show_perf_tbl(self) -> pd.DataFrame:
+        """Return combined in‑sample performance across segments."""
+        ...
+
+    @abstractmethod
+    def show_out_perf_tbl(self) -> pd.DataFrame:
+        """Return combined out‑of‑sample performance across segments."""
+        ...
+
+    @abstractmethod
+    def show_test_tbl(self) -> pd.DataFrame:
+        """Return combined test measures across segments."""
+        ...
+
+    @abstractmethod
+    def show_params_tbl(self) -> pd.DataFrame:
+        """Return combined parameter summaries across segments."""
+        ...
+
+    @abstractmethod
+    def plot_perf(self, **kwargs) -> Any:
+        """Render performance plots for each segment."""
+        ...
+
+    @abstractmethod
+    def plot_tests(self, **kwargs) -> Any:
+        """Render test diagnostic plots for each segment."""
+        ...
+
+
 class OLS_ModelReport(ModelReportBase):
     """
     OLS-specific report: implements display methods for in-sample performance,
