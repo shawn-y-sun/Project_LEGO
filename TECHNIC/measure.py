@@ -111,12 +111,17 @@ class OLS_Measures(MeasureBase):
         }
         # in-sample performance functions
         perf_in_funcs = {
-            "r2": lambda m, X, y: float(m.rsquared),
-            "adj_r2": lambda m, X, y: float(m.rsquared_adj),
-            "rmse": lambda m, X, y: float(
-                np.sqrt(((y - m.fittedvalues) ** 2).mean())
-            )
+            "r2":    lambda m, X, y: float(m.rsquared),
+            "adj_r2":lambda m, X, y: float(m.rsquared_adj),
+            # maximum absolute error on training data
+            "me":    lambda m, X, y: float(np.max(np.abs(y - m.fittedvalues))),
+            # mean absolute error on training data
+            "mae":   lambda m, X, y: float(np.mean(np.abs(y - m.fittedvalues))),
+            "rmse":  lambda m, X, y: float(
+                          np.sqrt(((y - m.fittedvalues) ** 2).mean())
+                      )
         }
+
         # out-of-sample performance functions
         perf_out_funcs = {
             "me": lambda m, Xo, yo: float(
@@ -132,8 +137,7 @@ class OLS_Measures(MeasureBase):
         # testing: residual and assumption tests
         test_funcs = {
             "jb_stat": lambda m, X, y: float(jarque_bera(m.resid)[0]),
-            "jb_pvalue": lambda m, X, y: float(jarque_bera(m.resid)[1]),
-            "vif": compute_vif
+            "jb_pvalue": lambda m, X, y: float(jarque_bera(m.resid)[1])
         }
         super().__init__(
             model=model,
