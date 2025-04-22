@@ -8,17 +8,13 @@ from .plot import *
 
 class ModelReportBase(ABC):
     """
-    Abstract template for model‐specific report classes.
-
-    Parameters:
-      measure: MeasureBase instance (stores model, X, y and provides perf & testing measures)
-      perf_plot_fn: Callable[[Any, pd.DataFrame, pd.Series], Any]
-      test_plot_fn: Callable[[Any, pd.DataFrame, pd.Series], Any]
+    Abstract base for model‐specific reports. Subclasses must implement
+    methods to display in‑sample performance, out‑of‑sample performance,
+    testing measures, and parameter tables.
     """
-
     def __init__(
         self,
-        measure: MeasureBase,
+        measure,
         perf_plot_fn: Callable[..., Any],
         test_plot_fn: Callable[..., Any]
     ):
@@ -27,17 +23,27 @@ class ModelReportBase(ABC):
         self.test_plot_fn = test_plot_fn
 
     @abstractmethod
-    def show_perf_tbl(self):
-        """Return a DataFrame of performance measures."""
+    def show_perf_tbl(self) -> pd.DataFrame:
+        """Return in‑sample performance measures as a DataFrame."""
         ...
 
     @abstractmethod
-    def show_test_tbl(self):
-        """Return a DataFrame of diagnostic/testing measures."""
+    def show_out_perf_tbl(self) -> pd.DataFrame:
+        """Return out‑of‑sample performance measures as a DataFrame."""
+        ...
+
+    @abstractmethod
+    def show_test_tbl(self) -> pd.DataFrame:
+        """Return in‑sample testing measures as a DataFrame."""
+        ...
+
+    @abstractmethod
+    def show_params_tbl(self) -> pd.DataFrame:
+        """Return parameter measures (coef, pvalue, sig, VIF, Std) as a DataFrame."""
         ...
 
     def plot_perf(self, **kwargs) -> Any:
-        """Render performance plot via injected function."""
+        """Render the in‑sample performance plot via injected function."""
         return self.perf_plot_fn(
             self.measure.model,
             self.measure.X,
@@ -46,20 +52,13 @@ class ModelReportBase(ABC):
         )
 
     def plot_tests(self, **kwargs) -> Any:
-        """Render diagnostics plot via injected function."""
+        """Render the test diagnostics plot via injected function."""
         return self.test_plot_fn(
             self.measure.model,
             self.measure.X,
             self.measure.y,
             **kwargs
         )
-    
-    @abstractmethod
-    def show_report(self):
-        """
-        Print tables and render plots in one call.
-        """
-        ...
     
 
 class OLSReport(ModelReportBase):
