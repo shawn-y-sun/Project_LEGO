@@ -1,10 +1,11 @@
 import pandas as pd
 import numpy as np
+import warnings
 import matplotlib.pyplot as plt
 from abc import ABC, abstractmethod
 from typing import Callable, Any
 from .measure import *
-from .plot import ols_perf_plot, ols_test_plot
+from .plot import ols_model_perf_plot, ols_model_test_plot, ols_seg_perf_plot
 from .cm import CM
 
 class ModelReportBase(ABC):
@@ -113,11 +114,11 @@ class OLS_ModelReport(ModelReportBase):
     def __init__(self, measures: OLS_Measures):
         super().__init__(
             measure=measures,
-            perf_plot_fn=ols_perf_plot,
-            test_plot_fn=ols_test_plot
+            perf_plot_fn=ols_seg_perf_plot,
+            test_plot_fn=ols_model_test_plot
         )
 
-    def show_perf_tbl(self) -> pd.DataFrame:
+    def show_in_perf_tbl(self) -> pd.DataFrame:
         """In-sample performance metrics as a single-row DataFrame."""
         return pd.DataFrame([self.measure.in_perf_measures])
 
@@ -189,7 +190,7 @@ class OLS_ModelReport(ModelReportBase):
             show_out = False
 
         print('=== In-Sample Performance ===')
-        print(self.show_perf_tbl().to_string(index=False))
+        print(self.show_in_perf_tbl().to_string(index=False))
 
         if show_out:
             print('\n=== Out-of-Sample Performance ===')
@@ -237,3 +238,102 @@ class OLS_ModelReport(ModelReportBase):
             print(self.show_test_tbl().to_string(index=False))
             fig2 = self.plot_tests(**(test_kwargs or {}))
             plt.show()
+
+
+
+class OLS_SegmentReport:
+    """
+    Candidate-model-level reporting for OLS models. Stores per-CM measures
+    (measure_in and measure_full) from CM instances. Excludes CMs with missing measures.
+    Uses injected plotting functions for segment-level performance and diagnostics.
+    """
+    def __init__(self,
+        cms: Dict[str, CM],
+        seg_perf_plot_fn: Callable[..., Any],
+        seg_test_plot_fn: Callable[..., Any]
+    ):
+        """
+        cms: dict mapping cm_id to CM objects.
+        seg_perf_plot_fn: function to plot per-CM performance.
+        seg_test_plot_fn: function to plot per-CM diagnostic tests.
+
+        Only CMs with 'measure_in' or 'measure_full' attributes set are stored.
+        Raises warnings for any cm_ids missing one of the measures.
+        """
+        missing_in, missing_full = [], []
+        self.measures_in: Dict[str, Any] = {}
+        self.measures_full: Dict[str, Any] = {}
+        self.seg_perf_plot_fn = seg_perf_plot_fn
+        self.seg_test_plot_fn = seg_test_plot_fn
+
+        for cm_id, cm in cms.items():
+            if hasattr(cm, 'measure_in') and cm.measure_in is not None:
+                self.measures_in[cm_id] = cm.measure_in
+            else:
+                missing_in.append(cm_id)
+
+            if hasattr(cm, 'measure_full') and cm.measure_full is not None:
+                self.measures_full[cm_id] = cm.measure_full
+            else:
+                missing_full.append(cm_id)
+
+        if missing_in:
+            warnings.warn(
+                f"CMs missing 'measure_in' and excluded: {missing_in}",
+                UserWarning
+            )
+        if missing_full:
+            warnings.warn(
+                f"CMs missing 'measure_full' and excluded: {missing_full}",
+                UserWarning
+            )
+
+    def show_in_perf_tbl(self) -> pd.DataFrame:
+        """Combine in-sample performance measures across candidate models."""
+        rows = []
+        for cm_id, m in self.measures_in.items():
+            row = m.in_perf_measures.copy()
+            row['cm_id'] = cm_id
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    def show_out_perf_tbl(self) -> pd.DataFrame:
+        """Combine out-of-sample performance measures across candidate models."""
+        rows = []
+        for cm_id, m in self.measures_full.items():
+            row = m.out_perf_measures.copy()
+            row['cm_id'] = cm_id
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    def show_test_tbl(self) -> pd.DataFrame:
+        """Combine in-sample test diagnostics across candidate models."""
+        rows = []
+        for cm_id, m in self.measures_in.items():
+            row = m.test_measures.copy()
+            row['cm_id'] = cm_id
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    def show_params_tbl(self) -> pd.DataFrame:
+        """Combine in-sample parameter summaries across candidate models."""
+        rows = []
+        for cm_id, m in self.measures_in.items():
+            for var, stats in m.param_measures.items():
+                stats_row = stats.copy()
+                stats_row['Variable'] = var
+                stats_row['cm_id'] = cm_id
+                rows.append(stats_row)
+        return pd.DataFrame(rows)
+
+    def plot_perf(self, **kwargs) -> Any:
+        """Plot in-sample performance comparison across candidate models."""
+        return self.seg_perf_plot_fn(self.measures_in, full=False, **kwargs)
+
+    def plot_full_perf(self, **kwargs) -> Any:
+        """Plot full-sample performance comparison across candidate models."""
+        return self.seg_perf_plot_fn(self.measures_full, full=True, **kwargs)
+    
+    def plot_tests(self, **kwargs) -> Any:
+        """Plot in-sample diagnostic tests comparison across candidate models."""
+        return self.seg_test_plot_fn(self.measures_in, **kwargs)

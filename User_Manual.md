@@ -32,7 +32,7 @@ Project_LEGO/
 │  ├─ cm.py           # Candidate‐Model orchestration (CM)
 │  ├─ datamgr.py      # DataManager: building X/y and transforms
 │  ├─ internal.py     # InternalDataLoader: standardize index, produce dummies
-│  ├─ mev.py          # MEVLoader: loading MEV (Mean Excess Variation) data
+│  ├─ mev.py          # MEVLoader: loading MEV (Macro Economic Variable) data
 │  ├─ measure.py      # MeasureBase & OLS_Measures: metrics & tests
 │  ├─ model.py        # ModelBase & OLS: regression templates
 │  ├─ plot.py         # ols_perf_plot & ols_test_plot

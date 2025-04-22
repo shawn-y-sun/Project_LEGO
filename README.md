@@ -58,7 +58,7 @@ Project_LEGO/
 │  ├─ datamgr.py        # DataManager: build indep/dep variables, transforms
 │  ├─ internal.py       # InternalDataLoader: standardize & dummy vars
 │  ├─ measure.py        # MeasureBase & OLS_Measures: performance & tests
-│  ├─ mev.py            # MEVLoader: load mean excess variation data
+│  ├─ mev.py            # MEVLoader: load Macro Economic Variable data
 │  ├─ model.py          # ModelBase & OLS: regression templates
 │  ├─ plot.py           # ols_perf_plot & ols_test_plot visualizations
 │  ├─ report.py         # ModelReportBase & OLSReport: tables & plots
