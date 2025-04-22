@@ -7,3 +7,4 @@ from .transform import *
 from .cm import *
 from .plot import*
 from .report import *
+from .segment import *
