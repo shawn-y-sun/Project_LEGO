@@ -63,9 +63,9 @@ class ModelReportBase(ABC):
 
 class OLSReport(ModelReportBase):
     """
-    OLS‐specific report: implements table methods and its own show_report().
+    OLS-specific report: implements display methods for in-sample performance,
+    out-of-sample performance, testing measures, and parameter tables.
     """
-
     def __init__(self, measures: OLS_Measures):
         super().__init__(
             measure=measures,
@@ -74,64 +74,70 @@ class OLSReport(ModelReportBase):
         )
 
     def show_perf_tbl(self) -> pd.DataFrame:
-        return pd.DataFrame([self.measure.performance_measures])
+        """In-sample performance metrics as a single-row DataFrame."""
+        return pd.DataFrame([self.measure.in_perf_measures])
+
+    def show_out_perf_tbl(self) -> pd.DataFrame:
+        """Out-of-sample performance metrics as a single-row DataFrame (empty if none)."""
+        out = self.measure.out_perf_measures
+        return pd.DataFrame([out]) if out else pd.DataFrame()
 
     def show_test_tbl(self) -> pd.DataFrame:
-        return pd.json_normalize(self.measure.testing_measures)
+        """In-sample testing measures as a single-row DataFrame."""
+        return pd.json_normalize(self.measure.test_measures)
 
-    def show_params(self) -> pd.DataFrame:
-        """
-        Return exact parameter estimates, p‑values, VIFs, and standard errors.
-        No rounding is applied here.
-        """
-        model = self.measure.model
-        X = self.measure.X
-
-        # pull statsmodels objects directly
-        params = model.params           # pandas Series
-        pvals  = model.pvalues         # pandas Series
-        ses    = getattr(model, "bse", pd.Series(np.nan, index=params.index))
-
-        # assemble base DataFrame
-        df = pd.DataFrame({
-            "Variable": params.index,
-            "Coef":      params.values,
-            "Pvalue":    pvals.values,
-            "Std":       ses.values
+    def show_params_tbl(self) -> pd.DataFrame:
+        """Parameter table with columns: Variable, Coef, Pvalue, Sig, VIF, Std."""
+        pm = self.measure.param_measures
+        df = pd.DataFrame.from_dict(pm, orient='index')
+        df.index.name = 'Variable'
+        df = df.reset_index()
+        # Rename to proper column headers
+        df = df.rename(columns={
+            'coef': 'Coef',
+            'pvalue': 'Pvalue',
+            'sig': 'Sig',
+            'vif': 'VIF',
+            'std': 'Std'
         })
-
-        # compute VIF for features (const/intercept excluded if index name is "const")
-        features = [v for v in params.index if v in X.columns]
-        vif_vals = [
-            variance_inflation_factor(X.values, i)
-            for i, v in enumerate(X.columns) if v in features
-        ]
-        vif = pd.Series(vif_vals, index=features)
-
-        # map VIF back onto full df (others as NaN)
-        df["VIF"] = df["Variable"].map(lambda v: vif.get(v, np.nan))
-
-        # add significance flag
-        df["Sig"] = df["Pvalue"] <= 0.05
-
-        # ensure column order
-        return df[["Variable", "Coef", "Pvalue", "Sig", "VIF", "Std"]]
+        # Standardize column order
+        cols = ['Variable', 'Coef', 'Pvalue', 'Sig', 'VIF', 'Std']
+        cols_existing = [c for c in cols if c in df.columns]
+        return df[cols_existing]
 
     def show_report(
         self,
+        show_out: bool = True,
         show_tests: bool = False,
         perf_kwargs: dict = None,
         test_kwargs: dict = None
     ) -> None:
         """
-        1) Print performance metrics
-        2) Print formatted parameter table
-        3) Render performance plot
-        4) Optionally: print test metrics & render test plot
+        Display report sections sequentially:
+          1) In-sample performance
+          2) Optional out-of-sample performance (default on if data exists)
+          3) Parameter table
+          4) In-sample performance plot
+          5) Optional testing metrics & plot
         """
         perf_kwargs = perf_kwargs or {}
         test_kwargs = test_kwargs or {}
 
+        # Always check if out-of-sample data exists; disable if not
+        if not self.measure.out_perf_measures:
+            show_out = False
+        # else keep the user's preference (default True)
+
+        # 1) In-sample performance
+        print('=== In-Sample Performance ===')
+        print(self.show_perf_tbl().to_string(index=False))
+
+        # 2) Out-of-sample performance
+        if show_out:
+            print('\n=== Out-of-Sample Performance ===')
+            print(self.show_out_perf_tbl().to_string(index=False))
+
+        # 3) Parameters
         # Custom formatters: scientific notation for large/small values
         def fmt_coef(x):
             try:
@@ -151,32 +157,28 @@ class OLSReport(ModelReportBase):
                 return f"{val:.4e}"
             return f"{val:.4f}"
 
-        # 1) Performance metrics
-        print("=== Performance Metrics ===")
-        print(self.show_perf_tbl().to_string(index=False))
-
-        # 2) Model parameters formatted for display
         print("\n=== Model Parameters ===")
-        params_df = self.show_params()
+        params_df = self.show_params_tbl()
         print(
             params_df.to_string(
                 index=False,
                 formatters={
-                    "Coef":   fmt_coef,
-                    "Pvalue": "{:.3f}".format,
-                    "VIF":    "{:.2f}".format,
-                    "Std":    fmt_std
+                    'Coef':   fmt_coef,
+                    'Pvalue': '{:.3f}'.format,
+                    'VIF':    '{:.2f}'.format,
+                    'Std':    fmt_std
                 }
             )
         )
 
-        # 3) Performance plot
+        # 4) In-sample performance plot
         fig1 = self.plot_perf(**perf_kwargs)
         plt.show()
 
-        # 4) Optional tests
+        # 5) Optional testing metrics & plot
         if show_tests:
-            print("\n=== Test Metrics ===")
+            print('\n=== Test Metrics ===')
             print(self.show_test_tbl().to_string(index=False))
             fig2 = self.plot_tests(**test_kwargs)
             plt.show()
+
