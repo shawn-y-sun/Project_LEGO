@@ -114,7 +114,7 @@ class OLS_ModelReport(ModelReportBase):
     def __init__(self, measures: OLS_Measures):
         super().__init__(
             measure=measures,
-            perf_plot_fn=ols_seg_perf_plot,
+            perf_plot_fn=ols_model_perf_plot,
             test_plot_fn=ols_model_test_plot
         )
 
@@ -249,8 +249,8 @@ class OLS_SegmentReport:
     """
     def __init__(self,
         cms: Dict[str, CM],
-        seg_perf_plot_fn: Callable[..., Any],
-        seg_test_plot_fn: Callable[..., Any]
+        seg_perf_plot_fn=ols_seg_perf_plot,
+        seg_test_plot_fn=ols_model_test_plot
     ):
         """
         cms: dict mapping cm_id to CM objects.
