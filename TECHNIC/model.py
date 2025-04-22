@@ -32,27 +32,53 @@ class ModelBase(ABC):
 class OLS(ModelBase):
     """
     Ordinary Least Squares regression wrapper that stores
-    coefficients, p-values, and VIFs for each predictor.
+    model summary statistics for each predictor.
     """
+    def __init__(self, X: pd.DataFrame, y: pd.Series):
+        super().__init__(X, y)
+        # placeholders for results
+        self.results = None
+        self.params = None
+        self.pvalues = None
+        self.rsquared = None
+        self.rsquared_adj = None
+        self.fittedvalues = None
+        self.resid = None
+        self.bse = None
+        self.vif = None
 
     def fit(self):
+        """
+        Fit OLS using statsmodels, extract statistics, and return self.
+        """
+        # add constant
         Xc = sm.add_constant(self.X)
-        model = sm.OLS(self.y, Xc).fit()
-        self.coefs_   = model.params
-        self.pvalues_ = model.pvalues
-
-        # compute VIFs (including constant if present)
+        # fit model
+        result = sm.OLS(self.y, Xc).fit()
+        # store results
+        self.results = result
+        self.params = result.params
+        self.pvalues = result.pvalues
+        self.rsquared = result.rsquared
+        self.rsquared_adj = result.rsquared_adj
+        self.fittedvalues = result.fittedvalues
+        self.resid = result.resid
+        self.bse = result.bse
+        # compute VIFs including constant
         vif_dict = {
             col: variance_inflation_factor(Xc.values, i)
             for i, col in enumerate(Xc.columns)
         }
-        self.vifs_ = pd.Series(vif_dict)
-
+        self.vif = pd.Series(vif_dict)
         self.fitted = True
-        return model
+        return self
 
     def predict(self, X_new: pd.DataFrame) -> pd.Series:
+        """
+        Predict using the fitted statsmodels results.
+        """
         if not self.fitted:
             raise ValueError("Model has not been fitted yet.")
-        Xc_new = sm.add_constant(X_new)
-        return Xc_new.dot(self.coefs_)
+        # ensure constant is added
+        Xc_new = sm.add_constant(X_new, has_constant='add')
+        return self.results.predict(Xc_new)
