@@ -105,5 +105,5 @@ Please adhere to the existing code style and add documentation for new functiona
 
 ## 📄 License
 
-MIT License © Shawn Y. Sun
+MIT License © Shawn Y. Sun, Kexin Zhu
 
