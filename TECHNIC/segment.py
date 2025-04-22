@@ -9,7 +9,7 @@ from .cm import CM
 from .model import ModelBase
 from .measure import MeasureBase
 from .transform import TSFM
-from .report import ModelReportBase
+from .report import ModelReportBase, SegmentReportBase
 
 class Segment:
     """
@@ -30,14 +30,14 @@ class Segment:
         data_manager: DataManager,
         model_cls: Type[ModelBase],
         measure_cls: Type[MeasureBase],
-        report_cls: Optional[Type[ModelReportBase]] = None,
+        report_cls: Optional[Type[SegmentReportBase]] = None,
     ):
         self.segment_id  = segment_id
         self.target      = target
         self.dm          = data_manager
         self.model_cls   = model_cls
         self.measure_cls = measure_cls
-        self.report_cls  = report_cls
+        self.self.report_cls  = report_cls  # should be a SegmentReportBase subclass
         self.cms: Dict[str, CM] = {}
 
     def build_cm(
@@ -62,33 +62,3 @@ class Segment:
         cm.build(specs)
         self.cms[cm_id] = cm
         return cm
-
-    def compare_perf(self, sample: str = 'in') -> pd.DataFrame:
-        """
-        Return a DataFrame comparing perf metrics of all CMs.
-
-        - sample: 'in' or 'full'
-        """
-        records = []
-        for cm_id, cm in self.cms.items():
-            perf = (cm.measure_in.performance_measures if sample == 'in'
-                    else cm.measure_full.performance_measures)
-            perf['cm_id'] = cm_id
-            records.append(perf)
-        df = pd.DataFrame(records).set_index('cm_id')
-        return df
-
-    def compare_tests(self, sample: str = 'in') -> pd.DataFrame:
-        """
-        Return a DataFrame comparing testing metrics of all CMs.
-
-        - sample: 'in' or 'full'
-        """
-        records = []
-        for cm_id, cm in self.cms.items():
-            tests = (cm.measure_in.testing_measures if sample == 'in'
-                     else cm.measure_full.testing_measures)
-            tests['cm_id'] = cm_id
-            records.append(tests)
-        df = pd.json_normalize(records).set_index('cm_id')
-        return df
