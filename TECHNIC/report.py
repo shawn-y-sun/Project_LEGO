@@ -289,22 +289,30 @@ class OLS_SegmentReport:
             )
 
     def show_in_perf_tbl(self) -> pd.DataFrame:
-        """Combine in-sample performance measures across candidate models."""
+        """Combined in-sample performance across CMs."""
         rows = []
         for cm_id, m in self.measures_in.items():
-            row = m.in_perf_measures.copy()
-            row['cm_id'] = cm_id
-            rows.append(row)
-        return pd.DataFrame(rows)
+            r = m.in_perf_measures.copy()
+            r['cm_id'] = cm_id
+            rows.append(r)
+        df = pd.DataFrame(rows)
+        if 'cm_id' in df.columns:
+            cols = ['cm_id'] + [c for c in df.columns if c != 'cm_id']
+            df = df[cols]
+        return df
 
     def show_out_perf_tbl(self) -> pd.DataFrame:
-        """Combine out-of-sample performance measures across candidate models."""
+        """Combined out-of-sample performance across CMs."""
         rows = []
         for cm_id, m in self.measures_full.items():
-            row = m.out_perf_measures.copy()
-            row['cm_id'] = cm_id
-            rows.append(row)
-        return pd.DataFrame(rows)
+            r = m.out_perf_measures.copy()
+            r['cm_id'] = cm_id
+            rows.append(r)
+        df = pd.DataFrame(rows)
+        if 'cm_id' in df.columns:
+            cols = ['cm_id'] + [c for c in df.columns if c != 'cm_id']
+            df = df[cols]
+        return df
 
     def show_test_tbl(self) -> pd.DataFrame:
         """Combine in-sample test diagnostics across candidate models."""
@@ -316,15 +324,20 @@ class OLS_SegmentReport:
         return pd.DataFrame(rows)
 
     def show_params_tbl(self) -> pd.DataFrame:
-        """Combine in-sample parameter summaries across candidate models."""
+        """Combined in-sample parameter summaries across CMs."""
         rows = []
         for cm_id, m in self.measures_in.items():
             for var, stats in m.param_measures.items():
-                stats_row = stats.copy()
-                stats_row['Variable'] = var
-                stats_row['cm_id'] = cm_id
-                rows.append(stats_row)
-        return pd.DataFrame(rows)
+                sr = stats.copy()
+                sr['Variable'] = var
+                sr['cm_id'] = cm_id
+                rows.append(sr)
+        df = pd.DataFrame(rows)
+        # Reorder columns: cm_id first, Variable second
+        if 'cm_id' in df.columns and 'Variable' in df.columns:
+            cols = ['cm_id', 'Variable'] + [c for c in df.columns if c not in ['cm_id', 'Variable']]
+            df = df[cols]
+        return df
 
     def plot_perf(self, **kwargs) -> Any:
         """Plot in-sample performance comparison across candidate models."""
