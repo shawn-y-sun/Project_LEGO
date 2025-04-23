@@ -67,7 +67,7 @@ Project_LEGO/
 │  ├─ cm.py                 # Candidate-Model orchestration (CM)
 │  ├─ datamgr.py            # DataManager: load & prepare features/target
 │  ├─ internal.py           # InternalDataLoader: raw data prep & dummies
-│  ├─ mev.py                # MEVLoader: load mean excess variation data
+│  ├─ mev.py                # MEVLoader: load Macro Economic Variable data
 │  ├─ measure.py            # MeasureBase & OLS_Measures: performance & tests
 │  ├─ model.py              # ModelBase & OLS: regression templates
 │  ├─ plot.py               # ols_model_perf_plot, ols_model_test_plot, ols_seg_perf_plot
@@ -115,6 +115,12 @@ Project_LEGO/
 ### `template.py`  
 - **`ExportTemplateBase`**: abstract driver for Excel-based workflows.  
 - **`PPNR_OLS_ExportTemplate`**: sample implementation mapping CM outputs into a PPNR OLS workbook.  
+
+---
+
+## 🤝 Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines, testing, and pull request process.
 
 ---
 
