@@ -1,6 +1,6 @@
 # Project LEGO
 
-**Project LEGO** is a modular Python package for building, evaluating, and reporting on linear regression (OLS) models within a standardized pipeline. It streamlines data loading, feature transformation, model fitting, performance measurement, diagnostic testing, and report generation.
+**Project LEGO** is a modular Python package for building, evaluating, reporting, and exporting OLS-based candidate models via a standardized pipeline.
 
 ---
 
@@ -14,36 +14,46 @@ cd Project_LEGO
 # (Optional) Create a virtual environment
 python -m venv venv
 source venv/bin/activate  # Linux/Mac
-venv\Scripts\activate   # Windows
+venv\\Scripts\\activate   # Windows
 
 # Install dependencies
 pip install -r requirements.txt
-```
+``` 
 
-> **Note:** No external dependencies beyond standard data science stack (`pandas`, `numpy`, `statsmodels`, `matplotlib`).
+> **Note:** Core dependencies: `pandas`, `numpy`, `statsmodels`, `matplotlib`, `openpyxl`
 
 ---
 
 ## 🚀 Quickstart
 
 ```python
-from TECHNIC.cm import CM
+from TECHNIC.segment import Segment
+from TECHNIC.datamgr import DataManager
 from TECHNIC.model import OLS
 from TECHNIC.measure import OLS_Measures
-from TECHNIC.report import OLSReport
+from TECHNIC.export_template import PPNR_OLS_ExportTemplate
 
-# 1. Load & prepare data
-dm = CM.data_manager  # assume DataManager instance handles loading
-X, y = dm.load_features(), dm.load_target()
+# 1. Prepare DataManager
+dm = DataManager(data_frame)
 
-# 2. Initialize and build candidate-model (in/out split, fit)
-cm = CM(model_id='my_model', model=OLS(target='y'), target='y')
-cm.build(X, y, in_sample_end='2020-12-31')
+# 2. Create Segment and build CMs
+seg = Segment(
+    segment_id='SegmentA',
+    target='y',
+    data_manager=dm,
+    model_cls=OLS,
+    measure_cls=OLS_Measures,
+    report_cls=None  # use export_template for output
+)
+cm = seg.build_cm('Model1', specs=['x1', 'x2'])
+# ... build other CMs
 
-# 3. Generate performance & diagnostics
-measures = OLS_Measures(cm.model_in, cm.X_in, cm.y_in, cm.X_out, cm.y_out, cm.y_pred_out)
-report = OLSReport(measures)
-report.show_report(show_out=True, show_tests=True)
+# 3. Export to Excel using PPNR OLS template
+tmpl = PPNR_OLS_ExportTemplate(
+    template_files=['templates/PPNR_OLS_Template.xlsx'],
+    cms=seg.cms
+)
+tmpl.export({'templates/PPNR_OLS_Template.xlsx': 'outputs/SegmentA_Report.xlsx'})
 ```  
 
 ---
@@ -53,19 +63,23 @@ report.show_report(show_out=True, show_tests=True)
 ```
 Project_LEGO/
 ├─ TECHNIC/
-│  ├─ __init__.py       # Package entrypoint
-│  ├─ cm.py             # Candidate‐Model orchestration (CM)
-│  ├─ datamgr.py        # DataManager: build indep/dep variables, transforms
-│  ├─ internal.py       # InternalDataLoader: standardize & dummy vars
-│  ├─ measure.py        # MeasureBase & OLS_Measures: performance & tests
-│  ├─ mev.py            # MEVLoader: load Macro Economic Variable data
-│  ├─ model.py          # ModelBase & OLS: regression templates
-│  ├─ plot.py           # ols_perf_plot & ols_test_plot visualizations
-│  ├─ report.py         # ModelReportBase & OLSReport: tables & plots
-│  ├─ segment.py        # (Optional) segmentation utilities
-│  └─ transform.py      # custom TSFM wrapper and transform functions
-├─ requirements.txt     # Python dependencies
-└─ README.md            # Project overview and usage (this file)
+│  ├─ __init__.py           # Package entrypoint
+│  ├─ cm.py                 # Candidate-Model orchestration (CM)
+│  ├─ datamgr.py            # DataManager: load & prepare features/target
+│  ├─ internal.py           # InternalDataLoader: raw data prep & dummies
+│  ├─ mev.py                # MEVLoader: load mean excess variation data
+│  ├─ measure.py            # MeasureBase & OLS_Measures: performance & tests
+│  ├─ model.py              # ModelBase & OLS: regression templates
+│  ├─ plot.py               # ols_model_perf_plot, ols_model_test_plot, ols_seg_perf_plot
+│  ├─ report.py             # ModelReportBase & OLSReport
+│  ├─ segment.py            # Segment orchestration of CMs
+│  ├─ transform.py          # TSFM wrapper for feature transforms
+│  ├─ writer.py             # Val, ValueWriter, SheetWriter, TemplateLoader, WorkbookWriter, TemplateWriter
+│  ├─ template.py           # ExportTemplateBase & PPNR_OLS_ExportTemplate
+│  └─ segment.py            # Optional: specialized exporters (if any)
+├─ templates/               # Excel template files
+├─ requirements.txt
+└─ README.md                # Project overview and usage (this file)
 ```
 
 ---
@@ -73,37 +87,37 @@ Project_LEGO/
 ## 🔍 Module Highlights
 
 ### `cm.py`  
-- **`CM`** class coordinates data loading, splitting (in vs out of sample), model fitting, and result storage.
+- **`CM`**: orchestrates building, fitting, measuring, and reporting of single candidate-models.  
 
-### `model.py`  
-- **`ModelBase`** (abstract) and **`OLS`** (concrete) templates for regression models.  
-- `.fit()` updates internal attributes and returns `self`; `.predict()` wraps `statsmodels` predictions.
+### `datamgr.py`  
+- **`DataManager`**: loads raw data, builds feature (`X`) and target (`y`) DataFrames.  
 
 ### `measure.py`  
-- **`MeasureBase`** collects performance, filtering, and testing functions.  
-- **`OLS_Measures`** implements R², MAE, RMSE, Jarque–Bera tests, and VIF calculations.
+- **`MeasureBase`**: abstract base for performance and diagnostic measures.  
+- **`OLS_Measures`**: computes R², MAE, RMSE, Jarque–Bera, VIF, etc.  
 
 ### `plot.py`  
-- **`ols_perf_plot`**: actual vs. fitted/predicted lines + absolute-error bars.  
-- **`ols_test_plot`**: residuals vs. fitted scatter.
+- **`ols_model_perf_plot`**, **`ols_model_test_plot`**, **`ols_seg_perf_plot`**: visual diagnostics for single-model and multi-model comparisons.  
 
 ### `report.py`  
-- **`ModelReportBase`** (abstract) defines table/diagnostic plotting methods.  
-- **`OLSReport`** renders performance tables, parameter summaries, and calls plotting functions.
+- **`ModelReportBase`** & **`OLSReport`**: text and table reporting for in- and out-of-sample performance, parameters, and tests.  
+- **`OLS_SegmentReport`**: aggregating multiple CMs across a segment.  
 
----
+### `segment.py`  
+- **`Segment`**: manage a group of candidate models (`CM`), build them, and integrate with export/report templates.  
 
-## 🤝 Contributing
+### `transform.py`  
+- **`TSFM`**: sequential feature-transform wrapper.  
 
-1. **Fork** the repo and create a feature branch.  
-2. **Implement** your changes, with unit tests if applicable.  
-3. **Open a Pull Request** against `main`, describing your additions.
+### `writer.py`  
+- **`Val`**, **`ValueWriter`**, **`SheetWriter`**, **`TemplateLoader`**, **`WorkbookWriter`**, **`TemplateWriter`**: core utilities for exporting arbitrary Python data (scalars, lists, Series, DataFrames, dicts) into Excel templates.  
 
-Please adhere to the existing code style and add documentation for new functionality.
+### `template.py`  
+- **`ExportTemplateBase`**: abstract driver for Excel-based workflows.  
+- **`PPNR_OLS_ExportTemplate`**: sample implementation mapping CM outputs into a PPNR OLS workbook.  
 
 ---
 
 ## 📄 License
 
 MIT License © Shawn Y. Sun, Kexin Zhu
-
