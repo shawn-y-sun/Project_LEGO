@@ -66,37 +66,35 @@ class Segment:
         self,
         show_full: bool = False,
         show_tests: bool = False,
-        **kwargs: Any
-    ) -> Dict[str, Any]:
+        perf_kwargs: Dict[str, Any] = None,
+        test_kwargs: Dict[str, Any] = None
+    ) -> None:
         """
-        Generate segment-level reports: in-sample performance, optional full-sample performance,
-        and optional diagnostic tests.
+        Delegate to the configured SegmentReportBase subclass to display
+        segment-level performance and tests, mirroring CM.show_report.
 
         Parameters
         ----------
         show_full : bool
-            If True, include full-sample performance plots.
+            If True, includes full-sample performance and out-of-sample tables/plots.
         show_tests : bool
-            If True, include diagnostic test plots.
-        **kwargs : Any
-            Additional keyword arguments passed to plotting methods.
-
-        Returns
-        -------
-        Dict[str, Any]
-            Dictionary of figures: 'in_sample', optionally 'full_sample', 'tests'.
+            If True, includes diagnostic test tables/plots.
+        perf_kwargs : dict, optional
+            Keyword args for performance plots/tables.
+        test_kwargs : dict, optional
+            Keyword args for diagnostic test plots/tables.
         """
         if self.report_cls is None:
             raise ValueError("No report class specified for this segment.")
-        # Instantiate segment report
+        perf_kwargs = perf_kwargs or {}
+        test_kwargs = test_kwargs or {}
+
+        # Instantiate the segment report
         seg_report = self.report_cls(self.cms)
-        figs: Dict[str, Any] = {}
-        # In-sample performance
-        figs['in_sample'] = seg_report.plot_perf(**kwargs)
-        # Full-sample performance
-        if show_full:
-            figs['full_sample'] = seg_report.plot_full_perf(**kwargs)
-        # Diagnostic tests
-        if show_tests:
-            figs['tests'] = seg_report.plot_tests(**kwargs)
-        return figs
+        # Delegate to its show_report
+        seg_report.show_report(
+            show_out=show_full,
+            show_tests=show_tests,
+            perf_kwargs=perf_kwargs,
+            test_kwargs=test_kwargs
+        )
