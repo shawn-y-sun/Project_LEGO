@@ -1,6 +1,9 @@
 # TECHNIC/writer.py
-
-from openpyxl.utils import coordinate_from_string, column_index_from_string, get_column_letter
+from openpyxl.utils.cell import (
+    coordinate_from_string,
+    column_index_from_string,
+)
+from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl import load_workbook, Workbook
 import pandas as pd
