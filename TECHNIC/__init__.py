@@ -8,3 +8,5 @@ from .cm import *
 from .plot import*
 from .report import *
 from .segment import *
+from .writer import *
+from .template import *
