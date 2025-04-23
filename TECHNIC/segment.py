@@ -1,5 +1,6 @@
 # TECHNIC/segment.py
-
+import warnings
+warnings.simplefilter(action="ignore", category=FutureWarning)
 import pandas as pd
 from typing import (
     Type, Dict, List, Union, Optional, Any
