@@ -79,7 +79,7 @@ def ols_model_perf_plot(model, X, y, X_out=None, y_pred_out=None, figsize=(8,4),
         width = (abs_err.index[1] - abs_err.index[0]) * 0.8
     else:
         width = 0.8
-    ax2.bar(abs_err.index, abs_err, width=width, alpha=0.7, color="grey", label="|Error|")
+    ax2.bar(abs_err.index, abs_err, width=width, alpha=0.2, color="grey", label="|Error|")
     ax2.set_ylabel("Absolute Error")
     ax2.legend(loc="upper right")
 
