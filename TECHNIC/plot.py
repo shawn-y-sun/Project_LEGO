@@ -59,18 +59,18 @@ def ols_model_perf_plot(model, X, y, X_out=None, y_pred_out=None, figsize=(8,4),
     # Plotting
     fig, ax1 = plt.subplots(figsize=figsize, **kwargs)
     ax1.plot(y_full.index, y_full, label="Actual", color="black", linewidth=2)
-    ax1.plot(y_fitted_in.index, y_fitted_in, label="Fitted (In-sample)", color="tab:blue", linewidth=2)
+    ax1.plot(y_fitted_in.index, y_fitted_in, label="Fitted (IS)", color="tab:blue", linewidth=2)
     if not y_pred.empty:
         ax1.plot(
             y_pred.index,
             y_pred,
             linestyle="--",
-            label="Predicted (Out-of-sample)",
+            label="Predicted (OOS)",
             color="tab:blue",
             linewidth=2,
         )
     ax1.set_ylabel("Value")
-    ax1.set_title("Actual vs. Fitted/Predicted")
+    ax1.set_title("Actual vs. Fitted/OOS")
     ax1.legend(loc="upper left")
 
     ax2 = ax1.twinx()
@@ -106,7 +106,7 @@ def ols_seg_perf_plot(
     """
     # Determine common actual series
     first_m = next(iter(measures.values()))
-    if full and getattr(first_m, 'y_out', None) is not None:
+    if not full and getattr(first_m, 'y_out', None) is not None:
         actual = pd.concat([first_m.y, first_m.y_out]).sort_index()
     else:
         actual = first_m.y.sort_index()
@@ -121,17 +121,17 @@ def ols_seg_perf_plot(
         y_in = pd.Series(m.model.predict(m.X), index=m.X.index).sort_index()
         ax.plot(
             y_in.index, y_in,
-            linestyle='-', label=f'{cm_id} (in)',
+            linestyle='-', label=f'{cm_id} (IS)',
             linewidth=2, color=color
         )
-        if full and getattr(m, 'X_out', None) is not None:
+        if not full and getattr(m, 'X_out', None) is not None:
             if getattr(m, 'y_pred_out', None) is not None:
                 y_out = m.y_pred_out.sort_index()
             else:
                 y_out = pd.Series(m.model.predict(m.X_out), index=m.X_out.index).sort_index()
             ax.plot(
                 y_out.index, y_out,
-                linestyle='--', label=f'{cm_id} (out)',
+                linestyle='--', label=f'{cm_id} (OOS)',
                 linewidth=2, color=color
             )
 
