@@ -94,59 +94,46 @@ def ols_model_test_plot(model, X, y, figsize=(6,4), **kwargs):
     return fig
 
 
-
 def ols_seg_perf_plot(
     measures: Dict[str, Any],
     full: bool = False,
     figsize: tuple = (12, 6),
     **kwargs
-    ):
+) -> plt.Figure:
     """
-    Plot actual vs. fitted/predicted values for multiple candidate models on a single axis.
-
-    Parameters
-    ----------
-    measures : dict of {cm_id: MeasureBase}
-        Dictionary mapping candidate-model IDs to their MeasureBase instances.
-    full : bool, default False
-        If False, plots in-sample fitted values; if True, plots combined in-sample + out-of-sample predictions.
-    figsize : tuple, default (12,6)
-        Figure size for the plot.
-    **kwargs
-        Additional keyword args passed to plt.subplots().
-
-    Returns
-    -------
-    matplotlib.figure.Figure
-        The figure object containing the plot.
+    Plot actual vs. fitted/predicted values for multiple candidate models on one axis.
+    In-sample fits are solid; out-of-sample predictions are dashed (same color per CM).
     """
-    # Determine actual series (common across all measures)
-    # Use the first measure to retrieve the actual values
+    # Determine common actual series
     first_m = next(iter(measures.values()))
-    if full and hasattr(first_m, 'y_out') and first_m.y_out is not None:
-        # Combine in-sample and out-of-sample actuals
+    if full and getattr(first_m, 'y_out', None) is not None:
         actual = pd.concat([first_m.y, first_m.y_out]).sort_index()
     else:
         actual = first_m.y.sort_index()
 
     fig, ax = plt.subplots(figsize=figsize, **kwargs)
-    # Plot actual values
     ax.plot(actual.index, actual, label='Actual', color='black', linewidth=2)
 
-    # Plot each model's fitted/predicted series
-    for cm_id, m in measures.items():
-        # In-sample fitted
-        fitted = pd.Series(m.model.predict(m.X), index=m.X.index).sort_index()
-        if full and hasattr(m, 'X_out') and m.X_out is not None and hasattr(m, 'y_out'):
-            # Out-of-sample prediction
-            pred_out = m.y_pred_out if hasattr(m, 'y_pred_out') and m.y_pred_out is not None else pd.Series(
-                m.model.predict(m.X_out), index=m.X_out.index)
-            # Combine fitted and out-of-sample
-            series = pd.concat([fitted, pred_out]).sort_index()
-        else:
-            series = fitted
-        # Plot with dashed line
-        ax.plot(series.index, series, linestyle='--', label=f'{cm_id}', linewidth=2)
+    # use default color cycle
+    colors = plt.rcParams['axes.prop_cycle'].by_key().get('color', [])
+    for idx, (cm_id, m) in enumerate(measures.items()):
+        color = colors[idx % len(colors)] if colors else None
+        y_in = pd.Series(m.model.predict(m.X), index=m.X.index).sort_index()
+        ax.plot(
+            y_in.index, y_in,
+            linestyle='-', label=f'{cm_id} (in)',
+            linewidth=2, color=color
+        )
+        if full and getattr(m, 'X_out', None) is not None:
+            if getattr(m, 'y_pred_out', None) is not None:
+                y_out = m.y_pred_out.sort_index()
+            else:
+                y_out = pd.Series(m.model.predict(m.X_out), index=m.X_out.index).sort_index()
+            ax.plot(
+                y_out.index, y_out,
+                linestyle='--', label=f'{cm_id} (out)',
+                linewidth=2, color=color
+            )
 
     ax.set_ylabel('Value')
     ax.set_title('Segment Performance Comparison')
