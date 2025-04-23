@@ -337,3 +337,45 @@ class OLS_SegmentReport:
     def plot_tests(self, **kwargs) -> Any:
         """Plot in-sample diagnostic tests comparison across candidate models."""
         return self.seg_test_plot_fn(self.measures_in, **kwargs)
+    
+    def show_report(
+        self,
+        show_out: bool = True,
+        show_tests: bool = False,
+        perf_kwargs: Dict[str, Any] = None,
+        test_kwargs: Dict[str, Any] = None
+    ) -> None:
+        """
+        Display segment-level tables and plots, mirroring OLSReport.show_report structure.
+        """
+        perf_kwargs = perf_kwargs or {}
+        test_kwargs = test_kwargs or {}
+
+        # In-sample performance
+        print('=== In-Sample Performance Across CMs ===')
+        print(self.show_in_perf_tbl().to_string(index=False))
+
+        # Out-of-sample performance
+        if show_out and not self.show_out_perf_tbl().empty:
+            print('\n=== Out-of-Sample Performance Across CMs ===')
+            print(self.show_out_perf_tbl().to_string(index=False))
+
+        # Parameters
+        print('\n=== Parameter Summaries Across CMs ===')
+        print(self.show_params_tbl().to_string(index=False))
+
+        # Performance plot
+        fig1 = self.plot_perf(**perf_kwargs)
+        plt.show()
+
+        # Full-sample plot
+        if show_out:
+            fig2 = self.plot_full_perf(**perf_kwargs)
+            plt.show()
+
+        # Diagnostic tests
+        if show_tests:
+            print('\n=== Diagnostic Tests Across CMs ===')
+            print(self.show_test_tbl().to_string(index=False))
+            fig3 = self.plot_tests(**test_kwargs)
+            plt.show()
