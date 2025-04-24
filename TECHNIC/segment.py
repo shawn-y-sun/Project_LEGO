@@ -11,18 +11,21 @@ from .model import ModelBase
 from .measure import MeasureBase
 from .transform import TSFM
 from .report import ModelReportBase, SegmentReportBase
+from .template import ExportTemplateBase
 
 class Segment:
     """
     Group of CMs (candidate models) for a single product segment.
 
     Parameters:
-      segment_id:   unique identifier for the segment
-      target:       name of the dependent variable used by all CMs
-      data_manager: DataManager instance with all data loaded
-      model_cls:    subclass of ModelBase (e.g. OLS)
-      measure_cls:  subclass of MeasureBase (e.g. OLSMeasures)
-      report_cls:   optional subclass of ModelReportBase (e.g. OLSReport)
+    ----------
+    segment_id: unique identifier for the segment
+    target: name of the dependent variable used by all CMs
+    data_manager: DataManager instance with all data loaded
+    model_cls: subclass of ModelBase (e.g. OLS)
+    measure_cls: subclass of MeasureBase (e.g. OLSMeasures)
+    report_cls: optional subclass of ModelReportBase (e.g. OLSReport)
+    export_template_cls: optional subclass of ExportTemplateBase to handle exports
     """
     def __init__(
         self,
@@ -31,14 +34,16 @@ class Segment:
         data_manager: DataManager,
         model_cls: Type[ModelBase],
         measure_cls: Type[MeasureBase],
-        report_cls: Optional[Type[SegmentReportBase]] = None,
+        report_cls: Optional[Type[ModelReportBase]] = None,
+        export_template_cls: Optional[Type[ExportTemplateBase]] = None,
     ):
-        self.segment_id  = segment_id
-        self.target      = target
-        self.dm          = data_manager
-        self.model_cls   = model_cls
+        self.segment_id = segment_id
+        self.target = target
+        self.dm = data_manager
+        self.model_cls = model_cls
         self.measure_cls = measure_cls
-        self.report_cls  = report_cls  # should be a SegmentReportBase subclass
+        self.report_cls = report_cls
+        self.export_template_cls = export_template_cls
         self.cms: Dict[str, CM] = {}
 
     def build_cm(
@@ -99,3 +104,23 @@ class Segment:
             perf_kwargs=perf_kwargs,
             test_kwargs=test_kwargs
         )
+    
+    def export(
+        self,
+        output_map: Dict[str, str],
+        *args,
+        **kwargs
+    ) -> None:
+        """
+        Export segment results via the provided ExportTemplateBase subclass.
+
+        Parameters
+        ----------
+        output_map : Dict[str, str]
+            Mapping from template file paths to output file paths.
+        *args, **kwargs : passed to the export template constructor.
+        """
+        if not self.export_template_cls:
+            raise ValueError("No export_template_cls provided for exporting.")
+        exporter = self.export_template_cls(self.cms, *args, **kwargs)
+        exporter.export(output_map)

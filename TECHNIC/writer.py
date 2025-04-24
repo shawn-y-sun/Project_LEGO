@@ -164,25 +164,6 @@ class SheetWriter:
                        include_header=task.include_header)
 
 
-class TemplateLoader:
-    """
-    Load and manage multiple Excel template workbooks.
-    """
-    def __init__(self, template_paths: List[str]):
-        self.books: Dict[str, Workbook] = {
-            path: load_workbook(path)
-            for path in template_paths
-        }
-
-    def get_workbook(self, path: str) -> Workbook:
-        return self.books[path]
-
-    def save_all(self, output_map: Dict[str, str]):
-        for in_path, out_path in output_map.items():
-            wb = self.books[in_path]
-            wb.save(out_path)
-
-
 class WorkbookWriter:
     """
     Coordinates writing tasks across multiple sheets in a workbook.
@@ -200,6 +181,25 @@ class WorkbookWriter:
 
     def save(self, path: str):
         self.wb.save(path)
+
+
+class TemplateLoader:
+    """
+    Load and manage multiple Excel template workbooks.
+    """
+    def __init__(self, template_paths: List[str]):
+        self.books: Dict[str, Workbook] = {
+            path: load_workbook(path)
+            for path in template_paths
+        }
+
+    def get_workbook(self, path: str) -> Workbook:
+        return self.books[path]
+
+    def save_all(self, output_map: Dict[str, str]):
+        for in_path, out_path in output_map.items():
+            wb = self.books[in_path]
+            wb.save(out_path)
 
 
 class TemplateWriter:

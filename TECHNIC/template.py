@@ -1,8 +1,40 @@
 # TECHNIC/template.py
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Type
 import pandas as pd
 from .writer import Val, ValueWriter, TemplateLoader, TemplateWriter
 from .cm import CM
+from abc import ABC, abstractmethod
+
+class ValueMapEditor(ABC):
+    """
+    Abstract base class for constructing a mapping of template values
+    from a dictionary of CM instances.
+    """
+    def __init__(self, cms: Dict[str, Any]):
+        """
+        :param cms: A dictionary of CM instances, keyed by model identifier.
+        """
+        self.cms = cms
+
+    @property
+    @abstractmethod
+    def value_map(self) -> Dict[str, Any]:
+        """
+        Returns a nested dictionary mapping template workbook and sheet names
+        to lists of Val instances (or similar), conforming to ExportTemplateBase
+        requirements. Example structure:
+
+            {
+                'workbook1.xlsx': {
+                    'Sheet1': [Val(...), Val(...), ...],
+                    'Sheet2': [Val(...), ...],
+                },
+                'workbook2.xlsx': {
+                    'Main': [Val(...), ...],
+                }
+            }
+        """
+        ...
 
 class ExportTemplateBase:
     """
@@ -62,52 +94,79 @@ class ExportTemplateBase:
         tmpl_writer.write(sheet_tasks_map)
         tmpl_writer.save_all(output_map)
 
+
+class PPNR_OLS_ValueMap(ValueMapEditor):
+    """
+    Concrete ValueMapEditor for PPNR OLS models. Gathers performance and
+    parameter tables across all CM instances and maps them for Excel export.
+    """
+    def __init__(self, cms: Dict[str, Any]):
+        """
+        :param cms: A dictionary of CM instances.
+        """
+        super().__init__(cms)
+
+    @property
+    def perf_df(self) -> pd.DataFrame:
+        """
+        Combine in-sample performance tables from all CMs into a single DataFrame.
+        """
+        dfs = []
+        for cm in self.cms.values():
+            # Assumes cm.report_in.show_perf_tbl() returns a DataFrame
+            df = cm.report_in.show_perf_tbl().copy()
+            df.insert(0, 'model_id', cm.model_id)
+            dfs.append(df)
+        return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+    @property
+    def params_df(self) -> pd.DataFrame:
+        """
+        Combine parameter tables from all CMs into a single DataFrame.
+        """
+        dfs = []
+        for cm in self.cms.values():
+            # Assumes cm.report_in.show_params_tbl() returns a DataFrame
+            df = cm.report_in.show_params_tbl().copy()
+            df.insert(0, 'model_id', cm.model_id)
+            dfs.append(df)
+        return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+    @property
+    def value_map(self) -> Dict[str, Dict[str, List[Val]]]:
+        """
+        Map the performance and parameter DataFrames to Excel sheets via Val:
+        'Performances' and 'Parameters' sheets in the PPNR OLS template.
+        """
+        return {
+            'PPNR_OLS_Template.xlsx': {
+                'Performances': [
+                    Val(self.perf_df, 'A1')
+                ],
+                'Parameters': [
+                    Val(self.params_df, 'A1')
+                ],
+            }
+        }
+
+
 class PPNR_OLS_ExportTemplate(ExportTemplateBase):
     """
     Export template for PPNR project using OLS models.
-    Defines mapping of CM measures/specs into Excel template locations.
+    Delegates mapping construction to a provided ValueMapEditor class.
     """
     def __init__(
         self,
-        template_files: List[str],
-        cms: Dict[str, CM]
+        cms: Dict[str, CM],
+        vm_cls: Type[ValueMapEditor] = PPNR_OLS_ValueMap,
+        template_files: List[str] = None
     ):
-        # Build mapping dict keyed by template filename
-        mapping: Dict[str, Dict[str, List[Val]]] = {}
+        # Default template file if none provided
+        if template_files is None:
+            template_files = ['Template/PPNR_OLS_Template.xlsx']
 
-        # Example: single template workbook 'PPNR_OLS_Template.xlsx'
-        tpl = template_files[0]
-        # Specs go to 'Specs' sheet at A2
-        specs_vals = [Val(cm.specs, 'A2') for cm in cms.values()]
-        # In-sample performance to 'Perf' sheet at B4
-        in_perf_df = pd.DataFrame([m.in_perf_measures for m in cms.values()])
-        in_perf_df.insert(0, 'cm_id', list(cms.keys()))
-        in_perf_vals = [Val(in_perf_df, 'B4', include_header=True)]
-        # Out-sample performance to 'Perf' sheet at B20
-        out_perf_df = pd.DataFrame([m.out_perf_measures for m in cms.values()])
-        out_perf_df.insert(0, 'cm_id', list(cms.keys()))
-        out_perf_vals = [Val(out_perf_df, 'B20', include_header=True)]
-        # Parameters to 'Params' sheet at A2
-        params_rows = []
-        for cm_id, m in cms.items():
-            for var, stats in m.param_measures.items():
-                row = stats.copy()
-                row['cm_id'] = cm_id
-                row['Variable'] = var
-                params_rows.append(row)
-        params_df = pd.DataFrame(params_rows)
-        params_df = params_df[['cm_id', 'Variable'] + [c for c in params_df.columns if c not in ['cm_id','Variable']]]
-        params_vals = [Val(params_df, 'A2', include_header=True)]
-        # Tests to 'Diagnostics' sheet at A2
-        tests_df = pd.DataFrame([m.test_measures for m in cms.values()])
-        tests_df.insert(0, 'cm_id', list(cms.keys()))
-        tests_vals = [Val(tests_df, 'A2', include_header=True)]
-
-        mapping[tpl] = {
-            'Specs': specs_vals,
-            'Perf':  in_perf_vals + out_perf_vals,
-            'Params': params_vals,
-            'Diagnostics': tests_vals
-        }
+        # Instantiate the value-map editor and retrieve mapping
+        vm: ValueMapEditor = vm_cls(cms)
+        mapping = vm.value_map
 
         super().__init__(template_files, cms, mapping)
