@@ -109,12 +109,13 @@ class PPNR_OLS_ValueMap(ValueMapEditor):
     @property
     def perf_df(self) -> pd.DataFrame:
         """
-        Combine in-sample performance tables from all CMs into a single DataFrame.
+        Combine in-sample performance metrics from all CMs into a single DataFrame.
+        Uses measure_in.in_perf_measures for precise values.
         """
-        dfs = []
+        dfs: List[pd.DataFrame] = []
         for cm in self.cms.values():
-            # Assumes cm.report_in.show_perf_tbl() returns a DataFrame
-            df = cm.report_in.show_perf_tbl().copy()
+            perf_dict = cm.measure_in.in_perf_measures
+            df = pd.DataFrame([perf_dict])
             df.insert(0, 'model_id', cm.model_id)
             dfs.append(df)
         return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
@@ -122,12 +123,14 @@ class PPNR_OLS_ValueMap(ValueMapEditor):
     @property
     def params_df(self) -> pd.DataFrame:
         """
-        Combine parameter tables from all CMs into a single DataFrame.
+        Combine parameter measures from all CMs into a single DataFrame.
+        Uses measure_in.param_measures for precise coefficient details.
         """
-        dfs = []
+        dfs: List[pd.DataFrame] = []
         for cm in self.cms.values():
-            # Assumes cm.report_in.show_params_tbl() returns a DataFrame
-            df = cm.report_in.show_params_tbl().copy()
+            params_dict = cm.measure_in.param_measures
+            df = pd.DataFrame.from_dict(params_dict, orient='index')
+            df = df.reset_index().rename(columns={'index': 'parameter'})
             df.insert(0, 'model_id', cm.model_id)
             dfs.append(df)
         return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
