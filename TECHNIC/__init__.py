@@ -10,3 +10,4 @@ from .report import *
 from .segment import *
 from .writer import *
 from .template import *
+from .test_ss import *
