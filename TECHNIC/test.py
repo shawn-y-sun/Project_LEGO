@@ -1,13 +1,13 @@
 # TECHNIC/test.py
+
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Union
 
 import pandas as pd
-
-from .model import ModelBase
 from statsmodels.stats.stattools import jarque_bera
 from scipy.stats import shapiro
 
+from .model import ModelBase
 
 class ModelTestBase(ABC):
     """
@@ -39,17 +39,13 @@ class ModelTestBase(ABC):
     @property
     @abstractmethod
     def test_result(self) -> Any:
-        """
-        Returns the computed test result (outcome) of the testing.
-        """
+        """Returns the computed test result (outcome) of the testing."""
         ...
 
     @property
     @abstractmethod
-    def test_filter(self) -> bool:
-        """
-        Returns True if test conditions are met, False otherwise.
-        """
+    def test_filter(self) -> Any:
+        """Returns the overall test decision plus detailed test results."""
         ...
 
 
@@ -59,22 +55,30 @@ normality_test_dict: Dict[str, callable] = {
     'Shapiro': shapiro
 }
 
+# New! Criteria for interpreting p-value:
+normality_pass_criteria: Dict[str, bool] = {
+    'Jarque_Bera': True,  # pass if p-value > threshold
+    'Shapiro': True       # pass if p-value > threshold
+}
+
 class NormalityTest(ModelTestBase):
     """
     Concrete ModelTestBase implementation for normality diagnostics on residuals.
-
-    Provides access to model residuals and performs specified normality tests.
     """
+
     def __init__(
         self,
         model: Optional[ModelBase] = None,
         test_dict: Dict[str, Any] = normality_test_dict,
+        pass_criteria: Dict[str, bool] = normality_pass_criteria,
         resid: Optional[pd.Series] = None,
         threshold: Union[float, Dict[str, float]] = 0.05
     ):
         super().__init__(model=model, X=None, y=None, test_dict=test_dict)
+        self.pass_criteria = pass_criteria
         self.threshold = threshold
-        # Use provided residuals if given, otherwise extract from model
+        
+        # Set residuals
         if resid is not None:
             self.resid = resid
         elif self.model is not None and hasattr(self.model, 'resid'):
@@ -83,13 +87,44 @@ class NormalityTest(ModelTestBase):
             self.resid = None
 
     @property
-    def test_filter(self) -> bool:
+    def test_result(self) -> pd.DataFrame:
         """
-        Returns True if all tests in test_result are passed, False otherwise.
+        Runs all normality tests and returns a DataFrame:
+        Columns: ['test_name', 'test_pass_flag', 'test_stat', 'p_value']
         """
-        results = self.test_result
-        if not results:
-            return False
-        return all(
-            test_info.get('passed', False) for test_info in results.values()
-        )
+        records = []
+        if self.resid is None:
+            return pd.DataFrame(columns=["test_name", "test_pass_flag", "test_stat", "p_value"])
+        
+        for name, test_func in self.test_dict.items():
+            stat, pvalue = test_func(self.resid)[:2]
+            threshold = self.threshold[name] if isinstance(self.threshold, dict) else self.threshold
+            criteria = self.pass_criteria.get(name, True)  # default assume p > threshold means pass
+            if criteria:
+                passed = pvalue > threshold
+            else:
+                passed = pvalue < threshold
+            records.append({
+                "test_name": name,
+                "test_pass_flag": passed,
+                "test_stat": float(stat),
+                "p_value": float(pvalue)
+            })
+        return pd.DataFrame(records)
+
+    @property
+    def test_filter(self) -> Dict[str, Any]:
+        """
+        Majority rule: returns a dictionary with:
+          - 'overall_pass' : bool, majority of tests passed
+          - 'detail' : DataFrame from test_result
+        """
+        df = self.test_result
+        if df.empty:
+            return {"overall_pass": False, "detail": df}
+        
+        majority_pass = df['test_pass_flag'].sum() >= (len(df) / 2)
+        return {
+            "overall_pass": majority_pass,
+            "detail": df
+        }
