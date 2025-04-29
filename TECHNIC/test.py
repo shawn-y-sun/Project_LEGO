@@ -4,13 +4,16 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Union
 
 import pandas as pd
-from statsmodels.stats.stattools import jarque_bera
+from statsmodels.stats.stattools import jarque_bera, adfuller
+from statsmodels.tsa.stattools import kpss
 from scipy.stats import shapiro
 
 from .model import ModelBase
 
+
+
 class ModelTestBase(ABC):
-    """
+ """
     Abstract base class for model testing frameworks.
 
     Parameters
@@ -49,61 +52,42 @@ class ModelTestBase(ABC):
         ...
 
 
-# Dictionary of normality diagnostic tests
-normality_test_dict: Dict[str, callable] = {
-    'Jarque_Bera': jarque_bera,
-    'Shapiro': shapiro
+# Test Dictionary
+normality_tests Dict[str, Dict[str, Any]] = {
+    'Jarque_Bera': {'func': jarque_bera, 'pass_if_greater': True},
+    'Shapiro': {'func': shapiro, 'pass_if_greater': True}
 }
 
-# New! Criteria for interpreting p-value:
-normality_pass_criteria: Dict[str, bool] = {
-    'Jarque_Bera': True,  # pass if p-value > threshold
-    'Shapiro': True       # pass if p-value > threshold
+stationarity_tests: Dict[str, Dict[str, Any]] = {
+    'ADF': {'func': adfuller, 'pass_if_greater': False},
+    'KPSS': {'func': kpss, 'pass_if_greater': True}
 }
-
 class NormalityTest(ModelTestBase):
     """
-    Concrete ModelTestBase implementation for normality diagnostics on residuals.
+    Concrete implementation for normality diagnostics on residuals.
     """
 
     def __init__(
         self,
         model: Optional[ModelBase] = None,
-        test_dict: Dict[str, Any] = normality_test_dict,
-        pass_criteria: Dict[str, bool] = normality_pass_criteria,
         resid: Optional[pd.Series] = None,
         threshold: Union[float, Dict[str, float]] = 0.05
     ):
-        super().__init__(model=model, X=None, y=None, test_dict=test_dict)
-        self.pass_criteria = pass_criteria
+        self.model = model
+        self.resid = resid if resid is not None else getattr(model, 'resid', None)
         self.threshold = threshold
-        
-        # Set residuals
-        if resid is not None:
-            self.resid = resid
-        elif self.model is not None and hasattr(self.model, 'resid'):
-            self.resid = getattr(self.model, 'resid')
-        else:
-            self.resid = None
+        self.test_dict = normality_tests
 
     @property
     def test_result(self) -> pd.DataFrame:
-        """
-        Runs all normality tests and returns a DataFrame:
-        Columns: ['test_name', 'test_pass_flag', 'test_stat', 'p_value']
-        """
-        records = []
         if self.resid is None:
             return pd.DataFrame(columns=["test_name", "test_pass_flag", "test_stat", "p_value"])
-        
-        for name, test_func in self.test_dict.items():
-            stat, pvalue = test_func(self.resid)[:2]
+
+        records = []
+        for name, config in self.test_dict.items():
+            stat, pvalue = config['func'](self.resid)[:2]
             threshold = self.threshold[name] if isinstance(self.threshold, dict) else self.threshold
-            criteria = self.pass_criteria.get(name, True)  # default assume p > threshold means pass
-            if criteria:
-                passed = pvalue > threshold
-            else:
-                passed = pvalue < threshold
+            passed = pvalue > threshold if config['pass_if_greater'] else pvalue < threshold
             records.append({
                 "test_name": name,
                 "test_pass_flag": passed,
@@ -114,17 +98,46 @@ class NormalityTest(ModelTestBase):
 
     @property
     def test_filter(self) -> Dict[str, Any]:
-        """
-        Majority rule: returns a dictionary with:
-          - 'overall_pass' : bool, majority of tests passed
-          - 'detail' : DataFrame from test_result
-        """
         df = self.test_result
-        if df.empty:
-            return {"overall_pass": False, "detail": df}
-        
-        majority_pass = df['test_pass_flag'].sum() >= (len(df) / 2)
-        return {
-            "overall_pass": majority_pass,
-            "detail": df
-        }
+        majority_pass = df['test_pass_flag'].sum() >= (len(df) / 2) if not df.empty else False
+        return {"overall_pass": majority_pass, "detail": df}
+
+class StationarityTest(ModelTestBase):
+    """
+    Concrete implementation for stationarity diagnostics on time series.
+    """
+
+    def __init__(
+        self,
+        model: Optional[ModelBase] = None,
+        series: Optional[pd.Series] = None,
+        threshold: Union[float, Dict[str, float]] = 0.05
+    ):
+        self.model = model
+        self.series = series if series is not None else getattr(model, 'fittedvalues', None)
+        self.threshold = threshold
+        self.test_dict = stationarity_tests
+
+    @property
+    def test_result(self) -> pd.DataFrame:
+        if self.series is None:
+            return pd.DataFrame(columns=["test_name", "test_pass_flag", "test_stat", "p_value"])
+
+        records = []
+        for name, config in self.test_dict.items():
+            stat, pvalue = config['func'](self.series)[:2]
+            threshold = self.threshold[name] if isinstance(self.threshold, dict) else self.threshold
+            passed = pvalue > threshold if config['pass_if_greater'] else pvalue < threshold
+            records.append({
+                "test_name": name,
+                "test_pass_flag": passed,
+                "test_stat": float(stat),
+                "p_value": float(pvalue)
+            })
+        return pd.DataFrame(records)
+
+    @property
+    def test_filter(self) -> Dict[str, Any]:
+        df = self.test_result
+        majority_pass = df['test_pass_flag'].sum() >= (len(df) / 2) if not df.empty else False
+        return {"overall_pass": majority_pass, "detail": df}
