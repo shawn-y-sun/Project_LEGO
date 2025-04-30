@@ -3,27 +3,16 @@
 from abc import ABC
 import pandas as pd
 import numpy as np
-from typing import Callable, Dict, Any, Optional
+from typing import Callable, Dict, Any, Optional, Type
 import statsmodels.api as sm
 from statsmodels.stats.stattools import jarque_bera
 from statsmodels.stats.outliers_influence import variance_inflation_factor
+from .testset import TestSetBase, PPNR_OLS_TestSet
+from .report import ModelReportBase, OLS_ModelReport
 
 class MeasureBase(ABC):
     """
-    Abstract base for model measures, supporting separate in-sample
-    and out-of-sample performance evaluations.
-
-    Parameters:
-      model: fitted model object
-      X: DataFrame of in-sample predictors
-      y: Series of in-sample target values
-      X_out: optional DataFrame of out-of-sample predictors
-      y_out: optional Series of out-of-sample target values
-      y_pred_out: optional Series of predicted out-of-sample target values
-      filter_funcs: dict[name → function(model, X, y)]
-      perf_in_funcs: dict[name → function(model, X, y)]
-      perf_out_funcs: dict[name → function(model, X_out, y_out)]
-      test_funcs: dict[name → function(model, X, y)]
+    Abstract base for model measures, supporting performance evaluations and testing.
     """
     def __init__(
         self,
@@ -33,37 +22,29 @@ class MeasureBase(ABC):
         X_out: Optional[pd.DataFrame] = None,
         y_out: Optional[pd.Series] = None,
         y_pred_out: Optional[pd.Series] = None,
-        filter_funcs: Dict[str, Callable[[Any, pd.DataFrame, pd.Series], Any]] = None,
-        perf_in_funcs: Dict[str, Callable[[Any, pd.DataFrame, pd.Series], Any]] = None,
-        perf_out_funcs: Dict[str, Callable[[Any, pd.DataFrame, pd.Series], Any]] = None,
-        test_funcs: Dict[str, Callable[[Any, pd.DataFrame, pd.Series], Any]] = None
+        test_set: Optional[TestSetBase] = None,
+        report_cls: Optional[Type[ModelReportBase]] = None,
+        perf_in_funcs: Optional[Dict[str, Callable[[Any, pd.DataFrame, pd.Series], Any]]] = None,
+        perf_out_funcs: Optional[Dict[str, Callable[[Any, pd.DataFrame, pd.Series], Any]]] = None,
     ):
         self.model = model
         self.X = X
         self.y = y
-        self.X_out = X_out if X_out is not None else pd.DataFrame()
-        self.y_out = y_out if y_out is not None else pd.Series(dtype=float)
+        self.X_out = X_out or pd.DataFrame()
+        self.y_out = y_out or pd.Series(dtype=float)
         self.y_pred_out = y_pred_out
-        self.filter_funcs = filter_funcs or {}
         self.perf_in_funcs = perf_in_funcs or {}
         self.perf_out_funcs = perf_out_funcs or {}
-        self.test_funcs = test_funcs or {}
-
-    @property
-    def filter_measures(self) -> Dict[str, Any]:
-        """Values used to screen candidate models via filtering."""
-        return {name: fn(self.model, self.X, self.y)
-                for name, fn in self.filter_funcs.items()}
+        self.test_set = test_set
+        self.report_cls = report_cls
 
     @property
     def in_perf_measures(self) -> Dict[str, Any]:
-        """Performance metrics on the in-sample (training) data."""
         return {name: fn(self.model, self.X, self.y)
                 for name, fn in self.perf_in_funcs.items()}
 
     @property
     def out_perf_measures(self) -> Dict[str, Any]:
-        """Performance metrics on the out-of-sample (holdout) data."""
         if not self.X_out.empty and not self.y_out.empty:
             return {name: fn(self.model, self.X_out, self.y_out)
                     for name, fn in self.perf_out_funcs.items()}
@@ -71,15 +52,12 @@ class MeasureBase(ABC):
 
     @property
     def test_measures(self) -> Dict[str, Any]:
-        """Test results (residuals, assumptions, scenario) on in-sample data."""
-        return {name: fn(self.model, self.X, self.y)
-                for name, fn in self.test_funcs.items()}
+        return self.test_set.test_results if self.test_set else {}
 
-    @property
-    def param_measures(self) -> Dict[str, Dict[str, Any]]:
-        """Parameter details: dict of variable → metrics dict (coef, pvalue, vif, std)."""
-        # Default empty; override in subclasses if unsupported
-        return {}
+    def create_report(self, **kwargs) -> ModelReportBase:
+        if not self.report_cls:
+            raise ValueError("No report_cls provided for measure report generation.")
+        return self.report_cls(self, **kwargs)
 
 
 def compute_vif(model, X, y):
@@ -90,82 +68,59 @@ def compute_vif(model, X, y):
 
 class OLS_Measures(MeasureBase):
     """
-    Measure class for OLS models: filtering, in-sample performance,
-    out-of-sample performance, and testing.
-    Allows optional out-of-sample predictions via y_pred_out.
+    Measure class for OLS models: performance and diagnostics.
     """
-    def __init__(self,
-                 model,
-                 X: pd.DataFrame,
-                 y: pd.Series,
-                 X_out: Optional[pd.DataFrame] = None,
-                 y_out: Optional[pd.Series] = None,
-                 y_pred_out: Optional[pd.Series] = None):
-        # Store optional predictions
-        self.y_pred_out = y_pred_out
-        # filtering: max p-value in-sample
-        filter_funcs = {
-            "max_pvalue": lambda m, X, y: float(
-                m.pvalues.drop("const", errors="ignore").max()
-            )
+    def __init__(
+        self,
+        model: Any,
+        X: pd.DataFrame,
+        y: pd.Series,
+        X_out: Optional[pd.DataFrame] = None,
+        y_out: Optional[pd.Series] = None,
+        y_pred_out: Optional[pd.Series] = None,
+        testset_cls: Type[TestSetBase] = PPNR_OLS_TestSet,
+        report_cls: Type[ModelReportBase] = OLS_ModelReport,
+    ):
+        # Performance functions
+        perf_in = {
+            "r2": lambda m, X, y: float(m.rsquared),
+            "adj_r2": lambda m, X, y: float(m.rsquared_adj),
+            "me": lambda m, X, y: float(np.max(np.abs(y - m.fittedvalues))),
+            "mae": lambda m, X, y: float(np.mean(np.abs(y - m.fittedvalues))),
+            "rmse": lambda m, X, y: float(np.sqrt(((y - m.fittedvalues) ** 2).mean())),
         }
-        # in-sample performance functions
-        perf_in_funcs = {
-            "r2":    lambda m, X, y: float(m.rsquared),
-            "adj_r2":lambda m, X, y: float(m.rsquared_adj),
-            # maximum absolute error on training data
-            "me":    lambda m, X, y: float(np.max(np.abs(y - m.fittedvalues))),
-            # mean absolute error on training data
-            "mae":   lambda m, X, y: float(np.mean(np.abs(y - m.fittedvalues))),
-            "rmse":  lambda m, X, y: float(
-                          np.sqrt(((y - m.fittedvalues) ** 2).mean())
-                      )
+        perf_out = {
+            "me": lambda m, Xo, yo: float(np.max(np.abs(yo - (y_pred_out or m.predict(Xo))))),
+            "mae": lambda m, Xo, yo: float(np.mean(np.abs(yo - (y_pred_out or m.predict(Xo))))),
+            "rmse": lambda m, Xo, yo: float(np.sqrt(((yo - (y_pred_out or m.predict(Xo))) ** 2).mean())),
         }
-
-        # out-of-sample performance functions
-        perf_out_funcs = {
-            "me": lambda m, Xo, yo: float(
-                np.max(np.abs(yo - (self.y_pred_out if self.y_pred_out is not None else m.predict(Xo))))
-            ),
-            "mae": lambda m, Xo, yo: float(
-                np.mean(np.abs(yo - (self.y_pred_out if self.y_pred_out is not None else m.predict(Xo))))
-            ),
-            "rmse": lambda m, Xo, yo: float(
-                np.sqrt(((yo - (self.y_pred_out if self.y_pred_out is not None else m.predict(Xo))) ** 2).mean())
-            )
-        }
-        # testing: residual and assumption tests
-        test_funcs = {
-            "jb_stat": lambda m, X, y: float(jarque_bera(m.resid)[0]),
-            "jb_pvalue": lambda m, X, y: float(jarque_bera(m.resid)[1])
-        }
+        # Instantiate default test_set and report
+        test_set = testset_cls(DEFAULT_TESTS, DEFAULT_THRESHOLDS)
         super().__init__(
             model=model,
             X=X,
             y=y,
             X_out=X_out,
             y_out=y_out,
-            filter_funcs=filter_funcs,
-            perf_in_funcs=perf_in_funcs,
-            perf_out_funcs=perf_out_funcs,
-            test_funcs=test_funcs
+            y_pred_out=y_pred_out,
+            test_set=test_set,
+            report_cls=report_cls,
+            perf_in_funcs=perf_in,
+            perf_out_funcs=perf_out,
         )
 
     @property
     def param_measures(self) -> Dict[str, Dict[str, Any]]:
-        """Return dict of parameter statistics: coef, pvalue, vif, std for each variable."""
-        # collect from statsmodels
         params = self.model.params
         pvals = self.model.pvalues
         ses = getattr(self.model, 'bse', pd.Series(np.nan, index=params.index))
-        # compute VIF including intercept
         vif_dict = compute_vif(self.model, self.X, self.y)
-        result = {}
+        result: Dict[str, Dict[str, Any]] = {}
         for var in params.index:
             result[var] = {
                 'coef': float(params.get(var, np.nan)),
                 'pvalue': float(pvals.get(var, np.nan)),
                 'vif': float(vif_dict.get(var, np.nan)),
-                'std': float(ses.get(var, np.nan))
+                'std': float(ses.get(var, np.nan)),
             }
         return result
