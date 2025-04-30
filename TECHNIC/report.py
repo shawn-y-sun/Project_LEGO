@@ -3,60 +3,60 @@ import numpy as np
 import warnings
 import matplotlib.pyplot as plt
 from abc import ABC, abstractmethod
-from typing import Callable, Dict, Any, Optional, Type
+from typing import Callable, Any
+from .measure import *
 from .plot import ols_model_perf_plot, ols_model_test_plot, ols_seg_perf_plot
 from .cm import CM
-from .testset import TestSetBase
-from .report import ModelReportBase
 
-class MeasureBase(ABC):
+class ModelReportBase(ABC):
     """
-    Abstract base for model measures, supporting performance evaluations and testing.
+    Abstract base for model‐specific reports. Subclasses must implement
+    methods to display in‑sample performance, out‑of‑sample performance,
+    testing measures, parameter tables, and plotting.
     """
     def __init__(
         self,
-        model: Any,
-        X: pd.DataFrame,
-        y: pd.Series,
-        X_out: Optional[pd.DataFrame] = None,
-        y_out: Optional[pd.Series] = None,
-        y_pred_out: Optional[pd.Series] = None,
-        test_set: Optional[TestSetBase] = None,
-        report_cls: Optional[Type[ModelReportBase]] = None,
-        perf_in_funcs: Optional[Dict[str, Callable[[Any, pd.DataFrame, pd.Series], Any]]] = None,
-        perf_out_funcs: Optional[Dict[str, Callable[[Any, pd.DataFrame, pd.Series], Any]]] = None,
+        measure,
+        perf_plot_fn: Callable[..., Any],
+        test_plot_fn: Callable[..., Any]
     ):
-        self.model = model
-        self.X = X
-        self.y = y
-        self.X_out = X_out or pd.DataFrame()
-        self.y_out = y_out or pd.Series(dtype=float)
-        self.y_pred_out = y_pred_out
-        self.perf_in_funcs = perf_in_funcs or {}
-        self.perf_out_funcs = perf_out_funcs or {}
-        self.test_set = test_set
-        self.report_cls = report_cls
+        self.measure = measure
+        self.perf_plot_fn = perf_plot_fn
+        self.test_plot_fn = test_plot_fn
 
-    @property
-    def in_perf_measures(self) -> Dict[str, Any]:
-        return {name: fn(self.model, self.X, self.y)
-                for name, fn in self.perf_in_funcs.items()}
+    @abstractmethod
+    def show_in_perf_tbl(self) -> pd.DataFrame:
+        """Return in‑sample performance measures as a DataFrame."""
+        ...
 
-    @property
-    def out_perf_measures(self) -> Dict[str, Any]:
-        if not self.X_out.empty and not self.y_out.empty:
-            return {name: fn(self.model, self.X_out, self.y_out)
-                    for name, fn in self.perf_out_funcs.items()}
-        return {}
+    @abstractmethod
+    def show_out_perf_tbl(self) -> pd.DataFrame:
+        """Return out‑of‑sample performance measures as a DataFrame."""
+        ...
 
-    @property
-    def test_measures(self) -> Dict[str, Any]:
-        return self.test_set.test_results if self.test_set else {}
+    @abstractmethod
+    def show_test_tbl(self) -> pd.DataFrame:
+        """Return in‑sample testing measures as a DataFrame."""
+        ...
 
-    def create_report(self, **kwargs) -> ModelReportBase:
-        if not self.report_cls:
-            raise ValueError("No report_cls provided for measure report generation.")
-        return self.report_cls(self, **kwargs)
+    @abstractmethod
+    def show_params_tbl(self) -> pd.DataFrame:
+        """Return parameter measures (coef, pvalue, sig, VIF, Std) as a DataFrame."""
+        ...
+
+    @abstractmethod
+    def plot_perf(self, **kwargs) -> Any:
+        """Plot performance metrics; implementation must be provided by subclass."""
+        ...
+
+    def plot_tests(self, **kwargs) -> Any:
+        """Render diagnostic plot via injected test_plot_fn."""
+        return self.test_plot_fn(
+            self.measure.model,
+            self.measure.X,
+            self.measure.y,
+            **kwargs
+        )
     
 
 class SegmentReportBase(ABC):
