@@ -59,12 +59,8 @@ class PPNR_OLS_TestSet(TestSetBase):
     """
     def __init__(
         self,
-        tests: List[ModelTestBase] = DEFAULT_TESTS,
-        thresholds: Dict[str, float] = DEFAULT_THRESHOLDS
-    ):
-        self,
-        tests: List[ModelTestBase],
-        thresholds: Dict[str, float] = DEFAULT_THRESHOLDS
+        tests: List[ModelTestBase] = PPNR_OLS_tests,
+        thresholds: Dict[str, float] = PPNR_OLS_thresholds
     ):
         """
         :param tests: List of ModelTestBase instances to run.
@@ -77,3 +73,4 @@ class PPNR_OLS_TestSet(TestSetBase):
                 setattr(test, 'threshold', thresholds[test_name])
         super().__init__(tests)
         self.thresholds = thresholds
+        self.tests = tests
