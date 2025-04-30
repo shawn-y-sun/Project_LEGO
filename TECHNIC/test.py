@@ -8,6 +8,8 @@ from .model import ModelBase
 from statsmodels.stats.stattools import jarque_bera
 from scipy.stats import shapiro
 
+from statsmodels.tsa.stattools import adfuller
+
 
 class ModelTestBase(ABC):
     """
@@ -93,3 +95,97 @@ class NormalityTest(ModelTestBase):
         return all(
             test_info.get('passed', False) for test_info in results.values()
         )
+    
+
+# Dictionary of stationarity diagnostic tests
+stationarity_test_dict: Dict[str, callable] = {
+    'adf': adfuller
+}
+
+class StationarityTest(ModelTestBase):
+    """
+    Concrete ModelTestBase implementation for stationarity testing using ADF.
+
+    Parameters
+    ----------
+    series : Optional[pd.Series]
+        Time series to test for stationarity.
+    threshold : float or Dict[str, float]
+        Significance level(s) for test(s); default is 0.05.
+    test_dict : Dict[str, callable]
+        Mapping of test names to functions; default is {'adf': adfuller}.
+    model : Optional[ModelBase]
+        Optional, a ModelBase instance whose residuals or target can be tested.
+    """
+    def __init__(
+        self,
+        series: Optional[pd.Series] = None,
+        threshold: Union[float, Dict[str, float]] = 0.05,
+        test_dict: Dict[str, Any] = stationarity_test_dict,
+        model: Optional[ModelBase] = None
+    ):
+        super().__init__(model=model, X=None, y=None, test_dict=test_dict)
+        self.threshold = threshold
+        # Assign series: explicit or from model residuals/target
+        if series is not None:
+            self.series = series
+        elif self.model is not None and hasattr(self.model, 'resid'):
+            self.series = getattr(self.model, 'resid')
+        else:
+            self.series = None
+
+    @property
+    def test_filter(self) -> bool:
+        """
+        Returns True if all stationarity tests passed, False otherwise.
+        """
+        results = self.test_result
+        if not results:
+            return False
+        return all(info.get('passed', False) for info in results.values())
+
+    @property
+    def test_result_legacy(self) -> pd.DataFrame:
+        """
+        Returns a legacy-style stationarity test table similar to SAS ARIMA's
+        Augmented Dickey-Fuller test output.
+        """
+        types = {'Zero Mean': 'nc', 'Single Mean': 'c', 'Trend': 'ct'}
+        data = []
+        series = self.series.dropna() if self.series is not None else None
+        if series is None:
+            return pd.DataFrame()
+        for typ, reg in types.items():
+            for lag in (0, 1):
+                # run ADF with fixed lag and regression type
+                res = adfuller(series, maxlag=lag, regression=reg, autolag=None, store=True)
+                adfstat = res[0]
+                pval_tau = res[1]
+                resstore = res[3]
+                regres = resstore.resols
+                # coefficient on lagged level term
+                delta = regres.params[0]
+                rho = float(delta + 1)
+                # p-value for rho parameter (unit root test)
+                try:
+                    pval_rho = float(regres.pvalues[0])
+                except Exception:
+                    pval_rho = None
+                # F-statistic and p-value for model (skip for Zero Mean)
+                if typ != 'Zero Mean':
+                    fval = getattr(regres, 'fvalue', None)
+                    pr_f = getattr(regres, 'f_pvalue', None)
+                else:
+                    fval = None
+                    pr_f = None
+                data.append({
+                    'Type': typ,
+                    'Lags': lag,
+                    'Rho': rho,
+                    'Pr < Rho': pval_rho,
+                    'Tau': float(adfstat),
+                    'Pr < Tau': float(pval_tau),
+                    'F': fval,
+                    'Pr > F': pr_f
+                })
+        return pd.DataFrame(data).set_index(['Type', 'Lags'])
