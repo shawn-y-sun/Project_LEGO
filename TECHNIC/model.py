@@ -52,6 +52,26 @@ class ModelBase(ABC):
         if self.X_out is None or self.X_out.empty:
             return pd.Series(dtype=float)
         return self.predict(self.X_out)
+    
+    def build_report(self, **kwargs) -> Any:
+        """
+        Construct a report instance using report_cls and model data/measures.
+        """
+        if not self.report_cls:
+            raise ValueError("No report_cls provided for building report.")
+        return self.report_cls(
+            X=self.X,
+            y=self.y,
+            y_fitted_in=getattr(self, 'y_fitted_in', None),
+            X_out=self.X_out,
+            y_out=self.y_out,
+            y_pred_out=self.y_pred_out,
+            in_perf_measures=getattr(self, 'in_perf_measures', {}),
+            out_perf_measures=getattr(self, 'out_perf_measures', {}),
+            test_measures=getattr(self, 'test_measures', {}),
+            param_measures=getattr(self, 'param_measures', {}),
+            **kwargs
+        )
 
 
 class OLS(ModelBase):
