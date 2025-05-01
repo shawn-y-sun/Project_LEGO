@@ -1,19 +1,24 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any
+from typing import Type, Dict, Any, List
 
 from .test import *
 from .cm import CM
 
 
-class TestSetBase(ABC):
+class TestSetBase:
     """
-    Abstract base class for collecting and assessing multiple ModelTestBase instances.
+    Base class for collecting and assessing multiple ModelTestBase instances.
     """
-    def __init__(self, tests: List[ModelTestBase]):
+
+    def __init__(self, test_kwargs: Dict[Type[ModelTestBase], dict]):
         """
-        :param tests: List of ModelTestBase subclasses to run.
+        Initialize TestSetBase with a mapping of ModelTestBase subclasses to init kwargs.
+        :param test_kwargs: dict mapping each ModelTestBase subclass to its init arguments
         """
-        self.tests = tests
+        # Instantiate each test with its corresponding kwargs
+        self.tests: List[ModelTestBase] = [
+            test_cls(**kwargs) for test_cls, kwargs in test_kwargs.items()
+        ]
 
     @property
     def test_results(self) -> Dict[str, Any]:

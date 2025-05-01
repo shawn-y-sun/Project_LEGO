@@ -6,6 +6,9 @@ import numpy as np
 import statsmodels.api as sm
 from typing import Optional, Any, Type, Dict
 from statsmodels.stats.outliers_influence import variance_inflation_factor
+from .test import NormalityTest, StationarityTest
+from .testset import TestSetBase
+from .report import OLS_ModelReport
 
 
 class ModelBase(ABC):
@@ -93,8 +96,8 @@ class OLS(ModelBase):
             X, y,
             X_out=X_out,
             y_out=y_out,
-            testset_cls=testset_cls,
-            report_cls=report_cls
+            testset_cls=TestSetBase,
+            report_cls=OLS_ModelReport
         )
         # Statsmodels result and related attributes
         self.fitted: Optional[sm.regression.linear_model.RegressionResultsWrapper] = None
@@ -180,3 +183,34 @@ class OLS(ModelBase):
             'mae': float(np.mean(np.abs(errors))),
             'rmse': float(np.sqrt((errors ** 2).mean()))
         }
+
+    PPNR_OLS_alphas: Dict[str, float] = {
+    'NormalityTest': 0.05,
+    'StationarityTest': 0.05
+    }
+    
+    def build_tests(
+        self,
+        alphas: Dict[str, float] = PPNR_OLS_alphas
+    ) -> TestSetBase:
+        """
+        Build and return a TestSetBase (or custom testset_cls) configured
+        with NormalityTest and StationarityTest using individual alpha levels.
+        :param alphas: dict mapping "NormalityTest" and "StationarityTest" to alpha values.
+        """
+
+        TestSetClass = self.testset_cls or TestSetBase
+
+        test_kwargs: Dict[Type, Dict[str, Any]] = {
+            NormalityTest:   {"resid": self.resid, "alpha": alphas.get("NormalityTest", 0.05)},
+            StationarityTest:{"series": self.resid, "alpha": alphas.get("StationarityTest", 0.05)}
+        }
+
+        return TestSetClass(test_kwargs)
+    
+    @property
+    def tests(self) -> TestSetBase:
+        """
+        Build and return the TestSet for this model.
+        """
+        return self.build_tests()

@@ -72,10 +72,10 @@ class NormalityTest(ModelTestBase):
         model: Optional[ModelBase] = None,
         test_dict: Dict[str, Any] = normality_test_dict,
         resid: Optional[pd.Series] = None,
-        threshold: Union[float, Dict[str, float]] = 0.05
+        alpha : Union[float, Dict[str, float]] = 0.05
     ):
         super().__init__(model=model, X=None, y=None, test_dict=test_dict)
-        self.threshold = threshold
+        self.alpha  = alpha
         # Use provided residuals if given, otherwise extract from model
         if resid is not None:
             self.resid = resid
@@ -110,7 +110,7 @@ class StationarityTest(ModelTestBase):
     ----------
     series : Optional[pd.Series]
         Time series to test for stationarity.
-    threshold : float or Dict[str, float]
+    alpha  : float or Dict[str, float]
         Significance level(s) for test(s); default is 0.05.
     test_dict : Dict[str, callable]
         Mapping of test names to functions; default is {'adf': adfuller}.
@@ -120,12 +120,12 @@ class StationarityTest(ModelTestBase):
     def __init__(
         self,
         series: Optional[pd.Series] = None,
-        threshold: Union[float, Dict[str, float]] = 0.05,
+        alpha : Union[float, Dict[str, float]] = 0.05,
         test_dict: Dict[str, Any] = stationarity_test_dict,
         model: Optional[ModelBase] = None
     ):
         super().__init__(model=model, X=None, y=None, test_dict=test_dict)
-        self.threshold = threshold
+        self.alpha  = alpha
         # Assign series: explicit or from model residuals/target
         if series is not None:
             self.series = series
