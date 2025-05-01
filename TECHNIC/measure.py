@@ -22,7 +22,7 @@ class MeasureBase(ABC):
         X_out: Optional[pd.DataFrame] = None,
         y_out: Optional[pd.Series] = None,
         y_pred_out: Optional[pd.Series] = None,
-        test_set: Optional[TestSetBase] = None,
+        testset_cls: Optional[TestSetBase] = None,
         report_cls: Optional[Type[ModelReportBase]] = None,
         perf_in_funcs: Optional[Dict[str, Callable[[Any, pd.DataFrame, pd.Series], Any]]] = None,
         perf_out_funcs: Optional[Dict[str, Callable[[Any, pd.DataFrame, pd.Series], Any]]] = None,
@@ -35,7 +35,7 @@ class MeasureBase(ABC):
         self.y_pred_out = y_pred_out
         self.perf_in_funcs = perf_in_funcs or {}
         self.perf_out_funcs = perf_out_funcs or {}
-        self.test_set = test_set
+        self.testset_cls = testset_cls
         self.report_cls = report_cls
 
     @property
@@ -52,7 +52,7 @@ class MeasureBase(ABC):
 
     @property
     def test_measures(self) -> Dict[str, Any]:
-        return self.test_set.test_results if self.test_set else {}
+        return self.testset_cls.test_results if self.testset_cls else {}
 
     def create_report(self, **kwargs) -> ModelReportBase:
         if not self.report_cls:
@@ -94,8 +94,8 @@ class OLS_Measures(MeasureBase):
             "mae": lambda m, Xo, yo: float(np.mean(np.abs(yo - (y_pred_out or m.predict(Xo))))),
             "rmse": lambda m, Xo, yo: float(np.sqrt(((yo - (y_pred_out or m.predict(Xo))) ** 2).mean())),
         }
-        # Instantiate default test_set and report
-        test_set = testset_cls(DEFAULT_TESTS, DEFAULT_THRESHOLDS)
+        # Instantiate default testset_cls and report
+        testset_cls = testset_cls()
         super().__init__(
             model=model,
             X=X,
@@ -103,7 +103,7 @@ class OLS_Measures(MeasureBase):
             X_out=X_out,
             y_out=y_out,
             y_pred_out=y_pred_out,
-            test_set=test_set,
+            testset_cls=testset_cls,
             report_cls=report_cls,
             perf_in_funcs=perf_in,
             perf_out_funcs=perf_out,
