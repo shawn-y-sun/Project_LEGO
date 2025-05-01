@@ -53,9 +53,11 @@ class ModelBase(ABC):
             return pd.Series(dtype=float)
         return self.predict(self.X_out)
     
-    def build_report(self, **kwargs) -> Any:
+    @property
+    def report(self) -> Any:
         """
-        Construct a report instance using report_cls and model data/measures.
+        Build and return the report instance using the configured report_cls
+        and all of this model’s data and measure attributes.
         """
         if not self.report_cls:
             raise ValueError("No report_cls provided for building report.")
@@ -69,8 +71,7 @@ class ModelBase(ABC):
             in_perf_measures=getattr(self, 'in_perf_measures', {}),
             out_perf_measures=getattr(self, 'out_perf_measures', {}),
             test_measures=getattr(self, 'test_measures', {}),
-            param_measures=getattr(self, 'param_measures', {}),
-            **kwargs
+            param_measures=getattr(self, 'param_measures', {})
         )
 
 
