@@ -10,17 +10,23 @@ from .cm import CM
 
 class ModelReportBase(ABC):
     """
-    Abstract base for model‐specific reports. Subclasses must implement
-    methods to display in‑sample performance, out‑of‑sample performance,
-    testing measures, parameter tables, and plotting.
+    Abstract base for model‐specific reports.
+    Subclasses must implement methods to display in‑sample performance,
+    out‑of‑sample performance, testing measures, parameter tables, and plotting.
     """
     def __init__(
         self,
-        measure,
+        in_perf_measures: Dict[str, Any],
+        out_perf_measures: Dict[str, Any],
+        test_measures: Dict[str, Any],
+        param_measures: Dict[str, Dict[str, Any]],
         perf_plot_fn: Callable[..., Any],
         test_plot_fn: Callable[..., Any]
     ):
-        self.measure = measure
+        self.in_perf_measures = in_perf_measures
+        self.out_perf_measures = out_perf_measures
+        self.test_measures = test_measures
+        self.param_measures = param_measures
         self.perf_plot_fn = perf_plot_fn
         self.test_plot_fn = test_plot_fn
 
@@ -36,12 +42,12 @@ class ModelReportBase(ABC):
 
     @abstractmethod
     def show_test_tbl(self) -> pd.DataFrame:
-        """Return in‑sample testing measures as a DataFrame."""
+        """Return testing measures as a DataFrame."""
         ...
 
     @abstractmethod
     def show_params_tbl(self) -> pd.DataFrame:
-        """Return parameter measures (coef, pvalue, sig, VIF, Std) as a DataFrame."""
+        """Return parameter measures as a DataFrame."""
         ...
 
     @abstractmethod
@@ -51,12 +57,7 @@ class ModelReportBase(ABC):
 
     def plot_tests(self, **kwargs) -> Any:
         """Render diagnostic plot via injected test_plot_fn."""
-        return self.test_plot_fn(
-            self.measure.model,
-            self.measure.X,
-            self.measure.y,
-            **kwargs
-        )
+        return self.test_plot_fn(**kwargs)
     
 
 class SegmentReportBase(ABC):

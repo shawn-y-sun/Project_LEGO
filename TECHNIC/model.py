@@ -4,28 +4,13 @@ from abc import ABC, abstractmethod
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
-from typing import Optional, Any, Type
+from typing import Optional, Any, Type, Dict
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 
 class ModelBase(ABC):
     """
     Abstract base class for statistical models, including optional test and reporting hooks.
-
-    Parameters
-    ----------
-    X : pd.DataFrame
-        In-sample feature matrix.
-    y : pd.Series
-        In-sample target vector.
-    X_out : Optional[pd.DataFrame]
-        Out-of-sample feature matrix.
-    y_out : Optional[pd.Series]
-        Out-of-sample target vector.
-    testset_cls : Optional[Type[Any]]
-        Class to construct a TestSetBase for diagnostics.
-    report_cls : Optional[Type[Any]]
-        Class to construct a report from the model.
     """
     def __init__(
         self,
@@ -96,7 +81,7 @@ class OLS(ModelBase):
         self.pvalues: Optional[pd.Series] = None
         self.rsquared: Optional[float] = None
         self.rsquared_adj: Optional[float] = None
-        self.fittedvalues: Optional[pd.Series] = None
+        self.y_fitted_in: Optional[pd.Series] = None
         self.resid: Optional[pd.Series] = None
         self.bse: Optional[pd.Series] = None
         self.vif: Optional[pd.Series] = None
@@ -112,7 +97,7 @@ class OLS(ModelBase):
         self.pvalues = result.pvalues
         self.rsquared = result.rsquared
         self.rsquared_adj = result.rsquared_adj
-        self.fittedvalues = result.fittedvalues
+        self.y_fitted_in = result.fittedvalues
         self.resid = result.resid
         self.bse = result.bse
         # Compute VIF including intercept
@@ -152,7 +137,7 @@ class OLS(ModelBase):
         """
         In-sample performance: R², adj-R², ME, MAE, RMSE.
         """
-        errors = self.y - self.fittedvalues
+        errors = self.y - self.y_fitted_in
         return {
             'r2': float(self.rsquared),
             'adj_r2': float(self.rsquared_adj),
