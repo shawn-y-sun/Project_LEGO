@@ -43,6 +43,30 @@ class CM:
         self.model_in: Optional[ModelBase] = None
         self.model_full: Optional[ModelBase] = None
 
+    def __repr__(self) -> str:
+        '''
+        Return a formula representation of the model without spaces: 'target~C+var1+var2+...'.
+        '''
+        # Determine which feature set to use
+        if self.model_in is not None and hasattr(self, 'X_in'):
+            cols = list(self.X_in.columns)
+        elif self.X is not None:
+            cols = list(self.X.columns)
+        else:
+            return f"<CM{self.model_id}:no_model_data>"
+        # Build formula string without spaces
+        formula = f"{self.target}~C"
+        if cols:
+            formula += "+" + "+".join(cols)
+        return formula
+
+    @property
+    def formula(self) -> str:
+        '''
+        Expose the formula string (same as __repr__).
+        '''
+        return self.__repr__()
+
     def build(
         self,
         specs: List[Union[str, Dict[str, Any]]],
