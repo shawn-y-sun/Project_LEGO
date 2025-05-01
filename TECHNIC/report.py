@@ -4,7 +4,7 @@ import warnings
 import matplotlib.pyplot as plt
 from pandas import DataFrame, Series
 from abc import ABC, abstractmethod
-from typing import Callable, Any
+from typing import Callable, Any, Optional
 from .measure import *
 from .plot import ols_model_perf_plot, ols_model_test_plot, ols_seg_perf_plot
 from .cm import CM
