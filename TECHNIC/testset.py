@@ -37,45 +37,45 @@ class TestSetBase:
         return True
 
 
-# Default list of test instances for PPNR OLS
-PPNR_OLS_tests: List[ModelTestBase] = [
-    NormalityTest(),
-    StationarityTest()
-]
+# # Default list of test instances for PPNR OLS
+# PPNR_OLS_tests: List[ModelTestBase] = [
+#     NormalityTest(),
+#     StationarityTest()
+# ]
 
-# Default thresholds for PPNR OLS tests
-PPNR_OLS_thresholds: Dict[str, float] = {
-    'NormalityTest': 0.05,
-    'StationarityTest': 0.05
-}
+# # Default thresholds for PPNR OLS tests
+# PPNR_OLS_thresholds: Dict[str, float] = {
+#     'NormalityTest': 0.05,
+#     'StationarityTest': 0.05
+# }
 
 
 
-class PPNR_OLS_TestSet(TestSetBase):
-    """
-    Test set for PPNR OLS models using supplied model tests and thresholds.
+# class PPNR_OLS_TestSet(TestSetBase):
+#     """
+#     Test set for PPNR OLS models using supplied model tests and thresholds.
 
-    Parameters
-    ----------
-    tests : List[ModelTestBase]
-        List of pre-configured test instances to evaluate.
-    thresholds : Dict[str, float]
-        Mapping of test class names to significance thresholds.
-    """
-    def __init__(
-        self,
-        tests: List[ModelTestBase] = PPNR_OLS_tests,
-        thresholds: Dict[str, float] = PPNR_OLS_thresholds
-    ):
-        """
-        :param tests: List of ModelTestBase instances to run.
-        :param thresholds: Dict mapping test class names to threshold values.
-        """
-        # Apply thresholds to each test if attribute exists
-        for test in tests:
-            test_name = type(test).__name__
-            if hasattr(test, 'threshold') and test_name in thresholds:
-                setattr(test, 'threshold', thresholds[test_name])
-        super().__init__(tests)
-        self.thresholds = thresholds
-        self.tests = tests
+#     Parameters
+#     ----------
+#     tests : List[ModelTestBase]
+#         List of pre-configured test instances to evaluate.
+#     thresholds : Dict[str, float]
+#         Mapping of test class names to significance thresholds.
+#     """
+#     def __init__(
+#         self,
+#         tests: List[ModelTestBase] = PPNR_OLS_tests,
+#         thresholds: Dict[str, float] = PPNR_OLS_thresholds
+#     ):
+#         """
+#         :param tests: List of ModelTestBase instances to run.
+#         :param thresholds: Dict mapping test class names to threshold values.
+#         """
+#         # Apply thresholds to each test if attribute exists
+#         for test in tests:
+#             test_name = type(test).__name__
+#             if hasattr(test, 'threshold') and test_name in thresholds:
+#                 setattr(test, 'threshold', thresholds[test_name])
+#         super().__init__(tests)
+#         self.thresholds = thresholds
+#         self.tests = tests

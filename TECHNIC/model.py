@@ -184,14 +184,14 @@ class OLS(ModelBase):
             'rmse': float(np.sqrt((errors ** 2).mean()))
         }
 
-    PPNR_OLS_alphas: Dict[str, float] = {
+    PPNR_OLS_test_alphas: Dict[str, float] = {
     'NormalityTest': 0.05,
     'StationarityTest': 0.05
     }
     
     def build_tests(
         self,
-        alphas: Dict[str, float] = PPNR_OLS_alphas
+        alphas: Dict[str, float] = PPNR_OLS_test_alphas
     ) -> TestSetBase:
         """
         Build and return a TestSetBase (or custom testset_cls) configured
