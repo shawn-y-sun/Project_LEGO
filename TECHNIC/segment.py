@@ -8,40 +8,29 @@ from typing import (
 from .datamgr import DataManager
 from .cm import CM
 from .model import ModelBase
-from .measure import MeasureBase
 from .transform import TSFM
 from .report import ModelReportBase, SegmentReportBase
 from .template import ExportTemplateBase
 
 class Segment:
     """
-    Group of CMs (candidate models) for a single product segment.
-
-    Parameters:
-    ----------
-    segment_id: unique identifier for the segment
-    target: name of the dependent variable used by all CMs
-    data_manager: DataManager instance with all data loaded
-    model_cls: subclass of ModelBase (e.g. OLS)
-    measure_cls: subclass of MeasureBase (e.g. OLSMeasures)
-    report_cls: optional subclass of ModelReportBase (e.g. OLSReport)
-    export_template_cls: optional subclass of ExportTemplateBase to handle exports
+    Manages a collection of Candidate Models (CM) and their reporting/export.
     """
     def __init__(
         self,
         segment_id: str,
         target: str,
-        data_manager: DataManager,
+        data_manager: Any,
         model_cls: Type[ModelBase],
-        measure_cls: Type[MeasureBase],
-        report_cls: Optional[Type[ModelReportBase]] = None,
-        export_template_cls: Optional[Type[ExportTemplateBase]] = None,
+        testset_cls: Optional[Type[Any]] = None,
+        report_cls: Optional[Type[Any]] = None,
+        export_template_cls: Optional[Type[Any]] = None
     ):
         self.segment_id = segment_id
         self.target = target
         self.dm = data_manager
         self.model_cls = model_cls
-        self.measure_cls = measure_cls
+        self.testset_cls = testset_cls
         self.report_cls = report_cls
         self.export_template_cls = export_template_cls
         self.cms: Dict[str, CM] = {}
@@ -49,61 +38,60 @@ class Segment:
     def build_cm(
         self,
         cm_id: str,
-        specs: List[Union[str, Dict[str, TSFM]]]
+        specs: Any,
+        sample: str = 'both'
     ) -> CM:
         """
-        Create and build a new CM for this segment.
+        Instantiate and fit a CM for the given cm_id and specs.
 
-        - cm_id: unique identifier for this CM
-        - specs: list of var names or {var: TSFM} dicts (nested lists OK)
+        :param cm_id: Unique identifier for this candidate model.
+        :param specs: Feature specification passed to DataManager.
+        :param sample: Which sample to build ('in', 'full', 'both').
+        :return: The constructed and fitted CM instance.
         """
         cm = CM(
             model_id=cm_id,
+            target=self.target,
             data_manager=self.dm,
             model_cls=self.model_cls,
-            measure_cls=self.measure_cls,
-            target=self.target
+            testset_cls=self.testset_cls,
+            report_cls=self.report_cls
         )
-        cm.build(specs)
+        cm.build(specs, sample=sample)
         self.cms[cm_id] = cm
         return cm
-    
+
     def show_report(
         self,
-        show_full: bool = False,
+        cm_ids: Optional[List[str]] = None,
+        show_out: bool = True,
         show_tests: bool = False,
-        perf_kwargs: Dict[str, Any] = None,
-        test_kwargs: Dict[str, Any] = None
+        perf_kwargs: Optional[Dict[str, Any]] = None,
+        test_kwargs: Optional[Dict[str, Any]] = None
     ) -> None:
         """
-        Delegate to the configured SegmentReportBase subclass to display
-        segment-level performance and tests, mirroring CM.show_report.
+        Display reports for one or multiple CMs.
 
-        Parameters
-        ----------
-        show_full : bool
-            If True, includes full-sample performance and out-of-sample tables/plots.
-        show_tests : bool
-            If True, includes diagnostic test tables/plots.
-        perf_kwargs : dict, optional
-            Keyword args for performance plots/tables.
-        test_kwargs : dict, optional
-            Keyword args for diagnostic test plots/tables.
+        :param cm_ids: List of CM IDs to show (defaults to all in the segment).
+        :param show_out: Whether to include out-of-sample results.
+        :param show_tests: Whether to include diagnostic test results.
+        :param perf_kwargs: Additional kwargs for performance display.
+        :param test_kwargs: Additional kwargs for test display.
         """
-        if self.report_cls is None:
-            raise ValueError("No report class specified for this segment.")
         perf_kwargs = perf_kwargs or {}
         test_kwargs = test_kwargs or {}
+        cm_ids = cm_ids or list(self.cms.keys())
 
-        # Instantiate the segment report
-        seg_report = self.report_cls(self.cms)
-        # Delegate to its show_report
-        seg_report.show_report(
-            show_out=show_full,
-            show_tests=show_tests,
-            perf_kwargs=perf_kwargs,
-            test_kwargs=test_kwargs
-        )
+        for cm_id in cm_ids:
+            cm = self.cms[cm_id]
+            print(f"--- Segment {self.segment_id}: Report for CM '{cm_id}' ---")
+            cm.show_report(
+                show_out=show_out,
+                show_tests=show_tests,
+                perf_kwargs=perf_kwargs,
+                test_kwargs=test_kwargs
+            )
+
     
     def export(
         self,
