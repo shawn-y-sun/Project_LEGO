@@ -43,10 +43,23 @@ class CM:
         self.model_in: Optional[ModelBase] = None
         self.model_full: Optional[ModelBase] = None
 
-    def build(self, specs: List[Union[str, Dict[str, Any]]]) -> None:
-        """
+    def build(
+        self,
+        specs: List[Union[str, Dict[str, Any]]],
+        sample: str = 'both'
+    ) -> None:
+        '''
         Build features/target, validate, split, and fit models.
-        """
+        :param specs: feature specifications for DataManager.
+        :param sample: which sample(s) to build: 'in', 'full', or 'both'.
+        '''
+        # Determine which samples to build
+        if sample not in {'in', 'full', 'both'}:
+            raise ValueError("sample must be one of 'in', 'full', or 'both'.")
+        build_in = sample in {'in', 'both'}
+        build_full = sample in {'full', 'both'}
+
+        # Prepare data
         X = self.dm.build_indep_vars(specs)
         y = self.dm.internal_data[self.target].copy()
         idx = self.dm.internal_data.index
@@ -89,23 +102,25 @@ class CM:
             self.X_out, self.y_out = pd.DataFrame(), pd.Series(dtype=float)
         self.X_full, self.y_full = X, y
 
-        # Fit models with in-sample and full-sample, passing through out-sample and settings
-        self.model_in = self.model_cls(
-            self.X_in,
-            self.y_in,
-            X_out=self.X_out,
-            y_out=self.y_out,
-            testset_cls=self.testset_cls,
-            report_cls=self.report_cls
-        ).fit()
-        self.model_full = self.model_cls(
-            self.X_full,
-            self.y_full,
-            X_out=self.X_out,
-            y_out=self.y_out,
-            testset_cls=self.testset_cls,
-            report_cls=self.report_cls
-        ).fit()
+        # Fit models
+        if build_in:
+            self.model_in = self.model_cls(
+                self.X_in,
+                self.y_in,
+                X_out=self.X_out,
+                y_out=self.y_out,
+                testset_cls=self.testset_cls,
+                report_cls=self.report_cls
+            ).fit()
+        if build_full:
+            self.model_full = self.model_cls(
+                self.X_full,
+                self.y_full,
+                X_out=self.X_out,
+                y_out=self.y_out,
+                testset_cls=self.testset_cls,
+                report_cls=self.report_cls
+            ).fit()
 
     def show_report(
         self,
@@ -134,15 +149,29 @@ class CM:
         )
 
     @property
+    def report_in(self) -> Any:
+        '''
+        Expose the in-sample report property at the CM level.
+        '''
+        return self.model_in.report
+
+    @property
+    def tests_in(self) -> Any:
+        '''
+        Expose the in-sample tests property at the CM level.
+        '''
+        return self.model_in.tests
+
+    @property
     def report_full(self) -> Any:
-        """
+        '''
         Expose the full-sample report property at the CM level.
-        """
+        '''
         return self.model_full.report
 
     @property
     def tests_full(self) -> Any:
-        """
+        '''
         Expose the full-sample tests property at the CM level.
-        """
+        '''
         return self.model_full.tests
