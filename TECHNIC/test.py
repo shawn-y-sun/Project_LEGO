@@ -1,7 +1,6 @@
 # TECHNIC/test.py
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Union
-
+from typing import Any, Dict, Optional, Union, Type, List
 import pandas as pd
 
 from .model import ModelBase
@@ -53,6 +52,37 @@ class ModelTestBase(ABC):
         Returns True if test conditions are met, False otherwise.
         """
         ...
+
+class TestSetBase:
+    """
+    Base class for collecting and assessing multiple ModelTestBase instances.
+    """
+
+    def __init__(self, test_kwargs: Dict[Type[ModelTestBase], dict]):
+        """
+        Initialize TestSetBase with a mapping of ModelTestBase subclasses to init kwargs.
+        :param test_kwargs: dict mapping each ModelTestBase subclass to its init arguments
+        """
+        # Instantiate each test with its corresponding kwargs
+        self.tests: List[ModelTestBase] = [
+            test_cls(**kwargs) for test_cls, kwargs in test_kwargs.items()
+        ]
+
+    @property
+    def test_results(self) -> Dict[str, Any]:
+        """
+        Gather results from each test in a dict keyed by test class name.
+        """
+        return {type(test).__name__: test.test_result for test in self.tests}
+
+    def search_pass(self) -> bool:
+        """
+        Quickly determine if all tests pass by returning False on first failure.
+        """
+        for test in self.tests:
+            if not test.test_filter:
+                return False
+        return True
 
 
 # Dictionary of normality diagnostic tests
