@@ -6,8 +6,7 @@ import numpy as np
 import statsmodels.api as sm
 from typing import Optional, Any, Type, Dict
 from statsmodels.stats.outliers_influence import variance_inflation_factor
-from .test import NormalityTest, StationarityTest
-from .testset import TestSetBase
+from .test import *
 from .report import OLS_ModelReport
 
 
