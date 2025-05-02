@@ -42,7 +42,7 @@ class TSFM:
         self.max_lag = max_lag
         self.exp_sign = exp_sign
 
-    def apply_transform(self) -> pd.Series:
+    def apply(self) -> pd.Series:
         """
         Apply the transform function and shift by max_lag.
         The returned Series is named by the `name` property.
