@@ -5,7 +5,7 @@ import pandas as pd
 from typing import (
     Type, Dict, List, Union, Optional, Any
 )
-from .datamgr import DataManager
+from .data import DataManager
 from .cm import CM
 from .model import ModelBase
 from .transform import TSFM
