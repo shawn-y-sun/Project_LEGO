@@ -14,19 +14,19 @@ class CondVar:
     Parameters:
     - main_var: Union[str, pd.Series]
         Name or series of the main variable to be transformed.
-    - cond_vars: Union[str, pd.Series, List[Union[str, pd.Series]]]
+    - cond_var: Union[str, pd.Series, List[Union[str, pd.Series]]]
         One or more condition variable names or Series.
     - cond_fn: Callable[..., pd.Series]
-        Function taking (main, *conds, **kwargs) -> Series.
-    - kwargs: Any
-        Additional keyword arguments for cond_fn.
+        Function taking (main, *cond_vars, **cond_fn_kwargs) -> Series.
+    - cond_fn_kwargs: Dict[str, Any]
+        Keyword arguments to pass to cond_fn.
     """
     def __init__(
         self,
         main_var: Union[str, pd.Series],
-        cond_vars: Union[str, pd.Series, List[Union[str, pd.Series]]],
+        cond_var: Union[str, pd.Series, List[Union[str, pd.Series]]],
         cond_fn: Callable[..., pd.Series],
-        **kwargs: Any
+        cond_fn_kwargs: Dict[str, Any]
     ):
         # Main variable can be name or series
         if isinstance(main_var, pd.Series):
@@ -39,33 +39,33 @@ class CondVar:
             raise TypeError("`main_var` must be a column name string or a pandas Series")
 
         # Condition variables list
-        if isinstance(cond_vars, (str, pd.Series)):
-            cond_list = [cond_vars]
-        elif isinstance(cond_vars, list) and all(
-            isinstance(cv, (str, pd.Series)) for cv in cond_vars
+        if isinstance(cond_var, (str, pd.Series)):
+            self.cond_var = [cond_var]
+        elif isinstance(cond_var, list) and all(
+            isinstance(cv, (str, pd.Series)) for cv in cond_var
         ):
-            cond_list = cond_vars
+            self.cond_var = cond_var
         else:
             raise TypeError(
-                "`cond_vars` must be a column name, Series, or list thereof"
+                "`cond_var` must be a column name, Series, or list thereof"
             )
-        self.cond_vars = cond_list
 
         self.cond_fn = cond_fn
-        self.fn_kwargs = kwargs
+        self.cond_fn_kwargs = cond_fn_kwargs
 
     def apply(self) -> pd.Series:
         """
-        Apply the conditional function to main_var and cond_vars.
+        Apply the conditional function to main_var and cond_var(s).
         Returns a Series named by the `name` property.
         """
-        # Prepare args: series or names
-        args: List[Any] = []
-        args.append(self.main_series if self.main_series is not None else self.main_name)
-        for cv in self.cond_vars:
+        # Prepare args: use series or names
+        args = [
+            self.main_series if self.main_series is not None else self.main_name
+        ]
+        for cv in self.cond_var:
             args.append(cv if isinstance(cv, pd.Series) else cv)
 
-        result = self.cond_fn(*args, **self.fn_kwargs)
+        result = self.cond_fn(*args, **self.cond_fn_kwargs)
         if not isinstance(result, pd.Series):
             raise ValueError("`cond_fn` must return a pandas Series")
         result.name = self.name
@@ -79,8 +79,7 @@ class CondVar:
         """
         fn_name = getattr(self.cond_fn, "__name__", "cond")
         cond_names = [
-            cv.name if isinstance(cv, pd.Series) else cv
-            for cv in self.cond_vars
+            cv.name if isinstance(cv, pd.Series) else cv for cv in self.cond_var
         ]
         cond_part = f"_{'_'.join(cond_names)}" if cond_names else ""
         return f"{self.main_name}_{fn_name}{cond_part}"
