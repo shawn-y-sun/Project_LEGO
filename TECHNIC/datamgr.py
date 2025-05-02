@@ -1,9 +1,8 @@
 # TECHNIC/datamgr.py
 
+import os
 import pandas as pd
-from typing import (
-    List, Callable, Optional, Dict, Any
-)
+from typing import Any, Dict, List, Optional, Callable, Union
 
 from .internal import InternalDataLoader
 from .mev import MEVLoader
@@ -32,10 +31,8 @@ class DataManager:
         internal_freq: str                           = 'M',
         # MEV loader inputs
         mev_loader: Optional[MEVLoader]              = None,
-        model_workbook: Optional[str]                = None,
-        model_sheet: Optional[str]                   = None,
-        scen_workbooks: Optional[List[str]]          = None,
-        scen_sheets: Optional[Dict[str,str]]         = None,
+        model_mev: Optional[Dict[str, str]]          = None,
+        scen_mevs: Optional[Dict[str, Dict[str, str]]] = None,
         # Modeling in-sample cutoff
         in_sample_end: Optional[str]                 = None,
         # Scenario-testing in-sample cutoff
@@ -57,21 +54,18 @@ class DataManager:
 
         # MEV data
         if mev_loader is None:
-            if model_workbook is None or model_sheet is None:
+            if model_mev is None or scen_mevs is None:
                 raise ValueError(
-                    "model_workbook and model_sheet required if mev_loader not provided"
+                    "model_mev and scen_mevs required if mev_loader not provided"
                 )
             mev_loader = MEVLoader(
-                model_workbook=model_workbook,
-                model_sheet=model_sheet,
-                scen_workbooks=scen_workbooks,
-                scen_sheets=scen_sheets,
+                model_mev=model_mev,
+                scen_mevs=scen_mevs,
             )
         mev_loader.load()
         self._mev_loader = mev_loader
-        self.model_mev   = mev_loader.model_mev
 
-        # Cutoff dates (stored but not auto‐split)
+        # Cutoff dates (stored but not auto-split)
         self.in_sample_end      = (
             pd.to_datetime(in_sample_end).normalize()
             if in_sample_end else None
@@ -108,23 +102,27 @@ class DataManager:
 
     # Scenario MEVs, trimmed by scen_in_sample_end
     @property
-    def scen_mevs(self) -> Dict[str, pd.DataFrame]:
-        raw = self._mev_loader.scenario_mevs
+    def scen_mevs(self) -> Dict[str, Dict[str, pd.DataFrame]]:
+        raw = self._mev_loader.scen_mevs
         if self.scen_in_sample_end is None:
             return raw
         cutoff = self.scen_in_sample_end
-        return {name: df.loc[:cutoff] for name, df in raw.items()}
+        trimmed: Dict[str, Dict[str, pd.DataFrame]] = {}
+        for key, df_dict in raw.items():
+            trimmed[key] = {scen: df.loc[:cutoff] for scen, df in df_dict.items()}
+        return trimmed
 
-    def interpolate_mevs(self, freq: str = 'M'):
+    def interpolate_mevs(self, freq: str = 'M') -> None:
         current_freq = pd.infer_freq(self.internal_data.index)
         if current_freq != freq:
             raise ValueError(f"Internal data frequency is not {freq}")
         target_idx     = self.internal_data.index.normalize()
-        self.model_mev = self._interpolate_df(self.model_mev, target_idx)
+        df_interp = self._interpolate_df(self.model_mev, target_idx)
+        # replace model_mev with interpolated
+        self._mev_loader._model_mev = df_interp
 
     def apply_to_mevs(self, func: Callable[[pd.DataFrame], pd.DataFrame]) -> None:
         self._mev_loader.apply_to_all(func)
-        self.model_mev = self._mev_loader.model_mev
 
     def build_indep_vars(
         self,
@@ -213,25 +211,13 @@ class DataManager:
         return self._internal_loader.freq
 
     @property
-    def model_workbook(self) -> str:
-        return self._mev_loader.model_workbook
+    def model_mev(self) -> pd.DataFrame:
+        return self._mev_loader.model_mev
 
     @property
-    def model_sheet(self) -> str:
-        return self._mev_loader.model_sheet
-
-    @property
-    def scen_workbooks(self) -> List[str]:
-        return self._mev_loader.scenario_workbooks
-
-    @property
-    def scen_sheets(self) -> Dict[str,str]:
-        return self._mev_loader.scenario_sheets
-
-    @property
-    def model_map(self) -> Dict[str,str]:
+    def model_map(self) -> Dict[str, str]:
         return self._mev_loader.model_map
 
     @property
-    def scen_maps(self) -> Dict[str,Dict[str,str]]:
-        return self._mev_loader.scenario_maps
+    def scen_maps(self) -> Dict[str, Dict[str, Dict[str, str]]]:
+        return self._mev_loader.scen_maps

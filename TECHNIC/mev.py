@@ -1,69 +1,106 @@
 # TECHNIC/mev.py
+
+import os
 import pandas as pd
-from typing import List, Dict, Optional, Tuple, Callable
+from typing import Dict, Any, Tuple, Callable
 
 class MEVLoader:
     """
-    Load and preprocess macro‑economic variable tables for modeling and scen testing.
+    Loader for Macro Economic Variables from Excel workbooks.
 
-    Attributes:
-      model_mev: DataFrame for the primary modeling scen.
-      scen_mevs: Dict of DataFrames for each scen.
-      model_map: Dict mapping variable codes → descriptive names.
-      scen_maps: Dict mapping each scen → its code→name map.
+    - model_mev: dict with a single key (workbook path) and value (sheet name) for base MEV.
+      Example: {"model_mev.xlsx": "ModelSheet"}
+
+    - scen_mevs: dict mapping each workbook path to a dict of scenario names to sheet names.
+      Example:
+        {
+            "scen_workbook1.xlsx": {
+                "base": "BaseSheet",
+                "adv": "AdverseSheet",
+                "sev": "SevereSheet"
+            },
+            "scen_workbook2.xlsx": {
+                "base": "Base2",
+                "adv": "Adverse2",
+                "sev": "Severe2"
+            }
+        }
     """
     def __init__(
         self,
-        model_workbook: str,
-        model_sheet: str,
-        scen_workbooks: Optional[List[str]] = None,
-        scen_sheets: Optional[Dict[str, str]] = None,
+        model_mev: Dict[str, str],
+        scen_mevs: Dict[str, Dict[str, str]]
     ):
-        self.model_workbook = model_workbook
-        self.model_sheet    = model_sheet
-        self.scen_workbooks = scen_workbooks or []
-        self.scen_sheets    = scen_sheets    or {}
-        self._model_mev: Optional[pd.DataFrame]      = None
-        self._scen_mevs: Dict[str, pd.DataFrame]     = {}
-        self._model_map: Dict[str, str]              = {}
-        self._scen_maps: Dict[str, Dict[str, str]]   = {}
+        # Validate model_mev has exactly one entry
+        if len(model_mev) != 1:
+            raise ValueError("model_mev must contain exactly one workbook:sheet mapping.")
+        self.model_mev = model_mev
+
+        # Validate scen_mevs structure
+        if not isinstance(scen_mevs, dict) or not all(
+            isinstance(v, dict) for v in scen_mevs.values()
+        ):
+            raise ValueError(
+                "scen_mevs must be a dict mapping workbook->(dict of scenario->sheet)."
+            )
+        self.scen_mevs = scen_mevs
+
+        # placeholders for loaded data
+        # base model MEV and its code->name map
+        self._model_mev: pd.DataFrame = None
+        self._model_map: Dict[str, str] = {}
+        # scenario MEVs grouped by workbook key (filename sans extension)
+        self._scen_mevs: Dict[str, Dict[str, pd.DataFrame]] = {}
+        self._scen_maps: Dict[str, Dict[str, Dict[str, str]]] = {}
 
     def load(self) -> None:
-        self._model_mev, self._model_map = self._load_and_preprocess(
-            self.model_workbook, self.model_sheet
-        )
-        for wb in self.scen_workbooks:
-            for scen, sheet in self.scen_sheets.items():
-                df, mapping = self._load_and_preprocess(wb, sheet)
-                self._scen_mevs[scen] = df
-                self._scen_maps[scen] = mapping
+        """
+        Load and preprocess both base MEV and all scenario MEVs,
+        storing results internally.
+        """
+        # load base model MEV
+        workbook, sheet = next(iter(self.model_mev.items()))
+        df, mapping = self._load_and_preprocess(workbook, sheet)
+        self._model_mev = df
+        self._model_map = mapping
+
+        # load scenario MEVs per workbook set
+        for workbook, sheet_map in self.scen_mevs.items():
+            key = os.path.splitext(os.path.basename(workbook))[0]
+            df_dict: Dict[str, pd.DataFrame] = {}
+            map_dict: Dict[str, str] = {}
+            for scenario, sheet in sheet_map.items():
+                df_s, mapping_s = self._load_and_preprocess(workbook, sheet)
+                df_dict[scenario] = df_s
+                map_dict[scenario] = mapping_s
+            self._scen_mevs[key] = df_dict
+            self._scen_maps[key] = map_dict
 
     def _load_and_preprocess(self, workbook: str, sheet: str) -> Tuple[pd.DataFrame, Dict[str, str]]:
         raw = pd.read_excel(workbook, sheet_name=sheet)
-        # drop initial header rows, extract codes/names, build mapping
         df = raw.copy()
-        df_mev_prc = df.iloc[1:,:]
+        df_mev_prc = df.iloc[1:]
         df_mev_prc.columns = df_mev_prc.iloc[0]
 
-        df_mev_prc.index = df_mev_prc.iloc[:,0]
-        df_mev_prc = df_mev_prc.iloc[1:,1:]
+        df_mev_prc.index = df_mev_prc.iloc[:, 0]
+        df_mev_prc = df_mev_prc.iloc[1:, 1:]
         df_mev_prc = df_mev_prc.loc[:, df_mev_prc.columns.notna()].iloc[2:]
 
-        mev_name_lst = df_mev_prc.columns
+        mev_name_lst = df_mev_prc.columns.tolist()
         mev_name_lst = [mev.replace('Canada\n', '') for mev in mev_name_lst][1:]
 
         df_mev_prc.columns = df_mev_prc.iloc[0]
-        df_mev_prc = df_mev_prc.iloc[1:,:]
- 
-        # Change index
+        df_mev_prc = df_mev_prc.iloc[1:, :]
+
+        # Reformat index to timestamps at period end
         df_mev_prc.index = [i.replace(':', 'Q') for i in df_mev_prc.index]
-        df_mev_prc.index = pd.PeriodIndex(df_mev_prc.index, freq='Q').to_timestamp(how='end').strftime('%Y-%m-%d')
+        df_mev_prc.index = pd.PeriodIndex(df_mev_prc.index, freq='Q').to_timestamp(how='end')
         df_mev_prc.index = pd.to_datetime(df_mev_prc.index)
 
         mev_code_lst = df_mev_prc.columns.tolist()[1:]
-
-        assert len(mev_name_lst) == len(mev_code_lst)
-        mev_dict = dict(map(lambda i,j : (i,j) , mev_code_lst,mev_name_lst))
+        assert len(mev_name_lst) == len(mev_code_lst), \
+            "Mismatch between code and name lists"
+        mev_dict = dict(zip(mev_code_lst, mev_name_lst))
 
         return df_mev_prc, mev_dict
 
@@ -74,7 +111,7 @@ class MEVLoader:
         return self._model_mev
 
     @property
-    def scen_mevs(self) -> Dict[str, pd.DataFrame]:
+    def scen_mevs(self) -> Dict[str, Dict[str, pd.DataFrame]]:
         return self._scen_mevs
 
     @property
@@ -82,10 +119,16 @@ class MEVLoader:
         return self._model_map
 
     @property
-    def scen_maps(self) -> Dict[str, Dict[str, str]]:
+    def scen_maps(self) -> Dict[str, Dict[str, Dict[str, str]]]:
         return self._scen_maps
-    
+
     def apply_to_all(self, func: Callable[[pd.DataFrame], pd.DataFrame]) -> None:
-        self._model_mev = func(self._model_mev.copy())
-        for scen, df in self._scen_mevs.items():
-            self._scen_mevs[scen] = func(df.copy())
+        """
+        Apply a transformation function to all loaded MEV DataFrames.
+        """
+        if self._model_mev is not None:
+            self._model_mev = func(self._model_mev.copy())
+        for key, df_dict in self._scen_mevs.items():
+            for scen, df in df_dict.items():
+                df_new = func(df.copy())
+                self._scen_mevs[key][scen] = df_new
