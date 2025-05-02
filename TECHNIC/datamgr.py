@@ -130,6 +130,13 @@ class DataManager:
         internal_df: Optional[pd.DataFrame] = None,
         mev_df: Optional[pd.DataFrame]      = None
     ) -> pd.DataFrame:
+        """
+        Build independent-variable DataFrame from specs, applying TSFM transforms.
+
+        :param specs: list of feature names (str) or TSFM instances.
+        :param internal_df: override for internal data.
+        :param mev_df: override for MEV data.
+        """
         internal = internal_df or self.internal_data
         mev      = mev_df      or self.model_mev
 
@@ -141,40 +148,54 @@ class DataManager:
                     yield it
 
         flat_specs = list(_flatten(specs))
-        names, transforms = [], {}
+        raw_names: List[str] = []
+        transformers: List[TSFM] = []
+
         for itm in flat_specs:
             if isinstance(itm, str):
-                names.append(itm)
-            elif isinstance(itm, dict):
-                transforms.update(itm)
+                raw_names.append(itm)
+            elif isinstance(itm, TSFM):
+                transformers.append(itm)
             else:
-                raise ValueError(f"Invalid spec element: {itm}")
+                raise ValueError(f"Invalid spec element: {itm!r}")
 
-        for var, tsfm in transforms.items():
-            if var in internal.columns:
-                target = internal
-            elif var in mev.columns:
-                target = mev
-            else:
-                raise KeyError(f"Variable '{var}' not found.")
-            series      = target[var]
-            transformed = tsfm.transform_fn(series)
-            col         = transformed.shift(tsfm.max_lag) if tsfm.max_lag > 0 else transformed
-            name        = f"{var}_{tsfm.suffix}"
-            target[name] = col
-
-        final_cols = names + [f"{v}_{tsfm.suffix}" for v, tsfm in transforms.items()]
         pieces = []
-        for col in final_cols:
-            if col in internal.columns:
-                pieces.append(internal[col])
-            elif col in mev.columns:
-                pieces.append(mev[col])
+
+        # 1) add raw features
+        for name in raw_names:
+            if name in internal.columns:
+                pieces.append(internal[name])
+            elif name in mev.columns:
+                pieces.append(mev[name])
             else:
-                raise KeyError(f"Column '{col}' not found after transformation.")
+                raise KeyError(f"Column '{name}' not found in internal or MEV data.")
+
+        # 2) apply each TSFM
+        for tsfm in transformers:
+            # pick up the series
+            if tsfm.feature is not None:
+                series = tsfm.feature
+            else:
+                fn = tsfm.feature_name
+                if fn in internal.columns:
+                    series = internal[fn]
+                elif fn in mev.columns:
+                    series = mev[fn]
+                else:
+                    raise KeyError(f"Variable '{fn}' not found for transformation.")
+                # inject it so apply_transform() works
+                tsfm.feature = series
+
+            # apply transform + lag
+            col = tsfm.apply_transform()
+            pieces.append(col)
+
+        # concat and normalize
         X = pd.concat(pieces, axis=1)
         X.index = X.index.normalize()
         return X
+    
+    
 
     @staticmethod
     def _interpolate_df(df: pd.DataFrame, target_idx: pd.DatetimeIndex) -> pd.DataFrame:
