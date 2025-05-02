@@ -10,3 +10,4 @@ from .segment import *
 from .writer import *
 from .template import *
 from .test import *
+from .regime import *
