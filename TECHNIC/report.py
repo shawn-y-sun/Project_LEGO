@@ -62,11 +62,6 @@ class ModelReportBase(ABC):
     def plot_perf(self, **kwargs) -> Any:
         """Plot performance metrics."""
         ...
-
-    @abstractmethod
-    def plot_tests(self, **kwargs) -> Any:
-        """Plot diagnostic test results."""
-        ...
     
 
 class SegmentReportBase(ABC):
