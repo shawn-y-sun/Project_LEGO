@@ -26,7 +26,7 @@ def default_load_and_preprocess(workbook: str, sheet: str) -> Tuple[pd.DataFrame
     # Reformat index to timestamps at period end
     df_mev_prc.index = [i.replace(':', 'Q') for i in df_mev_prc.index]
     df_mev_prc.index = pd.PeriodIndex(df_mev_prc.index, freq='Q').to_timestamp(how='end')
-    df_mev_prc.index = pd.to_datetime(df_mev_prc.index)
+    df_mev_prc.index = pd.to_datetime(df_mev_prc.index).normalize()
 
     mev_code_lst = df_mev_prc.columns.tolist()[1:]
     assert len(mev_name_lst) == len(mev_code_lst), \
