@@ -1,7 +1,7 @@
 # TECHNIC/condition.py
 
 import pandas as pd
-from typing import Callable, Union, List, Any
+from typing import Callable, Union, List, Any, Dict
 
 
 class CondVar:
@@ -75,11 +75,26 @@ class CondVar:
     def name(self) -> str:
         """
         Generate a name for the conditional variable:
-        mainName_condFnName[_condVarNames...].
+        mainName_condFnName.
         """
         fn_name = getattr(self.cond_fn, "__name__", "cond")
-        cond_names = [
-            cv.name if isinstance(cv, pd.Series) else cv for cv in self.cond_var
-        ]
-        cond_part = f"_{'_'.join(cond_names)}" if cond_names else ""
-        return f"{self.main_name}_{fn_name}{cond_part}"
+        return f"{self.main_name}_{fn_name}"
+    
+
+def zero_if_exceeds(
+    main_series: pd.Series,
+    condition_series: pd.Series,
+    threshold: float
+) -> pd.Series:
+    """
+    Conditional function: sets values of main_series to 0 where
+    condition_series exceeds the threshold; otherwise retains original values.
+
+    :param main_series: Series with original values.
+    :param condition_series: Series to compare against threshold.
+    :param threshold: Numeric cutoff above which main_series is zeroed.
+    :return: A new Series with same index as main_series.
+    """
+    # Zero out values where condition exceeds the threshold
+    result = main_series.where(condition_series <= threshold, other=0)
+    return result
