@@ -3,7 +3,6 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Union, Type, List
 import pandas as pd
 
-from .model import ModelBase
 from statsmodels.stats.stattools import jarque_bera
 from scipy.stats import shapiro
 
@@ -27,7 +26,7 @@ class ModelTestBase(ABC):
     """
     def __init__(
         self,
-        model: Optional[ModelBase] = None,
+        model: Optional[Any] = None,
         X: Optional[pd.DataFrame] = None,
         y: Optional[pd.Series] = None,
         test_dict: Optional[Dict[str, Any]] = None
@@ -99,7 +98,7 @@ class NormalityTest(ModelTestBase):
     """
     def __init__(
         self,
-        model: Optional[ModelBase] = None,
+        model: Optional[Any] = None,
         test_dict: Dict[str, Any] = normality_test_dict,
         resid: Optional[pd.Series] = None,
         alpha : Union[float, Dict[str, float]] = 0.05
@@ -152,7 +151,7 @@ class StationarityTest(ModelTestBase):
         series: Optional[pd.Series] = None,
         alpha : Union[float, Dict[str, float]] = 0.05,
         test_dict: Dict[str, Any] = stationarity_test_dict,
-        model: Optional[ModelBase] = None
+        model: Optional[Any] = None
     ):
         super().__init__(model=model, X=None, y=None, test_dict=test_dict)
         self.alpha  = alpha

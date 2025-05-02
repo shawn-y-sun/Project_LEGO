@@ -39,39 +39,39 @@ class MEVLoader:
     """
     Loader for Macro Economic Variables from Excel workbooks.
 
-    - model_mev: dict with a single key (workbook path) and value (sheet name) for base MEV.
+    - model_mev_source: dict with a single key (workbook path) and value (sheet name) for base MEV.
       Example: {"model_mev.xlsx": "ModelSheet"}
 
-    - scen_mevs: dict mapping each workbook path to a dict of scenario names to sheet names.
+    - scen_mevs_source: dict mapping each workbook path to a dict of scenario names to sheet names.
       Example:
         {
-            "scen_workbook1.xlsx": {"base": "BaseSheet", ...},
-            ...
+            "scen_workbook1.xlsx": {"base": "BaseSheet", "adv": "AdverseSheet", "sev": "SevereSheet"},
+            "scen_workbook2.xlsx": {"base": "Base2", "adv": "Adverse2", "sev": "Severe2"}
         }
 
-    :param model_mev: single-entry mapping of workbook->sheet for base MEV.
-    :param scen_mevs: mapping of workbook->(mapping of scenario->sheet).
+    :param model_mev_source: single-entry mapping of workbook->sheet for base MEV.
+    :param scen_mevs_source: mapping of workbook->(mapping of scenario->sheet).
     :param load_and_preprocess: function to load and preprocess each worksheet (workbook, sheet) -> (df, mapping).
     """
     def __init__(
         self,
-        model_mev: Dict[str, str],
-        scen_mevs: Dict[str, Dict[str, str]],
+        model_mev_source: Dict[str, str],
+        scen_mevs_source: Dict[str, Dict[str, str]],
         load_and_preprocess: Callable[[str, str], Tuple[pd.DataFrame, Dict[str, str]]] = default_load_and_preprocess
     ):
-        # Validate model_mev has exactly one entry
-        if len(model_mev) != 1:
-            raise ValueError("model_mev must contain exactly one workbook:sheet mapping.")
-        self.model_mev = model_mev
+        # Validate model_mev_source has exactly one entry
+        if len(model_mev_source) != 1:
+            raise ValueError("model_mev_source must contain exactly one workbook:sheet mapping.")
+        self.model_mev_source = model_mev_source
 
-        # Validate scen_mevs structure
-        if not isinstance(scen_mevs, dict) or not all(
-            isinstance(v, dict) for v in scen_mevs.values()
+        # Validate scen_mevs_source structure
+        if not isinstance(scen_mevs_source, dict) or not all(
+            isinstance(v, dict) for v in scen_mevs_source.values()
         ):
             raise ValueError(
-                "scen_mevs must be a dict mapping workbook->(dict of scenario->sheet)."
+                "scen_mevs_source must be a dict mapping workbook->(dict of scenario->sheet)."
             )
-        self.scen_mevs = scen_mevs
+        self.scen_mevs_source = scen_mevs_source
 
         # Store preprocessing function
         self._preprocess_fn = load_and_preprocess
@@ -88,13 +88,13 @@ class MEVLoader:
         storing results internally.
         """
         # load base model MEV
-        workbook, sheet = next(iter(self.model_mev.items()))
+        workbook, sheet = next(iter(self.model_mev_source.items()))
         df, mapping = self._preprocess_fn(workbook, sheet)
         self._model_mev = df
         self._model_map = mapping
 
         # load scenario MEVs per workbook set
-        for workbook, sheet_map in self.scen_mevs.items():
+        for workbook, sheet_map in self.scen_mevs_source.items():
             key = os.path.splitext(os.path.basename(workbook))[0]
             df_dict: Dict[str, pd.DataFrame] = {}
             map_dict: Dict[str, Dict[str, str]] = {}

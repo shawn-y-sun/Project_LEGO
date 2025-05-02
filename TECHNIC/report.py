@@ -4,9 +4,8 @@ import warnings
 import matplotlib.pyplot as plt
 from pandas import DataFrame, Series
 from abc import ABC, abstractmethod
-from typing import Callable, Any, Optional
+from typing import Callable, Any, Optional, Dict
 from .plot import ols_model_perf_plot, ols_model_test_plot, ols_seg_perf_plot
-from .cm import CM
 
 class ModelReportBase(ABC):
     """
@@ -78,7 +77,7 @@ class SegmentReportBase(ABC):
     """
     def __init__(
         self,
-        cms: Dict[str, CM],
+        cms: Dict[str, Any],
         perf_plot_fn: Callable[..., Any],
         test_plot_fn: Callable[..., Any]
     ):
@@ -272,7 +271,7 @@ class OLS_SegmentReport:
     Uses injected plotting functions for segment-level performance and diagnostics.
     """
     def __init__(self,
-        cms: Dict[str, CM],
+        cms: Dict[str, Any],
         seg_perf_plot_fn=ols_seg_perf_plot,
         seg_test_plot_fn=ols_model_test_plot
     ):

@@ -31,8 +31,8 @@ class DataManager:
         internal_freq: str                           = 'M',
         # MEV loader inputs
         mev_loader: Optional[MEVLoader]              = None,
-        model_mev: Optional[Dict[str, str]]          = None,
-        scen_mevs: Optional[Dict[str, Dict[str, str]]] = None,
+        model_mev_source: Optional[Dict[str, str]]   = None,
+        scen_mevs_source: Optional[Dict[str, Dict[str, str]]] = None,
         # Modeling in-sample cutoff
         in_sample_end: Optional[str]                 = None,
         # Scenario-testing in-sample cutoff
@@ -54,13 +54,13 @@ class DataManager:
 
         # MEV data
         if mev_loader is None:
-            if model_mev is None or scen_mevs is None:
+            if model_mev_source is None or scen_mevs_source is None:
                 raise ValueError(
-                    "model_mev and scen_mevs required if mev_loader not provided"
+                    "model_mev_source and scen_mevs_source required if mev_loader not provided"
                 )
             mev_loader = MEVLoader(
-                model_mev=model_mev,
-                scen_mevs=scen_mevs,
+                model_mev_source=model_mev_source,
+                scen_mevs_source=scen_mevs_source,
             )
         mev_loader.load()
         self._mev_loader = mev_loader
@@ -74,6 +74,7 @@ class DataManager:
             pd.to_datetime(scen_in_sample_end).normalize()
             if scen_in_sample_end else None
         )
+
 
     # Modeling in‑sample/out‑of‑sample splits
     @property
