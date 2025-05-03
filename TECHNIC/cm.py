@@ -173,6 +173,7 @@ class CM:
 
     def show_report(
         self,
+        show_full: bool = False,
         show_out: bool = True,
         show_tests: bool = False,
         perf_kwargs: Dict[str, Any] = None,
@@ -197,7 +198,7 @@ class CM:
         )
 
         # Full-sample report
-        if show_out:
+        if show_full:
             if self.report_full is None:
                 raise RuntimeError(
                     "report_full is not defined. Call build() with report_cls before show_report()."
