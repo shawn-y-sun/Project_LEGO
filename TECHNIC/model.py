@@ -56,6 +56,20 @@ class ModelBase(ABC):
         return self.predict(self.X_out)
     
     @property
+    def tests(self) -> TestSetBase:
+        """
+        Build and return the TestSet for this model.
+        """
+        return self.build_tests()
+    
+    @property
+    def test_measures(self) -> dict:
+        """
+        Return the test_results from TestSet as test measures for this model.
+        """
+        return self.tests.test_results
+    
+    @property
     def report(self) -> Any:
         """
         Build and return the report instance using the configured report_cls
@@ -88,7 +102,7 @@ class OLS(ModelBase):
         y: pd.Series,
         X_out: Optional[pd.DataFrame] = None,
         y_out: Optional[pd.Series] = None,
-        testset_cls: Optional[Type[Any]] = OLS_ModelReport,
+        testset_cls: Optional[Type[Any]] = TestSetBase,
         report_cls: Optional[Type[Any]] = OLS_ModelReport
     ):
         super().__init__(
@@ -206,17 +220,3 @@ class OLS(ModelBase):
         }
 
         return TestSetClass(test_kwargs)
-    
-    @property
-    def tests(self) -> TestSetBase:
-        """
-        Build and return the TestSet for this model.
-        """
-        return self.build_tests()
-    
-    @property
-    def test_measures(self) -> dict:
-        """
-        Return the test_results from TestSet as test measures for this model.
-        """
-        return self.tests.test_results

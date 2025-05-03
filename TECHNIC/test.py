@@ -229,7 +229,7 @@ class StationarityTest(ModelTestBase):
         if series is None:
             return pd.DataFrame()
         for typ, reg in types.items():
-            for lag in (0, 1):
+            for lag in (0, 1, 2):
                 # run ADF with fixed lag and regression type
                 res = adfuller(series, maxlag=lag, regression=reg, autolag=None, store=True)
                 adfstat = res[0]
