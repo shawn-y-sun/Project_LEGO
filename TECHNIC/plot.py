@@ -109,49 +109,64 @@ def ols_model_test_plot(model, X, y, figsize=(6,4), **kwargs):
     return fig
 
 
-def ols_seg_perf_plot(
-    measures: Dict[str, Any],
+def ols_plot_perf_set(
+    reports: Dict[str, Any],
     full: bool = False,
     figsize: tuple = (12, 6),
     **kwargs
 ) -> plt.Figure:
     """
-    Plot actual vs. fitted/predicted values for multiple candidate models on one axis.
-    In-sample fits are solid; out-of-sample predictions are dashed (same color per CM).
+    Plot actual vs. fitted/in-sample and predicted/out-of-sample values for multiple candidate models.
+    In-sample fits are solid; out-of-sample predictions are dashed.
+
+    Parameters
+    ----------
+    reports : dict
+        Mapping of model_id to ModelReportBase instances (must have .y, .y_out,
+        .y_fitted_in, and .y_pred_out attributes).
+    full : bool
+        If True, plot only in-sample fits; otherwise include out-of-sample predictions.
+    figsize : tuple, optional
+        Figure size.
+    **kwargs
+        Passed to plt.subplots().
     """
-    # Determine common actual series
-    first_m = next(iter(measures.values()))
-    if not full and getattr(first_m, 'y_out', None) is not None:
-        actual = pd.concat([first_m.y, first_m.y_out]).sort_index()
+    # Determine the actual series
+    first = next(iter(reports.values()))
+    if not full and hasattr(first, 'y_out') and first.y_out is not None and not first.y_out.empty:
+        actual = pd.concat([first.y, first.y_out]).sort_index()
     else:
-        actual = first_m.y.sort_index()
+        actual = first.y.sort_index()
 
     fig, ax = plt.subplots(figsize=figsize, **kwargs)
     ax.plot(actual.index, actual, label='Actual', color='black', linewidth=2)
 
-    # use default color cycle
     colors = plt.rcParams['axes.prop_cycle'].by_key().get('color', [])
-    for idx, (cm_id, m) in enumerate(measures.items()):
+    for idx, (mid, rpt) in enumerate(reports.items()):
         color = colors[idx % len(colors)] if colors else None
-        y_in = pd.Series(m.model.predict(m.X), index=m.X.index).sort_index()
+        # In-sample fitted
+        y_in = rpt.y_fitted_in.sort_index()
         ax.plot(
-            y_in.index, y_in,
-            linestyle='-', label=f'{cm_id} (IS)',
-            linewidth=2, color=color
+            y_in.index,
+            y_in,
+            linestyle='-', # noqa: E231
+            label=f"{mid} (IS)",
+            color=color,
+            linewidth=2
         )
-        if not full and getattr(m, 'X_out', None) is not None:
-            if getattr(m, 'y_pred_out', None) is not None:
-                y_out = m.y_pred_out.sort_index()
-            else:
-                y_out = pd.Series(m.model.predict(m.X_out), index=m.X_out.index).sort_index()
+        # Out-of-sample predicted
+        if not full and hasattr(rpt, 'y_pred_out') and rpt.y_pred_out is not None and not rpt.y_pred_out.empty:
+            y_out = rpt.y_pred_out.sort_index()
             ax.plot(
-                y_out.index, y_out,
-                linestyle='--', label=f'{cm_id} (OOS)',
-                linewidth=2, color=color
+                y_out.index,
+                y_out,
+                linestyle='--',
+                label=f"{mid} (OOS)",
+                color=color,
+                linewidth=2
             )
-
-    ax.set_ylabel('Value')
     ax.set_title('Segment Performance Comparison')
+    ax.set_ylabel('Value')
     ax.legend(loc='best')
     fig.tight_layout()
     return fig
