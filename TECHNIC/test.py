@@ -119,16 +119,21 @@ class NormalityTest(ModelTestBase):
 
     @property
     def test_result(self) -> Dict[str, Dict[str, Any]]:
-        result: Dict[str, Dict[str, Any]] = {}
+        """Run each normality test, returning stat, pvalue, and pass flag."""
+        results: Dict[str, Dict[str, Any]] = {}
         for test_name, fn in self.test_dict.items():
-            stat, pvalue = fn(self.resid)
-            passed = pvalue > self.alpha
-            result[test_name] = {
+            output = fn(self.resid)
+            stat = output[0]
+            pvalue = output[1]
+            # allow alpha per test if dict
+            level = self.alpha[test_name] if isinstance(self.alpha, dict) else self.alpha
+            passed = pvalue > level
+            results[test_name] = {
                 'statistic': stat,
                 'pvalue': pvalue,
                 'passed': passed
             }
-        return result
+        return results
 
 
     @property
@@ -187,17 +192,20 @@ class StationarityTest(ModelTestBase):
 
     @property
     def test_result(self) -> Dict[str, Dict[str, Any]]:
-        result: Dict[str, Dict[str, Any]] = {}
+        """Run each stationarity test, returning stat, pvalue, and pass flag."""
+        results: Dict[str, Dict[str, Any]] = {}
         for test_name, fn in self.test_dict.items():
             output = fn(self.series)
-            stat, pvalue = output[0], output[1]
-            passed = pvalue < self.alpha
-            result[test_name] = {
+            stat = output[0]
+            pvalue = output[1]
+            level = self.alpha[test_name] if isinstance(self.alpha, dict) else self.alpha
+            passed = pvalue < level
+            results[test_name] = {
                 'statistic': stat,
                 'pvalue': pvalue,
                 'passed': passed
             }
-        return result
+        return results
 
     @property
     def test_filter(self) -> bool:
