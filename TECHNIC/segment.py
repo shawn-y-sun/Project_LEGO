@@ -5,7 +5,6 @@ import pandas as pd
 from typing import (
     Type, Dict, List, Union, Optional, Any
 )
-from .data import DataManager
 from .cm import CM
 from .model import ModelBase
 from .template import ExportTemplateBase
@@ -20,7 +19,7 @@ class Segment:
         target: str,
         data_manager: Any,
         model_cls: Type[ModelBase],
-        export_template_cls: Optional[Type[Any]] = None
+        export_template_cls: Optional[Type[ExportTemplateBase]] = None
     ):
         self.segment_id = segment_id
         self.target = target
