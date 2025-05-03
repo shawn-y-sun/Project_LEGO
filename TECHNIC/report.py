@@ -145,20 +145,20 @@ class OLS_ModelReport(ModelReportBase):
 
     def show_in_perf_tbl(self) -> pd.DataFrame:
         """In-sample performance metrics as a single-row DataFrame."""
-        return pd.DataFrame([self.measure.in_perf_measures])
+        return pd.DataFrame([self.in_perf_measures])
 
     def show_out_perf_tbl(self) -> pd.DataFrame:
         """Out-of-sample performance metrics as a single-row DataFrame (empty if none)."""
-        out = self.measure.out_perf_measures
+        out = self.out_perf_measures
         return pd.DataFrame([out]) if out else pd.DataFrame()
 
     def show_test_tbl(self) -> pd.DataFrame:
         """In-sample testing measures as a single-row DataFrame."""
-        return pd.json_normalize(self.measure.test_measures)
+        return pd.json_normalize(self.test_measures)
 
     def show_params_tbl(self) -> pd.DataFrame:
         """Parameter table with columns: Variable, Coef, Pvalue, Sig, VIF, Std."""
-        pm = self.measure.param_measures
+        pm = self.param_measures
         df = pd.DataFrame.from_dict(pm, orient='index')
         df.index.name = 'Variable'
         df = df.reset_index()
@@ -203,7 +203,7 @@ class OLS_ModelReport(ModelReportBase):
         perf_kwargs = perf_kwargs or {}
         test_kwargs = test_kwargs or {}
 
-        if not getattr(self.measure, 'out_perf_measures', None):
+        if not getattr(self, 'out_perf_measures', None):
             show_out = False
 
         print('=== In-Sample Performance ===')
