@@ -134,32 +134,6 @@ class CM:
                 y_out=self.y_out
             ).fit()
 
-    def show_report(
-        self,
-        show_out: bool = True,
-        show_tests: bool = False,
-        perf_kwargs: Dict[str, Any] = None,
-        test_kwargs: Dict[str, Any] = None
-    ) -> None:
-        """
-        Delegate to the in-sample model's report to show performance and optional tests.
-        """
-        if not self.report_cls:
-            raise RuntimeError(
-                "report_cls not provided. Instantiate CM with report_cls before calling show_report()."
-            )
-
-        perf_kwargs = perf_kwargs or {}
-        test_kwargs = test_kwargs or {}
-
-        report = self.model_in.report
-        report.show_report(
-            show_out=show_out,
-            show_tests=show_tests,
-            perf_kwargs=perf_kwargs,
-            test_kwargs=test_kwargs
-        )
-
     @property
     def report_in(self) -> Any:
         '''
@@ -195,3 +169,42 @@ class CM:
         if self.model_full is None:
             raise RuntimeError("Full-sample model not built; call build(sample='full') first.")
         return self.model_full.tests
+    
+
+    def show_report(
+        self,
+        show_out: bool = True,
+        show_tests: bool = False,
+        perf_kwargs: Dict[str, Any] = None,
+        test_kwargs: Dict[str, Any] = None
+    ) -> None:
+        """
+        Show in-sample report (and tests), and optionally the full-sample report.
+        """
+        perf_kwargs = perf_kwargs or {}
+        test_kwargs = test_kwargs or {}
+
+        if self.report_in is None:
+            raise RuntimeError(
+                "report_in is not defined. Call build() with report_cls before show_report()."
+            )
+        # In-sample report
+        self.report_in.show_report(
+            show_out=show_out,
+            show_tests=show_tests,
+            perf_kwargs=perf_kwargs,
+            test_kwargs=test_kwargs
+        )
+
+        # Full-sample report
+        if show_out:
+            if self.report_full is None:
+                raise RuntimeError(
+                    "report_full is not defined. Call build() with report_cls before show_report()."
+                )
+            self.report_full.show_report(
+                show_out=False,
+                show_tests=show_tests,
+                perf_kwargs=perf_kwargs,
+                test_kwargs=test_kwargs
+            )

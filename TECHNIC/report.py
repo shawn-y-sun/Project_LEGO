@@ -13,7 +13,6 @@ class ModelReportBase(ABC):
     """
     def __init__(
         self,
-        model: Any,
         X: DataFrame,
         y: Series,
         y_fitted_in: Series,
@@ -26,7 +25,6 @@ class ModelReportBase(ABC):
         param_measures: Dict[str, Dict[str, Any]] = None,
     ):
         # Store model data and measures
-        self.model = model
         self.X = X
         self.y = y
         self.y_fitted_in = y_fitted_in
@@ -113,7 +111,6 @@ class OLS_ModelReport(ModelReportBase):
     """
     def __init__(
         self,
-        model: Any,
         X: DataFrame,
         y: Series,
         y_fitted_in: Series,
@@ -128,7 +125,6 @@ class OLS_ModelReport(ModelReportBase):
         test_plot_fn: Callable[..., Any] = ols_model_test_plot,
     ):
         super().__init__(
-            model=model,
             X=X,
             y=y,
             y_fitted_in=y_fitted_in,
@@ -153,8 +149,23 @@ class OLS_ModelReport(ModelReportBase):
         return pd.DataFrame([out]) if out else pd.DataFrame()
 
     def show_test_tbl(self) -> pd.DataFrame:
-        """In-sample testing measures as a single-row DataFrame."""
-        return pd.json_normalize(self.test_measures)
+        """
+        Flatten self.test_measures into a DataFrame, with a MultiIndex
+        (Test, SubTest) and one column per metric found in the innermost dicts.
+        Works for arbitrary metrics.
+        """
+        records = []
+        for test_name, subtests in self.test_measures.items():
+            for subtest_name, metrics in subtests.items():
+                # metrics is any dict: {"statistic":…, "pvalue":…, "foo":…, ...}
+                row = {"Test": test_name, "SubTest": subtest_name}
+                row.update(metrics)
+                records.append(row)
+        if not records:
+            return pd.DataFrame()  # no tests to show
+        df = pd.DataFrame.from_records(records)
+        # Set a clean MultiIndex
+        return df.set_index(["Test", "SubTest"])
 
     def show_params_tbl(self) -> pd.DataFrame:
         """Parameter table with columns: Variable, Coef, Pvalue, Sig, VIF, Std."""
@@ -251,8 +262,8 @@ class OLS_ModelReport(ModelReportBase):
         plt.show()
 
         if show_tests:
-            print('\n=== Test Metrics ===')
-            pass
+            print('\n=== Model Testing ===')
+            print(self.show_test_tbl().to_string(index=True))
 
 
 class OLS_SegmentReport:
