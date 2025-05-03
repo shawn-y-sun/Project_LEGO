@@ -112,6 +112,24 @@ class NormalityTest(ModelTestBase):
             self.resid = getattr(self.model, 'resid')
         else:
             self.resid = None
+    
+    @property
+    def name(self) -> str:
+        return "NormalityTest"
+
+    @property
+    def test_result(self) -> Dict[str, Dict[str, Any]]:
+        result: Dict[str, Dict[str, Any]] = {}
+        for test_name, fn in self.test_dict.items():
+            stat, pvalue = fn(self.resid)
+            passed = pvalue > self.alpha
+            result[test_name] = {
+                'statistic': stat,
+                'pvalue': pvalue,
+                'passed': passed
+            }
+        return result
+
 
     @property
     def test_filter(self) -> bool:
@@ -128,7 +146,7 @@ class NormalityTest(ModelTestBase):
 
 # Dictionary of stationarity diagnostic tests
 stationarity_test_dict: Dict[str, callable] = {
-    'adf': adfuller
+    'adf': lambda series: adfuller(series.dropna(), autolag='AIC')
 }
 
 class StationarityTest(ModelTestBase):
@@ -162,6 +180,24 @@ class StationarityTest(ModelTestBase):
             self.series = getattr(self.model, 'resid')
         else:
             self.series = None
+
+    @property
+    def name(self) -> str:
+        return "StationarityTest"
+
+    @property
+    def test_result(self) -> Dict[str, Dict[str, Any]]:
+        result: Dict[str, Dict[str, Any]] = {}
+        for test_name, fn in self.test_dict.items():
+            output = fn(self.series)
+            stat, pvalue = output[0], output[1]
+            passed = pvalue < self.alpha
+            result[test_name] = {
+                'statistic': stat,
+                'pvalue': pvalue,
+                'passed': passed
+            }
+        return result
 
     @property
     def test_filter(self) -> bool:
