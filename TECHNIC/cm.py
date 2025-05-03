@@ -3,14 +3,10 @@ import warnings
 warnings.simplefilter(action="ignore", category=FutureWarning)
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 from pandas.api.types import is_numeric_dtype
 from typing import Type, List, Dict, Any, Optional, Union
 
-from .internal import InternalDataLoader
-from .mev import MEVLoader
 from .model import ModelBase
-from .transform import TSFM
 
 class CM:
     """
@@ -26,15 +22,11 @@ class CM:
         target: str,
         data_manager: Any,
         model_cls: Type[ModelBase],
-        testset_cls: Optional[Type[Any]] = None,
-        report_cls: Optional[Type[Any]] = None
     ):
         self.model_id = model_id
         self.target = target
         self.dm = data_manager
         self.model_cls = model_cls
-        self.testset_cls = testset_cls
-        self.report_cls = report_cls
         # placeholders for data and models
         self.X = self.y = None
         self.X_in = self.y_in = None
@@ -132,18 +124,14 @@ class CM:
                 self.X_in,
                 self.y_in,
                 X_out=self.X_out,
-                y_out=self.y_out,
-                testset_cls=self.testset_cls,
-                report_cls=self.report_cls
+                y_out=self.y_out
             ).fit()
         if build_full:
             self.model_full = self.model_cls(
                 self.X_full,
                 self.y_full,
                 X_out=self.X_out,
-                y_out=self.y_out,
-                testset_cls=self.testset_cls,
-                report_cls=self.report_cls
+                y_out=self.y_out
             ).fit()
 
     def show_report(

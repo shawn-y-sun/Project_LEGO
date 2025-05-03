@@ -88,15 +88,15 @@ class OLS(ModelBase):
         y: pd.Series,
         X_out: Optional[pd.DataFrame] = None,
         y_out: Optional[pd.Series] = None,
-        testset_cls: Optional[Type[Any]] = None,
-        report_cls: Optional[Type[Any]] = None
+        testset_cls: Optional[Type[Any]] = OLS_ModelReport,
+        report_cls: Optional[Type[Any]] = OLS_ModelReport
     ):
         super().__init__(
             X, y,
             X_out=X_out,
             y_out=y_out,
-            testset_cls=TestSetBase,
-            report_cls=OLS_ModelReport
+            testset_cls=testset_cls,
+            report_cls=report_cls
         )
         # Statsmodels result and related attributes
         self.fitted: Optional[sm.regression.linear_model.RegressionResultsWrapper] = None

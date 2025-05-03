@@ -8,8 +8,6 @@ from typing import (
 from .data import DataManager
 from .cm import CM
 from .model import ModelBase
-from .transform import TSFM
-from .report import ModelReportBase, SegmentReportBase
 from .template import ExportTemplateBase
 
 class Segment:
@@ -22,16 +20,12 @@ class Segment:
         target: str,
         data_manager: Any,
         model_cls: Type[ModelBase],
-        testset_cls: Optional[Type[Any]] = None,
-        report_cls: Optional[Type[Any]] = None,
         export_template_cls: Optional[Type[Any]] = None
     ):
         self.segment_id = segment_id
         self.target = target
         self.dm = data_manager
         self.model_cls = model_cls
-        self.testset_cls = testset_cls
-        self.report_cls = report_cls
         self.export_template_cls = export_template_cls
         self.cms: Dict[str, CM] = {}
 
@@ -54,8 +48,6 @@ class Segment:
             target=self.target,
             data_manager=self.dm,
             model_cls=self.model_cls,
-            testset_cls=self.testset_cls,
-            report_cls=self.report_cls
         )
         cm.build(specs, sample=sample)
         self.cms[cm_id] = cm
