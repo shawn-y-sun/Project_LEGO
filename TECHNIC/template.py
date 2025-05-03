@@ -114,7 +114,7 @@ class PPNR_OLS_ValueMap(ValueMapEditor):
         """
         dfs: List[pd.DataFrame] = []
         for cm in self.cms.values():
-            perf_dict = cm.measure_in.in_perf_measures
+            perf_dict = cm.model_in.in_perf_measures
             df = pd.DataFrame([perf_dict])
             df.insert(0, 'model_id', cm.model_id)
             dfs.append(df)
@@ -128,7 +128,7 @@ class PPNR_OLS_ValueMap(ValueMapEditor):
         """
         dfs: List[pd.DataFrame] = []
         for cm in self.cms.values():
-            params_dict = cm.measure_in.param_measures
+            params_dict = cm.model_in.param_measures
             df = pd.DataFrame.from_dict(params_dict, orient='index')
             df = df.reset_index().rename(columns={'index': 'parameter'})
             df.insert(0, 'model_id', cm.model_id)

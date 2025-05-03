@@ -1,34 +1,32 @@
 # TECHNIC/test.py
-
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Union
-
+from typing import Any, Dict, Optional, Union, Type, List
 import pandas as pd
-from statsmodels.stats.stattools import jarque_bera, adfuller
-from statsmodels.tsa.stattools import kpss
+
+from statsmodels.stats.stattools import jarque_bera
 from scipy.stats import shapiro
 
-from .model import ModelBase
+from statsmodels.tsa.stattools import adfuller
 
 
 class ModelTestBase(ABC):
     """
     Abstract base class for model testing frameworks.
 
-    Attributes
+    Parameters
     ----------
     model : Optional[ModelBase]
-        A fitted model instance.
+        Fitted model instance to test.
     X : Optional[pd.DataFrame]
-        Feature matrix used for testing (when applicable).
+        Feature matrix for testing.
     y : Optional[pd.Series]
-        Target series used for testing (when applicable).
-    test_dict : Dict[str, Any]
-        Configuration dict mapping test names to functions and pass rules.
+        Target vector for testing.
+    test_dict : Optional[Dict[str, Any]]
+        Dictionary of test configuration parameters.
     """
     def __init__(
         self,
-        model: Optional[ModelBase] = None,
+        model: Optional[Any] = None,
         X: Optional[pd.DataFrame] = None,
         y: Optional[pd.Series] = None,
         test_dict: Optional[Dict[str, Any]] = None
@@ -40,118 +38,227 @@ class ModelTestBase(ABC):
 
     @property
     @abstractmethod
-    def test_result(self) -> pd.DataFrame:
-        """Compute and return a DataFrame of test outcomes."""
+    def test_result(self) -> Any:
+        """
+        Returns the computed test result (outcome) of the testing.
+        """
         ...
 
     @property
     @abstractmethod
-    def test_filter(self) -> Dict[str, Any]:
-        """Return overall pass/fail status and detailed test results."""
+    def test_filter(self) -> bool:
+        """
+        Returns True if test conditions are met, False otherwise.
+        """
         ...
 
+class TestSetBase:
+    """
+    Base class for collecting and assessing multiple ModelTestBase instances.
+    """
 
-# Separate dictionaries for normality and stationarity tests
-normality_tests: Dict[str, Dict[str, Any]] = {
-    'Jarque_Bera': {'func': jarque_bera, 'pass_if_greater': True},
-    'Shapiro':      {'func': shapiro,      'pass_if_greater': True}
+    def __init__(self, test_kwargs: Dict[Type[ModelTestBase], dict]):
+        """
+        Initialize TestSetBase with a mapping of ModelTestBase subclasses to init kwargs.
+        :param test_kwargs: dict mapping each ModelTestBase subclass to its init arguments
+        """
+        # Instantiate each test with its corresponding kwargs
+        self.tests: List[ModelTestBase] = [
+            test_cls(**kwargs) for test_cls, kwargs in test_kwargs.items()
+        ]
+
+    @property
+    def test_results(self) -> Dict[str, Any]:
+        """
+        Gather results from each test in a dict keyed by test class name.
+        """
+        return {type(test).__name__: test.test_result for test in self.tests}
+
+    def search_pass(self) -> bool:
+        """
+        Quickly determine if all tests pass by returning False on first failure.
+        """
+        for test in self.tests:
+            if not test.test_filter:
+                return False
+        return True
+
+
+# Dictionary of normality diagnostic tests
+normality_test_dict: Dict[str, callable] = {
+    'Jarque_Bera': jarque_bera,
+    'Shapiro': shapiro
 }
-
-stationarity_tests: Dict[str, Dict[str, Any]] = {
-    'ADF':  {'func': adfuller, 'pass_if_greater': False},
-    'KPSS': {'func': kpss,      'pass_if_greater': True}
-}
-
 
 class NormalityTest(ModelTestBase):
     """
-    Performs normality diagnostics on residuals using multiple tests.
+    Concrete ModelTestBase implementation for normality diagnostics on residuals.
+
+    Provides access to model residuals and performs specified normality tests.
     """
     def __init__(
         self,
-        model: Optional[ModelBase] = None,
+        model: Optional[Any] = None,
+        test_dict: Dict[str, Any] = normality_test_dict,
         resid: Optional[pd.Series] = None,
-        threshold: Union[float, Dict[str, float]] = 0.05
+        alpha : Union[float, Dict[str, float]] = 0.05
     ):
-        # Initialize base with no X/y, just the configuration dict
-        super().__init__(model=model, X=None, y=None, test_dict=normality_tests)
-        # Extract residuals
-        self.resid = resid if resid is not None else getattr(model, 'resid', None)
-        self.threshold = threshold
+        super().__init__(model=model, X=None, y=None, test_dict=test_dict)
+        self.alpha  = alpha
+        # Use provided residuals if given, otherwise extract from model
+        if resid is not None:
+            self.resid = resid
+        elif self.model is not None and hasattr(self.model, 'resid'):
+            self.resid = getattr(self.model, 'resid')
+        else:
+            self.resid = None
+    
+    @property
+    def name(self) -> str:
+        return "NormalityTest"
 
     @property
-    def test_result(self) -> pd.DataFrame:
-        """
-        Runs configured normality tests and returns a DataFrame:
-        ['test_name', 'test_pass', 'test_stat', 'p_value']
-        """
-        if self.resid is None:
-            return pd.DataFrame(columns=["test_name", "test_pass", "test_stat", "p_value"])
+    def test_result(self) -> Dict[str, Dict[str, Any]]:
+        """Run each normality test, returning stat, pvalue, and pass flag."""
+        results: Dict[str, Dict[str, Any]] = {}
+        for test_name, fn in self.test_dict.items():
+            output = fn(self.resid)
+            stat = output[0]
+            pvalue = output[1]
+            # allow alpha per test if dict
+            level = self.alpha[test_name] if isinstance(self.alpha, dict) else self.alpha
+            passed = pvalue > level
+            results[test_name] = {
+                'statistic': stat,
+                'pvalue': pvalue,
+                'passed': passed
+            }
+        return results
 
-        records = []
-        for name, config in self.test_dict.items():
-            stat, pvalue = config['func'](self.resid)[:2]
-            thresh = self.threshold[name] if isinstance(self.threshold, dict) else self.threshold
-            passed = pvalue > thresh if config['pass_if_greater'] else pvalue < thresh
-            records.append({
-                "test_name": name,
-                "test_pass": passed,
-                "test_stat": float(stat),
-                "p_value": float(pvalue)
-            })
-        return pd.DataFrame(records)
 
     @property
-    def test_filter(self) -> Dict[str, Any]:
+    def test_filter(self) -> bool:
         """
-        Determines overall pass/fail by majority vote.
+        Returns True if all tests in test_result are passed, False otherwise.
         """
-        df = self.test_result
-        overall = df['test_pass'].sum() >= (len(df) / 2) if not df.empty else False
-        return {"overall_pass": overall, "detail": df}
+        results = self.test_result
+        if not results:
+            return False
+        return all(
+            test_info.get('passed', False) for test_info in results.values()
+        )
+    
 
+# Dictionary of stationarity diagnostic tests
+stationarity_test_dict: Dict[str, callable] = {
+    'adf': lambda series: adfuller(series.dropna(), autolag='AIC')
+}
 
 class StationarityTest(ModelTestBase):
     """
-    Performs stationarity diagnostics on a time series using multiple tests.
+    Concrete ModelTestBase implementation for stationarity testing using ADF.
+
+    Parameters
+    ----------
+    series : Optional[pd.Series]
+        Time series to test for stationarity.
+    alpha  : float or Dict[str, float]
+        Significance level(s) for test(s); default is 0.05.
+    test_dict : Dict[str, callable]
+        Mapping of test names to functions; default is {'adf': adfuller}.
+    model : Optional[ModelBase]
+        Optional, a ModelBase instance whose residuals or target can be tested.
     """
     def __init__(
         self,
-        model: Optional[ModelBase] = None,
         series: Optional[pd.Series] = None,
-        threshold: Union[float, Dict[str, float]] = 0.05
+        alpha : Union[float, Dict[str, float]] = 0.05,
+        test_dict: Dict[str, Any] = stationarity_test_dict,
+        model: Optional[Any] = None
     ):
-        super().__init__(model=model, X=None, y=None, test_dict=stationarity_tests)
-        self.series = series if series is not None else getattr(model, 'fittedvalues', None)
-        self.threshold = threshold
+        super().__init__(model=model, X=None, y=None, test_dict=test_dict)
+        self.alpha  = alpha
+        # Assign series: explicit or from model residuals/target
+        if series is not None:
+            self.series = series
+        elif self.model is not None and hasattr(self.model, 'resid'):
+            self.series = getattr(self.model, 'resid')
+        else:
+            self.series = None
 
     @property
-    def test_result(self) -> pd.DataFrame:
-        """
-        Runs configured stationarity tests and returns a DataFrame:
-        ['test_name', 'test_pass', 'test_stat', 'p_value']
-        """
-        if self.series is None:
-            return pd.DataFrame(columns=["test_name", "test_pass", "test_stat", "p_value"])
-
-        records = []
-        for name, config in self.test_dict.items():
-            stat, pvalue = config['func'](self.series)[:2]
-            thresh = self.threshold[name] if isinstance(self.threshold, dict) else self.threshold
-            passed = pvalue > thresh if config['pass_if_greater'] else pvalue < thresh
-            records.append({
-                "test_name": name,
-                "test_pass": passed,
-                "test_stat": float(stat),
-                "p_value": float(pvalue)
-            })
-        return pd.DataFrame(records)
+    def name(self) -> str:
+        return "StationarityTest"
 
     @property
-    def test_filter(self) -> Dict[str, Any]:
+    def test_result(self) -> Dict[str, Dict[str, Any]]:
+        """Run each stationarity test, returning stat, pvalue, and pass flag."""
+        results: Dict[str, Dict[str, Any]] = {}
+        for test_name, fn in self.test_dict.items():
+            output = fn(self.series)
+            stat = output[0]
+            pvalue = output[1]
+            level = self.alpha[test_name] if isinstance(self.alpha, dict) else self.alpha
+            passed = pvalue < level
+            results[test_name] = {
+                'statistic': stat,
+                'pvalue': pvalue,
+                'passed': passed
+            }
+        return results
+
+    @property
+    def test_filter(self) -> bool:
         """
-        Determines overall pass/fail by majority vote.
+        Returns True if all stationarity tests passed, False otherwise.
         """
-        df = self.test_result
-        overall = df['test_pass'].sum() >= (len(df) / 2) if not df.empty else False
-        return {"overall_pass": overall, "detail": df}
+        results = self.test_result
+        if not results:
+            return False
+        return all(info.get('passed', False) for info in results.values())
+
+    @property
+    def test_result_legacy(self) -> pd.DataFrame:
+        """
+        Returns a legacy-style stationarity test table similar to SAS ARIMA's
+        Augmented Dickey-Fuller test output.
+        """
+        types = {'Zero Mean': 'nc', 'Single Mean': 'c', 'Trend': 'ct'}
+        data = []
+        series = self.series.dropna() if self.series is not None else None
+        if series is None:
+            return pd.DataFrame()
+        for typ, reg in types.items():
+            for lag in (0, 1, 2):
+                # run ADF with fixed lag and regression type
+                res = adfuller(series, maxlag=lag, regression=reg, autolag=None, store=True)
+                adfstat = res[0]
+                pval_tau = res[1]
+                resstore = res[3]
+                regres = resstore.resols
+                # coefficient on lagged level term
+                delta = regres.params[0]
+                rho = float(delta + 1)
+                # p-value for rho parameter (unit root test)
+                try:
+                    pval_rho = float(regres.pvalues[0])
+                except Exception:
+                    pval_rho = None
+                # F-statistic and p-value for model (skip for Zero Mean)
+                if typ != 'Zero Mean':
+                    fval = getattr(regres, 'fvalue', None)
+                    pr_f = getattr(regres, 'f_pvalue', None)
+                else:
+                    fval = None
+                    pr_f = None
+                data.append({
+                    'Type': typ,
+                    'Lags': lag,
+                    'Rho': rho,
+                    'Pr < Rho': pval_rho,
+                    'Tau': float(adfstat),
+                    'Pr < Tau': float(pval_tau),
+                    'F': fval,
+                    'Pr > F': pr_f
+                })
+        return pd.DataFrame(data).set_index(['Type', 'Lags'])
