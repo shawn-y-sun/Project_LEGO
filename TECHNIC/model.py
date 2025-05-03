@@ -213,3 +213,10 @@ class OLS(ModelBase):
         Build and return the TestSet for this model.
         """
         return self.build_tests()
+    
+    @property
+    def test_measures(self) -> dict:
+        """
+        Return the test_results from TestSet as test measures for this model.
+        """
+        return self.tests.test_results

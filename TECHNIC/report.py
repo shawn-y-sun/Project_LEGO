@@ -105,10 +105,6 @@ class SegmentReportBase(ABC):
         """Render performance plots for each segment."""
         ...
 
-    @abstractmethod
-    def plot_tests(self, **kwargs) -> Any:
-        """Render test diagnostic plots for each segment."""
-        ...
 
 
 class OLS_ModelReport(ModelReportBase):
