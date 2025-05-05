@@ -175,21 +175,21 @@ class OLS_ModelReport(ModelReportBase):
     def show_test_tbl(self) -> pd.DataFrame:
         """
         Flatten self.test_measures into a DataFrame, with a MultiIndex
-        (TestCategory, Test) and one column per metric found in the innermost dicts.
+        (Category, Test) and one column per metric found in the innermost dicts.
         Works for arbitrary metrics.
         """
         records = []
         for test_name, subtests in self.test_measures.items():
             for subtest_name, metrics in subtests.items():
                 # metrics is any dict: {"statistic":…, "pvalue":…, "foo":…, ...}
-                row = {"TestCategory": test_name, "Test": subtest_name}
+                row = {"Category": test_name, "Test": subtest_name}
                 row.update(metrics)
                 records.append(row)
         if not records:
             return pd.DataFrame()  # no tests to show
         df = pd.DataFrame.from_records(records)
         # Set a clean MultiIndex
-        return df.set_index(["TestCategory", "Test"])
+        return df.set_index(["Category", "Test"])
 
     def show_params_tbl(self) -> pd.DataFrame:
         """Parameter table with columns: Variable, Coef, Pvalue, Sig, VIF, Std."""
