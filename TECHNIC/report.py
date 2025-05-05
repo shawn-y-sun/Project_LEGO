@@ -2,61 +2,64 @@ import pandas as pd
 import numpy as np
 import warnings
 import matplotlib.pyplot as plt
+from pandas import DataFrame, Series
 from abc import ABC, abstractmethod
-from typing import Callable, Any
-from .measure import *
+from typing import Callable, Any, Optional, Dict
 from .plot import ols_model_perf_plot, ols_model_test_plot, ols_seg_perf_plot
-from .cm import CM
 
 class ModelReportBase(ABC):
     """
-    Abstract base for model‐specific reports. Subclasses must implement
-    methods to display in‑sample performance, out‑of‑sample performance,
-    testing measures, parameter tables, and plotting.
+    Abstract base for model-specific reports.
     """
     def __init__(
         self,
-        measure,
-        perf_plot_fn: Callable[..., Any],
-        test_plot_fn: Callable[..., Any]
+        X: DataFrame,
+        y: Series,
+        y_fitted_in: Series,
+        X_out: Optional[DataFrame] = None,
+        y_out: Optional[Series] = None,
+        y_pred_out: Optional[Series] = None,
+        in_perf_measures: Dict[str, Any] = None,
+        out_perf_measures: Dict[str, Any] = None,
+        test_measures: Dict[str, Any] = None,
+        param_measures: Dict[str, Dict[str, Any]] = None,
     ):
-        self.measure = measure
-        self.perf_plot_fn = perf_plot_fn
-        self.test_plot_fn = test_plot_fn
+        # Store model data and measures
+        self.X = X
+        self.y = y
+        self.y_fitted_in = y_fitted_in
+        self.X_out = X_out
+        self.y_out = y_out
+        self.y_pred_out = y_pred_out
+        self.in_perf_measures = in_perf_measures or {}
+        self.out_perf_measures = out_perf_measures or {}
+        self.test_measures = test_measures or {}
+        self.param_measures = param_measures or {}
 
     @abstractmethod
-    def show_in_perf_tbl(self) -> pd.DataFrame:
-        """Return in‑sample performance measures as a DataFrame."""
+    def show_in_perf_tbl(self) -> DataFrame:
+        """Return in-sample performance measures as a DataFrame."""
         ...
 
     @abstractmethod
-    def show_out_perf_tbl(self) -> pd.DataFrame:
-        """Return out‑of‑sample performance measures as a DataFrame."""
+    def show_out_perf_tbl(self) -> DataFrame:
+        """Return out-of-sample performance measures as a DataFrame."""
         ...
 
     @abstractmethod
-    def show_test_tbl(self) -> pd.DataFrame:
-        """Return in‑sample testing measures as a DataFrame."""
+    def show_test_tbl(self) -> DataFrame:
+        """Return testing measures as a DataFrame."""
         ...
 
     @abstractmethod
-    def show_params_tbl(self) -> pd.DataFrame:
-        """Return parameter measures (coef, pvalue, sig, VIF, Std) as a DataFrame."""
+    def show_params_tbl(self) -> DataFrame:
+        """Return parameter measures as a DataFrame."""
         ...
 
     @abstractmethod
     def plot_perf(self, **kwargs) -> Any:
-        """Plot performance metrics; implementation must be provided by subclass."""
+        """Plot performance metrics."""
         ...
-
-    def plot_tests(self, **kwargs) -> Any:
-        """Render diagnostic plot via injected test_plot_fn."""
-        return self.test_plot_fn(
-            self.measure.model,
-            self.measure.X,
-            self.measure.y,
-            **kwargs
-        )
     
 
 class SegmentReportBase(ABC):
@@ -67,7 +70,7 @@ class SegmentReportBase(ABC):
     """
     def __init__(
         self,
-        cms: Dict[str, CM],
+        cms: Dict[str, Any],
         perf_plot_fn: Callable[..., Any],
         test_plot_fn: Callable[..., Any]
     ):
@@ -100,40 +103,73 @@ class SegmentReportBase(ABC):
         """Render performance plots for each segment."""
         ...
 
-    @abstractmethod
-    def plot_tests(self, **kwargs) -> Any:
-        """Render test diagnostic plots for each segment."""
-        ...
 
 
 class OLS_ModelReport(ModelReportBase):
     """
-    OLS-specific report: implements display methods for in-sample performance,
-    out-of-sample performance, testing measures, parameter tables, and plotting.
+    Report for OLS models: displays performance, tests, and parameters.
     """
-    def __init__(self, measures: OLS_Measures):
+    def __init__(
+        self,
+        X: DataFrame,
+        y: Series,
+        y_fitted_in: Series,
+        X_out: Optional[DataFrame] = None,
+        y_out: Optional[Series] = None,
+        y_pred_out: Optional[Series] = None,
+        in_perf_measures: Dict[str, Any] = None,
+        out_perf_measures: Dict[str, Any] = None,
+        test_measures: Dict[str, Any] = None,
+        param_measures: Dict[str, Dict[str, Any]] = None,
+        perf_plot_fn: Callable[..., Any] = ols_model_perf_plot,
+        test_plot_fn: Callable[..., Any] = ols_model_test_plot,
+    ):
         super().__init__(
-            measure=measures,
-            perf_plot_fn=ols_model_perf_plot,
-            test_plot_fn=ols_model_test_plot
+            X=X,
+            y=y,
+            y_fitted_in=y_fitted_in,
+            X_out=X_out,
+            y_out=y_out,
+            y_pred_out=y_pred_out,
+            in_perf_measures=in_perf_measures,
+            out_perf_measures=out_perf_measures,
+            test_measures=test_measures,
+            param_measures=param_measures,
         )
+        self.perf_plot_fn = perf_plot_fn
+        self.test_plot_fn = test_plot_fn
 
     def show_in_perf_tbl(self) -> pd.DataFrame:
         """In-sample performance metrics as a single-row DataFrame."""
-        return pd.DataFrame([self.measure.in_perf_measures])
+        return pd.DataFrame([self.in_perf_measures])
 
     def show_out_perf_tbl(self) -> pd.DataFrame:
         """Out-of-sample performance metrics as a single-row DataFrame (empty if none)."""
-        out = self.measure.out_perf_measures
+        out = self.out_perf_measures
         return pd.DataFrame([out]) if out else pd.DataFrame()
 
     def show_test_tbl(self) -> pd.DataFrame:
-        """In-sample testing measures as a single-row DataFrame."""
-        return pd.json_normalize(self.measure.test_measures)
+        """
+        Flatten self.test_measures into a DataFrame, with a MultiIndex
+        (TestCategory, Test) and one column per metric found in the innermost dicts.
+        Works for arbitrary metrics.
+        """
+        records = []
+        for test_name, subtests in self.test_measures.items():
+            for subtest_name, metrics in subtests.items():
+                # metrics is any dict: {"statistic":…, "pvalue":…, "foo":…, ...}
+                row = {"TestCategory": test_name, "Test": subtest_name}
+                row.update(metrics)
+                records.append(row)
+        if not records:
+            return pd.DataFrame()  # no tests to show
+        df = pd.DataFrame.from_records(records)
+        # Set a clean MultiIndex
+        return df.set_index(["TestCategory", "Test"])
 
     def show_params_tbl(self) -> pd.DataFrame:
         """Parameter table with columns: Variable, Coef, Pvalue, Sig, VIF, Std."""
-        pm = self.measure.param_measures
+        pm = self.param_measures
         df = pd.DataFrame.from_dict(pm, orient='index')
         df.index.name = 'Variable'
         df = df.reset_index()
@@ -149,22 +185,14 @@ class OLS_ModelReport(ModelReportBase):
         return df[cols_existing]
 
     def plot_perf(self, **kwargs) -> Any:
-        """
-        Plot actual vs. fitted (in-sample) and predicted (out-of-sample) values,
-        with absolute errors as a bar chart (alpha=0.7).
-        """
-        # Build full target series
-        y_list = [self.measure.y]
-        if getattr(self.measure, 'y_out', None) is not None:
-            y_list.append(self.measure.y_out)
-        y_full = pd.concat(y_list).sort_index()
-
+        """Plot actual vs fitted/in-sample and predicted/out-of-sample values."""
         return self.perf_plot_fn(
-            self.measure.model,
-            self.measure.X,
-            y_full,
-            X_out=getattr(self.measure, 'X_out', None),
-            y_pred_out=getattr(self.measure, 'y_pred_out', None),
+            self.X,
+            self.y,
+            X_out=self.X_out,
+            y_out=self.y_out,
+            y_fitted_in=self.y_fitted_in,
+            y_pred_out=self.y_pred_out,
             **kwargs
         )
 
@@ -186,7 +214,7 @@ class OLS_ModelReport(ModelReportBase):
         perf_kwargs = perf_kwargs or {}
         test_kwargs = test_kwargs or {}
 
-        if not getattr(self.measure, 'out_perf_measures', None):
+        if not getattr(self, 'out_perf_measures', None):
             show_out = False
 
         print('=== In-Sample Performance ===')
@@ -234,11 +262,8 @@ class OLS_ModelReport(ModelReportBase):
         plt.show()
 
         if show_tests:
-            print('\n=== Test Metrics ===')
-            print(self.show_test_tbl().to_string(index=False))
-            fig2 = self.plot_tests(**(test_kwargs or {}))
-            plt.show()
-
+            print('\n=== Model Testing ===')
+            print(self.show_test_tbl().to_string(index=True))
 
 
 class OLS_SegmentReport:
@@ -248,7 +273,7 @@ class OLS_SegmentReport:
     Uses injected plotting functions for segment-level performance and diagnostics.
     """
     def __init__(self,
-        cms: Dict[str, CM],
+        cms: Dict[str, Any],
         seg_perf_plot_fn=ols_seg_perf_plot,
         seg_test_plot_fn=ols_model_test_plot
     ):
