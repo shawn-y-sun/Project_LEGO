@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from pandas import DataFrame, Series
 from abc import ABC, abstractmethod
 from typing import Callable, Any, Optional, Dict
-from .plot import ols_model_perf_plot, ols_model_test_plot, ols_seg_perf_plot
+from .plot import *
 
 class ModelReportBase(ABC):
     """
@@ -23,6 +23,7 @@ class ModelReportBase(ABC):
         out_perf_measures: Dict[str, Any] = None,
         test_measures: Dict[str, Any] = None,
         param_measures: Dict[str, Dict[str, Any]] = None,
+        perf_set_plot_fn: Optional[Callable[[Dict[str, 'ModelReportBase']], Any]] = None
     ):
         # Store model data and measures
         self.X = X
@@ -35,6 +36,7 @@ class ModelReportBase(ABC):
         self.out_perf_measures = out_perf_measures or {}
         self.test_measures = test_measures or {}
         self.param_measures = param_measures or {}
+        self.perf_set_plot_fn = perf_set_plot_fn
 
     @abstractmethod
     def show_in_perf_tbl(self) -> DataFrame:
@@ -60,48 +62,119 @@ class ModelReportBase(ABC):
     def plot_perf(self, **kwargs) -> Any:
         """Plot performance metrics."""
         ...
-    
 
-class SegmentReportBase(ABC):
+class ReportSet:
     """
-    Abstract base for segment reports. Takes a dict of CM objects (keyed by model_id) and provides
-    methods to display combined performance, out-of-sample results,
-    testing measures, parameter summaries, and plotting across segments.
+    Aggregates multiple ModelReportBase instances into consolidated performance tables and plots.
+
+    :param reports: dict mapping model_id to ModelReportBase.
     """
     def __init__(
         self,
-        cms: Dict[str, Any],
-        perf_plot_fn: Callable[..., Any],
-        test_plot_fn: Callable[..., Any]
+        reports: Dict[str, ModelReportBase]
     ):
-        self.cms = cms
-        self.perf_plot_fn = perf_plot_fn
-        self.test_plot_fn = test_plot_fn
+        if not isinstance(reports, dict) or not all(isinstance(r, ModelReportBase) for r in reports.values()):
+            raise TypeError("`reports` must be a dict mapping model_id to ModelReportBase instances.")
+        self._reports = reports
 
-    @abstractmethod
-    def show_perf_tbl(self) -> pd.DataFrame:
-        """Return combined in‑sample performance across segments."""
-        ...
+    def show_in_perf_set(self, **kwargs) -> pd.DataFrame:
+        """
+        Return a DataFrame with each model's in-sample performance as separate rows,
+        keeping the same columns from individual reports and using model_id as index.
+        """
+        dfs = []
+        for mid, rpt in self._reports.items():
+            df = rpt.show_in_perf_tbl(**kwargs).copy()
+            df.index = [mid] * len(df)
+            dfs.append(df)
+        if dfs:
+            result = pd.concat(dfs, axis=0)
+            result.index.name = 'Model'
+            return result
+        return pd.DataFrame()
 
-    @abstractmethod
-    def show_out_perf_tbl(self) -> pd.DataFrame:
-        """Return combined out‑of‑sample performance across segments."""
-        ...
+    def show_out_perf_set(self, **kwargs) -> pd.DataFrame:
+        """
+        Return a DataFrame with each model's out-of-sample performance as separate rows,
+        keeping the same columns from individual reports and using model_id as index.
+        """
+        dfs = []
+        for mid, rpt in self._reports.items():
+            df = rpt.show_out_perf_tbl(**kwargs).copy()
+            df.index = [mid] * len(df)
+            dfs.append(df)
+        if dfs:
+            result = pd.concat(dfs, axis=0)
+            result.index.name = 'Model'
+            return result
+        return pd.DataFrame()
 
-    @abstractmethod
-    def show_test_tbl(self) -> pd.DataFrame:
-        """Return combined test measures across segments."""
-        ...
+    def plot_perf_set(
+        self,
+        plot_fn: Callable[[Dict[str, ModelReportBase]], Any] = None,
+        **kwargs
+    ) -> Any:
+        """
+        Delegate to a plot function (defaulting to each report's own perf_set_plot_fn)
+        that accepts the full mapping of model_id -> ModelReportBase and any additional kwargs.
+        """
+        # Use provided plot_fn, or default to the first report's perf_set_plot_fn
+        fn = plot_fn
+        if fn is None:
+            # assume all reports share the same default, take from first
+            fn = next(iter(self._reports.values())).perf_set_plot_fn
+        return fn(self._reports, **kwargs)
+    
+    def show_report(
+        self,
+        show_out: bool = True,
+        show_params: bool = False,
+        show_tests: bool = False,
+        perf_kwargs: dict = None,
+        params_kwargs: dict = None,
+        test_kwargs: dict = None
+    ) -> None:
+        """
+        Sequentially display:
+          1) In-sample performance (always)
+          2) Out-of-sample performance (if show_out)
+          3) Performance plot
+          4) Parameter tables per model (if show_params)
+          5) Testing tables per model (if show_tests)
+        """
+        perf_kwargs   = perf_kwargs or {}
+        params_kwargs = params_kwargs or {}
+        test_kwargs   = test_kwargs or {}
 
-    @abstractmethod
-    def show_params_tbl(self) -> pd.DataFrame:
-        """Return combined parameter summaries across segments."""
-        ...
+        # 1) In-sample performance
+        print("=== In-Sample Performance ===")
+        df_in = self.show_in_perf_set(**perf_kwargs)
+        print(df_in.to_string())
 
-    @abstractmethod
-    def plot_perf(self, **kwargs) -> Any:
-        """Render performance plots for each segment."""
-        ...
+        # 2) Optional out-of-sample performance
+        if show_out:
+            print("\n=== Out-of-Sample Performance ===")
+            df_out = self.show_out_perf_set(**perf_kwargs)
+            print(df_out.to_string())
+
+        # 3) Performance plot
+        print("\n=== Performance Plot ===")
+        fig = self.plot_perf_set(**perf_kwargs)
+        plt.show()
+
+        # 4) Optional parameter tables per model
+        if show_params:
+            for model_id, report in self._reports.items():
+                print(f"\n=== Model: {model_id} — Parameters ===")
+                df_params = report.show_params_tbl(**params_kwargs)
+                print(df_params.to_string())
+
+        # 5) Optional per-model testing metrics
+        if show_tests:
+            for model_id, report in self._reports.items():
+                print(f"\n=== Model: {model_id} — Testing Metrics ===")
+                df_test = report.show_test_tbl(**test_kwargs)
+                print(df_test.to_string())
 
 
 
@@ -123,6 +196,7 @@ class OLS_ModelReport(ModelReportBase):
         param_measures: Dict[str, Dict[str, Any]] = None,
         perf_plot_fn: Callable[..., Any] = ols_model_perf_plot,
         test_plot_fn: Callable[..., Any] = ols_model_test_plot,
+        perf_set_plot_fn: Callable[[Dict[str, 'ModelReportBase']], Any] = ols_plot_perf_set
     ):
         super().__init__(
             X=X,
@@ -135,6 +209,7 @@ class OLS_ModelReport(ModelReportBase):
             out_perf_measures=out_perf_measures,
             test_measures=test_measures,
             param_measures=param_measures,
+            perf_set_plot_fn=perf_set_plot_fn
         )
         self.perf_plot_fn = perf_plot_fn
         self.test_plot_fn = test_plot_fn
@@ -151,21 +226,21 @@ class OLS_ModelReport(ModelReportBase):
     def show_test_tbl(self) -> pd.DataFrame:
         """
         Flatten self.test_measures into a DataFrame, with a MultiIndex
-        (TestCategory, Test) and one column per metric found in the innermost dicts.
+        (Category, Test) and one column per metric found in the innermost dicts.
         Works for arbitrary metrics.
         """
         records = []
         for test_name, subtests in self.test_measures.items():
             for subtest_name, metrics in subtests.items():
                 # metrics is any dict: {"statistic":…, "pvalue":…, "foo":…, ...}
-                row = {"TestCategory": test_name, "Test": subtest_name}
+                row = {"Category": test_name, "Test": subtest_name}
                 row.update(metrics)
                 records.append(row)
         if not records:
             return pd.DataFrame()  # no tests to show
         df = pd.DataFrame.from_records(records)
         # Set a clean MultiIndex
-        return df.set_index(["TestCategory", "Test"])
+        return df.set_index(["Category", "Test"])
 
     def show_params_tbl(self) -> pd.DataFrame:
         """Parameter table with columns: Variable, Coef, Pvalue, Sig, VIF, Std."""
@@ -264,156 +339,3 @@ class OLS_ModelReport(ModelReportBase):
         if show_tests:
             print('\n=== Model Testing ===')
             print(self.show_test_tbl().to_string(index=True))
-
-
-class OLS_SegmentReport:
-    """
-    Candidate-model-level reporting for OLS models. Stores per-CM measures
-    (measure_in and measure_full) from CM instances. Excludes CMs with missing measures.
-    Uses injected plotting functions for segment-level performance and diagnostics.
-    """
-    def __init__(self,
-        cms: Dict[str, Any],
-        seg_perf_plot_fn=ols_seg_perf_plot,
-        seg_test_plot_fn=ols_model_test_plot
-    ):
-        """
-        cms: dict mapping cm_id to CM objects.
-        seg_perf_plot_fn: function to plot per-CM performance.
-        seg_test_plot_fn: function to plot per-CM diagnostic tests.
-
-        Only CMs with 'measure_in' or 'measure_full' attributes set are stored.
-        Raises warnings for any cm_ids missing one of the measures.
-        """
-        missing_in, missing_full = [], []
-        self.measures_in: Dict[str, Any] = {}
-        self.measures_full: Dict[str, Any] = {}
-        self.seg_perf_plot_fn = seg_perf_plot_fn
-        self.seg_test_plot_fn = seg_test_plot_fn
-
-        for cm_id, cm in cms.items():
-            if hasattr(cm, 'measure_in') and cm.measure_in is not None:
-                self.measures_in[cm_id] = cm.measure_in
-            else:
-                missing_in.append(cm_id)
-
-            if hasattr(cm, 'measure_full') and cm.measure_full is not None:
-                self.measures_full[cm_id] = cm.measure_full
-            else:
-                missing_full.append(cm_id)
-
-        if missing_in:
-            warnings.warn(
-                f"CMs missing 'measure_in' and excluded: {missing_in}",
-                UserWarning
-            )
-        if missing_full:
-            warnings.warn(
-                f"CMs missing 'measure_full' and excluded: {missing_full}",
-                UserWarning
-            )
-
-    def show_in_perf_tbl(self) -> pd.DataFrame:
-        """Combined in-sample performance across CMs."""
-        rows = []
-        for cm_id, m in self.measures_in.items():
-            r = m.in_perf_measures.copy()
-            r['cm_id'] = cm_id
-            rows.append(r)
-        df = pd.DataFrame(rows)
-        if 'cm_id' in df.columns:
-            cols = ['cm_id'] + [c for c in df.columns if c != 'cm_id']
-            df = df[cols]
-        return df
-
-    def show_out_perf_tbl(self) -> pd.DataFrame:
-        """Combined out-of-sample performance across CMs."""
-        rows = []
-        for cm_id, m in self.measures_full.items():
-            r = m.out_perf_measures.copy()
-            r['cm_id'] = cm_id
-            rows.append(r)
-        df = pd.DataFrame(rows)
-        if 'cm_id' in df.columns:
-            cols = ['cm_id'] + [c for c in df.columns if c != 'cm_id']
-            df = df[cols]
-        return df
-
-    def show_test_tbl(self) -> pd.DataFrame:
-        """Combine in-sample test diagnostics across candidate models."""
-        rows = []
-        for cm_id, m in self.measures_in.items():
-            row = m.test_measures.copy()
-            row['cm_id'] = cm_id
-            rows.append(row)
-        return pd.DataFrame(rows)
-
-    def show_params_tbl(self) -> pd.DataFrame:
-        """Combined in-sample parameter summaries across CMs."""
-        rows = []
-        for cm_id, m in self.measures_in.items():
-            for var, stats in m.param_measures.items():
-                sr = stats.copy()
-                sr['Variable'] = var
-                sr['cm_id'] = cm_id
-                rows.append(sr)
-        df = pd.DataFrame(rows)
-        # Reorder columns: cm_id first, Variable second
-        if 'cm_id' in df.columns and 'Variable' in df.columns:
-            cols = ['cm_id', 'Variable'] + [c for c in df.columns if c not in ['cm_id', 'Variable']]
-            df = df[cols]
-        return df
-
-    def plot_perf(self, **kwargs) -> Any:
-        """Plot in-sample performance comparison across candidate models."""
-        return self.seg_perf_plot_fn(self.measures_in, full=False, **kwargs)
-
-    def plot_full_perf(self, **kwargs) -> Any:
-        """Plot full-sample performance comparison across candidate models."""
-        return self.seg_perf_plot_fn(self.measures_full, full=True, **kwargs)
-    
-    def plot_tests(self, **kwargs) -> Any:
-        """Plot in-sample diagnostic tests comparison across candidate models."""
-        return self.seg_test_plot_fn(self.measures_in, **kwargs)
-    
-    def show_report(
-        self,
-        show_out: bool = True,
-        show_tests: bool = False,
-        perf_kwargs: Dict[str, Any] = None,
-        test_kwargs: Dict[str, Any] = None
-    ) -> None:
-        """
-        Display segment-level tables and plots, mirroring OLSReport.show_report structure.
-        """
-        perf_kwargs = perf_kwargs or {}
-        test_kwargs = test_kwargs or {}
-
-        # In-sample performance
-        print('=== In-Sample Performance Across CMs ===')
-        print(self.show_in_perf_tbl().to_string(index=False))
-
-        # Out-of-sample performance
-        if show_out and not self.show_out_perf_tbl().empty:
-            print('\n=== Out-of-Sample Performance Across CMs ===')
-            print(self.show_out_perf_tbl().to_string(index=False))
-
-        # Parameters
-        print('\n=== Parameter Summaries Across CMs ===')
-        print(self.show_params_tbl().to_string(index=False))
-
-        # Performance plot
-        fig1 = self.plot_perf(**perf_kwargs)
-        plt.show()
-
-        # Full-sample plot
-        if show_out:
-            fig2 = self.plot_full_perf(**perf_kwargs)
-            plt.show()
-
-        # Diagnostic tests
-        if show_tests:
-            print('\n=== Diagnostic Tests Across CMs ===')
-            print(self.show_test_tbl().to_string(index=False))
-            fig3 = self.plot_tests(**test_kwargs)
-            plt.show()

@@ -1,12 +1,42 @@
 # TECHNIC/datamgr.py
-
 import os
+from pathlib import Path
 import pandas as pd
+import warnings
+import yaml
 from typing import Any, Dict, List, Optional, Callable, Union
 
 from .internal import InternalDataLoader
 from .mev import MEVLoader
 from .transform import TSFM
+from . import transform as transform_module
+
+# Determine support directory relative to this module file using pathlib
+_BASE_DIR = Path(__file__).resolve().parent
+_SUPPORT_DIR = _BASE_DIR / 'support'
+_MEV_TYPE_XLSX_PATH = _SUPPORT_DIR / 'mev_type.xlsx'
+_TYPE_TSFM_YAML_PATH = _SUPPORT_DIR / 'type_tsfm.yaml'
+
+
+# Load and validate MEV type mapping
+if not os.path.exists(_MEV_TYPE_XLSX_PATH):
+    raise FileNotFoundError(f"MEV type mapping file not found: {_MEV_TYPE_XLSX_PATH}")
+_mev_type_df = pd.read_excel(_MEV_TYPE_XLSX_PATH)
+required_cols = {'mev_code', 'type'}
+if not required_cols.issubset(_mev_type_df.columns):
+    raise ValueError(f"Expected columns {required_cols} in {_MEV_TYPE_XLSX_PATH}, got {_mev_type_df.columns.tolist()}")
+MEV_TYPE_MAP: Dict[str, str] = dict(zip(_mev_type_df['mev_code'], _mev_type_df['type']))
+
+# Load and validate transform specifications
+if not os.path.exists(_TYPE_TSFM_YAML_PATH):
+    raise FileNotFoundError(f"Transform specification file not found: {_TYPE_TSFM_YAML_PATH}")
+with open(_TYPE_TSFM_YAML_PATH) as _f:
+    _tf_spec = yaml.safe_load(_f)
+if 'transforms' not in _tf_spec or not isinstance(_tf_spec['transforms'], dict):
+    raise KeyError(f"Key 'transforms' missing or invalid format in {_TYPE_TSFM_YAML_PATH}")
+TYPE_TSFM_MAP: Dict[str, List[str]] = _tf_spec['transforms']
+
+warnings.simplefilter(action="ignore", category=FutureWarning)
 
 class DataManager:
     """
@@ -101,27 +131,6 @@ class DataManager:
             return pd.DataFrame()
         return self.model_mev.loc[self.in_sample_end + pd.Timedelta(days=1) :]
 
-    # Scenario MEVs, trimmed by scen_in_sample_end
-    @property
-    def scen_mevs(self) -> Dict[str, Dict[str, pd.DataFrame]]:
-        raw = self._mev_loader.scen_mevs
-        if self.scen_in_sample_end is None:
-            return raw
-        cutoff = self.scen_in_sample_end
-        trimmed: Dict[str, Dict[str, pd.DataFrame]] = {}
-        for key, df_dict in raw.items():
-            trimmed[key] = {scen: df.loc[:cutoff] for scen, df in df_dict.items()}
-        return trimmed
-
-    def interpolate_mevs(self, freq: str = 'M') -> None:
-        current_freq = pd.infer_freq(self.internal_data.index)
-        if current_freq != freq:
-            raise ValueError(f"Internal data frequency is not {freq}")
-        target_idx     = self.internal_data.index.normalize()
-        df_interp = self._interpolate_df(self.model_mev, target_idx)
-        # replace model_mev with interpolated
-        self._mev_loader._model_mev = df_interp
-
     def apply_to_mevs(self, func: Callable[[pd.DataFrame], pd.DataFrame]) -> None:
         self._mev_loader.apply_to_all(func)
 
@@ -195,17 +204,73 @@ class DataManager:
         X = pd.concat(pieces, axis=1)
         X.index = X.index.normalize()
         return X
-    
-    
 
+    def build_search_vars(
+        self,
+        specs: List[Union[str, TSFM]],
+        mev_type_map: Dict[str, str] = MEV_TYPE_MAP,
+        type_tsfm_map: Dict[str, List[str]] = TYPE_TSFM_MAP
+    ) -> Dict[str, pd.DataFrame]:
+        """
+        Build DataFrames for each variable based on specs.
+        Returns a dict mapping variable name to its DataFrame of raw and transformed features.
+        Warns if any variable has no type mapping and builds raw variable only in that case.
+        """
+        var_df_map: Dict[str, pd.DataFrame] = {}
+        missing_vars: List[str] = []
+
+        for spec in specs:
+            # Determine TSFM list and variable name
+            if isinstance(spec, TSFM):
+                var_name = spec.feature_name
+                tsfms = [spec]
+            elif isinstance(spec, str):
+                var_name = spec
+                var_type = mev_type_map.get(spec)
+                if var_type is None:
+                    missing_vars.append(spec)
+                    # No type mapping → build raw variable only
+                    tsfms = [spec]
+                else:
+                    tf_names = type_tsfm_map.get(var_type)
+                    if not tf_names:
+                        raise KeyError(f"No transforms for type '{var_type}'.")
+                    tsfms = [TSFM(spec, getattr(transform_module, name)) for name in tf_names]
+            else:
+                raise ValueError(f"Invalid spec: {spec!r}")
+
+            # Build DataFrame for this variable
+            var_df_map[var_name] = self.build_indep_vars(tsfms)
+
+        if missing_vars:
+            warnings.warn(
+                f"No type mapping found for variables: {', '.join(missing_vars)}. "
+                "Building raw variables only for those.",
+                UserWarning
+            )
+
+        return var_df_map
+    
     @staticmethod
-    def _interpolate_df(df: pd.DataFrame, target_idx: pd.DatetimeIndex) -> pd.DataFrame:
+    def _interpolate_df(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Interpolate quarterly MEV DataFrames to match monthly frequency.
+        If df has quarterly frequency, reindex from its own min to max with monthly freq
+        and cubic-interpolate; otherwise return original df.
+        """
         df2 = df.copy()
         df2.index = pd.to_datetime(df2.index).normalize()
-        df2 = df2.reindex(target_idx)
-        df2 = df2.interpolate(method='cubic')
-        df2.index = df2.index.normalize()
-        return df2
+        freq_mev = pd.infer_freq(df2.index)
+        # Only interpolate Q -> M
+        if freq_mev and freq_mev.startswith('Q'):
+            start = df2.index.min()
+            end = df2.index.max()
+            target_idx = pd.date_range(start=start, end=end, freq='M')
+            df2 = df2.reindex(target_idx).astype(float)
+            df2 = df2.interpolate(method='cubic')
+            df2.index = df2.index.normalize()
+            return df2
+        return df
 
     # Delegated loader properties
     @property
@@ -234,11 +299,30 @@ class DataManager:
 
     @property
     def model_mev(self) -> pd.DataFrame:
-        return self._mev_loader.model_mev
+        """
+        Model MEV DataFrame, interpolated to match monthly frequency when needed.
+        """
+        df = self._mev_loader.model_mev
+        return self._interpolate_df(df)
 
     @property
     def model_map(self) -> Dict[str, str]:
         return self._mev_loader.model_map
+
+    @property
+    def scen_mevs(self) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """
+        Scenario MEVs interpolated to match monthly frequency.
+        Returns nested dict: workbook_key -> {scenario: DataFrame}.
+        """
+        raw = self._mev_loader.scen_mevs
+        interpolated: Dict[str, Dict[str, pd.DataFrame]] = {}
+        for key, df_dict in raw.items():
+            interp_dict: Dict[str, pd.DataFrame] = {}
+            for scen, df in df_dict.items():
+                interp_dict[scen] = self._interpolate_df(df)
+            interpolated[key] = interp_dict
+        return interpolated
 
     @property
     def scen_maps(self) -> Dict[str, Dict[str, Dict[str, str]]]:
