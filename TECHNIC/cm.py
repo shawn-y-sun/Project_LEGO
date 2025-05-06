@@ -20,13 +20,13 @@ class CM:
         self,
         model_id: str,
         target: str,
-        data_manager: Any,
         model_cls: Type[ModelBase],
+        data_manager: Any = None,
     ):
         self.model_id = model_id
         self.target = target
-        self.dm = data_manager
         self.model_cls = model_cls
+        self.dm = data_manager
         # placeholders for data and models
         self.X = self.y = None
         self.X_in = self.y_in = None
@@ -62,23 +62,27 @@ class CM:
     def build(
         self,
         specs: List[Union[str, Dict[str, Any]]],
-        sample: str = 'both'
+        sample: str = 'both',
+        data_manager: Any = None
     ) -> None:
         '''
         Build features/target, validate, split, and fit models.
         :param specs: feature specifications for DataManager.
         :param sample: which sample(s) to build: 'in', 'full', or 'both'.
+        :param data_manager: optional override for the DataManager.
         '''
-        # Determine which samples to build
+        dm = data_manager or self.dm
+        if dm is None:
+            raise ValueError("No data_manager provided to CM.build().")
         if sample not in {'in', 'full', 'both'}:
             raise ValueError("sample must be one of 'in', 'full', or 'both'.")
         build_in = sample in {'in', 'both'}
         build_full = sample in {'full', 'both'}
 
         # Prepare data
-        X = self.dm.build_indep_vars(specs)
-        y = self.dm.internal_data[self.target].copy()
-        idx = self.dm.internal_data.index
+        X = dm.build_indep_vars(specs)
+        y = dm.internal_data[self.target].copy()
+        idx = dm.internal_data.index
         X = X.reindex(idx).astype(float)
         y = y.reindex(idx).astype(float)
         self.X, self.y = X, y
@@ -106,7 +110,7 @@ class CM:
             raise ValueError("Data validation error: " + "; ".join(msgs))
 
         # Split in- and out-of-sample
-        cutoff = self.dm.in_sample_end
+        cutoff = dm.in_sample_end
         if cutoff is not None:
             self.X_in, self.y_in = X.loc[:cutoff], y.loc[:cutoff]
             self.X_out, self.y_out = (
