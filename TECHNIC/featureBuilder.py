@@ -1,34 +1,32 @@
+# tech/featureBuilder.py
+
 import itertools
 from typing import List, Union, Dict
 import pandas as pd
-import transform as tf
-
-# Alias TSFM for convenience
-TSFM = tf.TSFM
-
+from tech.transform import *
 # Patch TSFM.__repr__ for readability
 TSFM.__repr__ = lambda self: f"TSFM('{self.feature_name}', '{self.name}')"
 
-class FeatureBuilder:
+class featureBuilder:
     """
     Build combinations of TSFM instances for macroeconomic variables (MEVs).
 
     Parameters
     ----------
     mev_transMap : dict[str, str]
-        Maps MEV name to transformation key ('growthrate', 'diff', 'level').
+        Maps MEV name to transform key: 'growthrate', 'diff', or 'level'.
     freq : str
-        Frequency code (first letter, e.g. 'Q','M','Y') for dynamic transform selection.
+        Frequency code ('Q', 'M', 'Y', etc.) to determine function names dynamically.
     max_var_num : int
-        Maximum number of features in any combination (including forced-in features).
+        Maximum number of features per combination (including forced-in).
     forced_in : list[str or TSFM]
-        MEV names or TSFM instances to include in every combination.
+        MEV names or TSFM instances to always include in combos.
     driver_pool : list[str]
         All MEV names available for optional features.
     desired_pool : list[str]
-        MEV names that each combination must include at least one of.
+        MEV names; combos must include at least one.
     max_lag : int, optional
-        Lags applied to transforms (0..max_lag). Default: 2.
+        Maximum lag to apply for each transform (0..max_lag). Default: 2.
     """
     def __init__(
         self,
@@ -49,25 +47,32 @@ class FeatureBuilder:
         self.max_lag = max_lag
         self.lags = range(max_lag + 1)
 
-        # Resolve transform functions based on frequency
+        # Map keys to dynamic function names
         code_map = {
             'growthrate': f"{self.freq}{self.freq}GR",
             'diff':        f"{self.freq}{self.freq}",
             'level':       'LV'
         }
+        # Resolve functions from transform module
         self.fn_map: Dict[str, callable] = {}
         for key, code in code_map.items():
-            fn = getattr(tf, code, None)
+            fn = getattr(pd.Series, code, None)  # skip pandas methods
+            fn = globals().get(code, None) if fn is None else fn
+            fn = locals().get(code, None) if fn is None else fn
+            fn = globals().get(code) or getattr(pd.Series, code, None) or getattr(self, code, None)
+            # Actually import transform functions
+            transform_module = __import__('tech.transform', fromlist=[code])
+            fn = getattr(transform_module, code, None)
             if fn is None:
-                raise ValueError(f"Transform '{code}' not found for freq '{self.freq}' in transform.py")
+                raise ValueError(f"Transform '{code}' not found in tech.transform for freq '{self.freq}'")
             self.fn_map[key] = fn
 
-        # Build forced and optional TSFM pools
+        # Build forced and optional pools
         self._build_forced(forced_in)
         self._build_options()
 
     def _build_forced(self, forced_in: List[Union[str, TSFM]]) -> None:
-        """Convert forced_in entries to TSFM instances."""
+        """Convert forced_in entries to TSFM instances, preserving TSFM if given."""
         forced_list: List[TSFM] = []
         for item in forced_in:
             if isinstance(item, TSFM):
@@ -88,7 +93,7 @@ class FeatureBuilder:
         self.options = options
 
     def generate_combinations(self) -> List[List[TSFM]]:
-        """Enumerate valid combinations of TSFM instances."""
+        """Enumerate all valid feature combinations as lists of TSFM instances."""
         base_count = len(self.forced)
         extra_max = self.max_var_num - base_count
         forced_names = {ts.feature_name for ts in self.forced}
@@ -113,3 +118,4 @@ class FeatureBuilder:
             f"forced={[ts.feature_name for ts in self.forced]}, "
             f"desired={list(self.desired_pool)}, max_lag={self.max_lag}>"
         )
+
