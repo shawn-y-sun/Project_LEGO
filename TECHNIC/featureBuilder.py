@@ -1,9 +1,12 @@
-# tech/featureBuilder.py
+# featureBuilder.py
 
 import itertools
 from typing import List, Union, Dict
+import itertools
+from typing import List, Union, Dict
 import pandas as pd
-from tech.transform import *
+from .transform import TSFM
+from . import transform as tf
 # Patch TSFM.__repr__ for readability
 TSFM.__repr__ = lambda self: f"TSFM('{self.feature_name}', '{self.name}')"
 
@@ -119,3 +122,28 @@ class featureBuilder:
             f"desired={list(self.desired_pool)}, max_lag={self.max_lag}>"
         )
 
+
+# Example usage when running as script
+if __name__ == '__main__':
+    # Sample quarterly data
+    dates = pd.date_range('2020-01-01', periods=4, freq='Q')
+    df = pd.DataFrame({
+        'GDP':   [1000, 1050, 1100, 1150],
+        'Unemp': [5.0, 4.8, 4.7, 4.5]
+    }, index=dates)
+
+    # Transform map and builder
+    mev_map = {'GDP': 'growthrate', 'Unemp': 'diff'}
+    fb = FeatureBuilder(
+        mev_transMap=mev_map,
+        freq='Q',
+        max_var_num=2,
+        forced_in=['GDP'],
+        driver_pool=['GDP', 'Unemp'],
+        desired_pool=['Unemp'],
+        max_lag=1
+    )
+    print("Sample TSFM combinations:")
+    for combo in fb.generate_combinations():
+        print(combo)
+    print(f"Total combos: {len(fb.generate_combinations())}")
