@@ -25,7 +25,7 @@ class TSFM:
         self,
         feature: Union[str, pd.Series],
         transform_fn: Callable[[pd.Series], pd.Series],
-        max_lag: int = 2,
+        max_lag: int = 0,
         exp_sign: int = 0
     ):
         # Store feature and derive name

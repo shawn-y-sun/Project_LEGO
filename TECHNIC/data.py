@@ -101,27 +101,6 @@ class DataManager:
             return pd.DataFrame()
         return self.model_mev.loc[self.in_sample_end + pd.Timedelta(days=1) :]
 
-    # Scenario MEVs, trimmed by scen_in_sample_end
-    @property
-    def scen_mevs(self) -> Dict[str, Dict[str, pd.DataFrame]]:
-        raw = self._mev_loader.scen_mevs
-        if self.scen_in_sample_end is None:
-            return raw
-        cutoff = self.scen_in_sample_end
-        trimmed: Dict[str, Dict[str, pd.DataFrame]] = {}
-        for key, df_dict in raw.items():
-            trimmed[key] = {scen: df.loc[:cutoff] for scen, df in df_dict.items()}
-        return trimmed
-
-    def interpolate_mevs(self, freq: str = 'M') -> None:
-        current_freq = pd.infer_freq(self.internal_data.index)
-        if current_freq != freq:
-            raise ValueError(f"Internal data frequency is not {freq}")
-        target_idx     = self.internal_data.index.normalize()
-        df_interp = self._interpolate_df(self.model_mev, target_idx)
-        # replace model_mev with interpolated
-        self._mev_loader._model_mev = df_interp
-
     def apply_to_mevs(self, func: Callable[[pd.DataFrame], pd.DataFrame]) -> None:
         self._mev_loader.apply_to_all(func)
 
@@ -195,14 +174,12 @@ class DataManager:
         X = pd.concat(pieces, axis=1)
         X.index = X.index.normalize()
         return X
-    
-    
 
     @staticmethod
     def _interpolate_df(df: pd.DataFrame, target_idx: pd.DatetimeIndex) -> pd.DataFrame:
         df2 = df.copy()
         df2.index = pd.to_datetime(df2.index).normalize()
-        df2 = df2.reindex(target_idx)
+        df2 = df2.reindex(target_idx).astype(float)
         df2 = df2.interpolate(method='cubic')
         df2.index = df2.index.normalize()
         return df2
@@ -235,11 +212,53 @@ class DataManager:
     @property
     def model_mev(self) -> pd.DataFrame:
         return self._mev_loader.model_mev
+    
+    @property
+    def model_mev(self) -> pd.DataFrame:
+        """
+        Model MEV DataFrame, interpolated to monthly if it is quarterly and internal_data is monthly.
+        """
+        df = self._mev_loader.model_mev
+        # Detect frequencies
+        freq_mev = pd.infer_freq(df.index)
+        freq_int = pd.infer_freq(self.internal_data.index)
+        # If MEV is quarterly and internal data is monthly, interpolate MEV to match monthly index
+        if freq_mev and freq_mev.startswith('Q') and freq_int and freq_int.startswith('M'):
+            # Build monthly index based on MEV's own start and end dates
+            start = df.index.min().normalize()
+            end = df.index.max().normalize()
+            target_idx = pd.date_range(start=start, end=end, freq='M')
+            return self._interpolate_df(df, target_idx)
+        return df
 
     @property
     def model_map(self) -> Dict[str, str]:
         return self._mev_loader.model_map
 
+    @property
+    def scen_mevs(self) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """
+        Scenario MEVs interpolated to monthly frequency if they are quarterly.
+        Returns a nested dict of workbook_key -> {scenario: DataFrame}.
+        """
+        raw = self._mev_loader.scen_mevs
+        interpolated: Dict[str, Dict[str, pd.DataFrame]] = {}
+        for key, df_dict in raw.items():
+            interp_dict: Dict[str, pd.DataFrame] = {}
+            for scen, df in df_dict.items():
+                freq_mev = pd.infer_freq(df.index)
+                freq_int = pd.infer_freq(self.internal_data.index)
+                if freq_mev and freq_mev.startswith('Q') and freq_int and freq_int.startswith('M'):
+                    # Build target monthly index based on this scenario's MEV dates
+                    start = df.index.min().normalize()
+                    end = df.index.max().normalize()
+                    target_idx = pd.date_range(start=start, end=end, freq='M')
+                    interp_dict[scen] = self._interpolate_df(df, target_idx)
+                else:
+                    interp_dict[scen] = df
+            interpolated[key] = interp_dict
+        return interpolated
+    
     @property
     def scen_maps(self) -> Dict[str, Dict[str, Dict[str, str]]]:
         return self._mev_loader.scen_maps

@@ -151,7 +151,7 @@ class NormalityTest(ModelTestBase):
 
 # Dictionary of stationarity diagnostic tests
 stationarity_test_dict: Dict[str, callable] = {
-    'adf': lambda series: adfuller(series.dropna(), autolag='AIC')
+    'ADF': lambda series: adfuller(series.dropna(), autolag='AIC')
 }
 
 class StationarityTest(ModelTestBase):
