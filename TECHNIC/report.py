@@ -124,6 +124,57 @@ class ReportSet:
             # assume all reports share the same default, take from first
             fn = next(iter(self._reports.values())).perf_set_plot_fn
         return fn(self._reports, **kwargs)
+    
+    def show_report(
+        self,
+        show_out: bool = True,
+        show_params: bool = False,
+        show_tests: bool = False,
+        perf_kwargs: dict = None,
+        params_kwargs: dict = None,
+        test_kwargs: dict = None
+    ) -> None:
+        """
+        Sequentially display:
+          1) In-sample performance (always)
+          2) Out-of-sample performance (if show_out)
+          3) Performance plot
+          4) Parameter tables per model (if show_params)
+          5) Testing tables per model (if show_tests)
+        """
+        perf_kwargs   = perf_kwargs or {}
+        params_kwargs = params_kwargs or {}
+        test_kwargs   = test_kwargs or {}
+
+        # 1) In-sample performance
+        print("=== In-Sample Performance ===")
+        df_in = self.show_in_perf_set(**perf_kwargs)
+        print(df_in.to_string())
+
+        # 2) Optional out-of-sample performance
+        if show_out:
+            print("\n=== Out-of-Sample Performance ===")
+            df_out = self.show_out_perf_set(**perf_kwargs)
+            print(df_out.to_string())
+
+        # 3) Performance plot
+        print("\n=== Performance Plot ===")
+        fig = self.plot_perf_set(**perf_kwargs)
+        plt.show()
+
+        # 4) Optional parameter tables per model
+        if show_params:
+            for model_id, report in self._reports.items():
+                print(f"\n=== Model: {model_id} — Parameters ===")
+                df_params = report.show_params_tbl(**params_kwargs)
+                print(df_params.to_string())
+
+        # 5) Optional per-model testing metrics
+        if show_tests:
+            for model_id, report in self._reports.items():
+                print(f"\n=== Model: {model_id} — Testing Metrics ===")
+                df_test = report.show_test_tbl(**test_kwargs)
+                print(df_test.to_string())
 
 
 
