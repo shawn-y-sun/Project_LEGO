@@ -68,124 +68,55 @@ class TSFM:
 
 
 
+# Core transform functions
+
 def LV(series: pd.Series) -> pd.Series:
-    """
-    Level: identity transform.
-    
-    Returns the original series unchanged.
-    """
+    """Identity: returns the original series."""
     return series
 
 
-def MMGR(series: pd.Series, lag: int = 1) -> pd.Series:
-    """
-    Month‑over‑Month Growth Rate.
-    
-    Computes (series / series.shift(lag)) - 1.
-    Input must be a monthly time series.
-    """
-    return series / series.shift(lag) - 1
-
-
-def MMGR2(series: pd.Series) -> pd.Series:
-    """
-    Month‑over‑Month Growth Rate at lag 2.
-    
-    Equivalent to MMGR(series, lag=2).
-    """
-    return MMGR(series, lag=2)
-
-
-def MMGR3(series: pd.Series) -> pd.Series:
-    """
-    Month‑over‑Month Growth Rate at lag 3.
-    
-    Equivalent to MMGR(series, lag=3).
-    """
-    return MMGR(series, lag=3)
-
-
-def MM(series: pd.Series, lag: int = 1) -> pd.Series:
-    """
-    Month‑over‑Month Difference.
-    
-    Computes series - series.shift(lag).
-    Input must be a monthly time series.
-    """
+def DF(series: pd.Series, lag: int = 1) -> pd.Series:
+    """Difference over lag periods: series - series.shift(lag)."""
     return series - series.shift(lag)
 
 
-def MM2(series: pd.Series) -> pd.Series:
-    """
-    Month‑over‑Month Difference at lag 2.
-    
-    Equivalent to MM(series, lag=2).
-    """
-    return MM(series, lag=2)
+def GR(series: pd.Series, lag: int = 1) -> pd.Series:
+    """Growth rate over lag periods: (series / series.shift(lag)) - 1."""
+    return series / series.shift(lag) - 1
 
 
-def MM3(series: pd.Series) -> pd.Series:
-    """
-    Month‑over‑Month Difference at lag 3.
-    
-    Equivalent to MM(series, lag=3).
-    """
-    return MM(series, lag=3)
-
-
-def MMGR_abs(series: pd.Series, lag: int = 1) -> pd.Series:
-    """
-    Absolute Month‑over‑Month Growth Rate.
-    
-    Computes abs(series / series.shift(lag) - 1).
-    """
+def ABSGR(series: pd.Series, lag: int = 1) -> pd.Series:
+    """Absolute growth rate over lag periods."""
     return (series / series.shift(lag) - 1).abs()
 
-def QQGR(series: pd.Series, lag: int = 1) -> pd.Series:
-    """
-    Quarter‑over‑Quarter Growth Rate.
-    
-    Computes (series / series.shift(lag)) - 1.
-    Input must be a quarterly time series.
-    """
-    return series / series.shift(lag) - 1
+# Rolling window transforms
 
-
-def QQ(series: pd.Series, lag: int = 1) -> pd.Series:
-    """
-    Quarter‑over‑Quarter Difference.
-    
-    Computes series - series.shift(lag).
-    Input must be a quarterly time series.
-    """
-    return series - series.shift(lag)
-
-
-def YYGR(series: pd.Series, lag: int = 4) -> pd.Series:
-    """
-    Year‑over‑Year Growth Rate.
-    
-    Computes (series / series.shift(lag)) - 1.
-    Input must be a quarterly time series.
-    """
-    return series / series.shift(lag) - 1
-
-
-def R4QMA(series: pd.Series, window: int = 4) -> pd.Series:
-    """
-    Four‑Quarter Rolling Average.
-    
-    Computes the rolling mean over the past `window` quarters.
-    Input must be a quarterly time series.
-    """
+def ROLLAVG(series: pd.Series, window: int = 4) -> pd.Series:
+    """Rolling average over specified window."""
     return series.rolling(window).mean()
 
 
-def R4QDiv(series: pd.Series, window: int = 4) -> pd.Series:
-    """
-    Divergence from Four‑Quarter Rolling Average.
-    
-    Computes series - R4QMA(series).
-    Input must be a quarterly time series.
-    """
-    return series - R4QMA(series, window)
+def DIV_ROLLAVG(series: pd.Series, window: int = 4) -> pd.Series:
+    """Difference from rolling average: series - rolling average."""
+    return series - ROLLAVG(series, window)
+
+# Alias functions for common lags
+
+def DF2(series: pd.Series) -> pd.Series:
+    """2-period difference."""
+    return DF(series, lag=2)
+
+
+def DF3(series: pd.Series) -> pd.Series:
+    """3-period difference."""
+    return DF(series, lag=3)
+
+
+def GR2(series: pd.Series) -> pd.Series:
+    """2-period growth rate."""
+    return GR(series, lag=2)
+
+
+def GR3(series: pd.Series) -> pd.Series:
+    """3-period growth rate."""
+    return GR(series, lag=3)

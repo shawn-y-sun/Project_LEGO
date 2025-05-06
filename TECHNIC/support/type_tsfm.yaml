@@ -3,12 +3,9 @@
 transforms:
   level:
     - LV      # No change
-    - QQGR    # quarter-over-quarter growth rate
-    - MMGR    # month-over-month growth rate
+    - GR      # MoM or QoQ growth rate
 
   rate:
     - LV      # No change
-    - QQGR    # quarter-over-quarter growth rate
-    - MMGR    # month-over-month growth rate
-    - QQ      # QoQ difference
-    - MM      # MoM difference
+    - GR      # MoM or QoQ growth rate
+    - DF      # MoM or QoQ difference
