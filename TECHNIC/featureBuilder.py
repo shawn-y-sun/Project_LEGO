@@ -7,7 +7,7 @@ from .transform import TSFM
 from . import transform as tf
 
 # Patch TSFM.__repr__ for readability
-TSFM.__repr__ = lambda self: f"TSFM('{self.feature_name}', '{self.name}')"
+TSFM.__repr__ = lambda self: f"TSFM(variable='{self.feature_name}', transform_fn='{self.transform_fn.__name__}', max_lag={self.max_lag})"
 
 class FeatureBuilder:
     """
@@ -16,19 +16,19 @@ class FeatureBuilder:
     Parameters
     ----------
     mev_transMap : dict[str, str]
-        Maps MEV name to transform key: 'growthrate', 'diff', or 'level'.
+        Maps MEV name to key: 'growthrate', 'diff', or 'level'.
     freq : str
-        Frequency code ('Q', 'M', 'Y', etc.) to determine function names dynamically.
+        Frequency code ('Q','M','Y', etc.) for dynamic transform selection.
     max_var_num : int
-        Maximum number of features per combination (including forced-in).
+        Max features per combination (including forced-in).
     forced_in : list[str or TSFM]
-        MEV names or TSFM instances to always include in combos.
+        MEV names or TSFM instances forced into every combo.
     driver_pool : list[str]
-        All MEV names available for optional features.
+        All MEV names for optional features.
     desired_pool : list[str]
         MEV names; combos must include at least one.
     max_lag : int, optional
-        Maximum lag to apply for each transform (0..max_lag). Default: 2.
+        Lags applied to transforms (0..max_lag). Default: 2.
     """
     def __init__(
         self,
@@ -40,7 +40,6 @@ class FeatureBuilder:
         desired_pool: List[str],
         max_lag: int = 2
     ):
-        # Core settings
         self.mev_transMap = mev_transMap or {}
         self.freq = str(freq).upper()[0]
         self.max_var_num = max_var_num
@@ -49,13 +48,12 @@ class FeatureBuilder:
         self.max_lag = max_lag
         self.lags = range(max_lag + 1)
 
-        # Map transform keys to dynamic function codes
+        # Map transform keys to dynamic function names
         code_map = {
             'growthrate': f"{self.freq}{self.freq}GR",
             'diff':        f"{self.freq}{self.freq}",
             'level':       'LV'
         }
-        # Resolve functions from transform module
         self.fn_map: Dict[str, callable] = {}
         for key, code in code_map.items():
             fn = getattr(tf, code, None)
@@ -63,33 +61,29 @@ class FeatureBuilder:
                 raise ValueError(f"Transform '{code}' not found in transform.py for freq '{self.freq}'")
             self.fn_map[key] = fn
 
-        # Build forced and optional pools
         self._build_forced(forced_in)
         self._build_options()
 
     def _build_forced(self, forced_in: List[Union[str, TSFM]]) -> None:
-        """Convert forced_in entries to TSFM instances."""
         forced_list: List[TSFM] = []
         for item in forced_in:
             if isinstance(item, TSFM):
                 forced_list.append(item)
             else:
-                ts = TSFM(feature=item, transform_fn=self.fn_map['level'], max_lag=0)
+                ts = TSFM(item, self.fn_map['level'], 0)
                 forced_list.append(ts)
         self.forced = forced_list
 
     def _build_options(self) -> None:
-        """Create TSFM options for each MEV in driver_pool."""
         options: Dict[str, List[TSFM]] = {}
         for mev in self.driver_pool:
             key = self.mev_transMap.get(mev)
             fn = self.fn_map.get(key)
             if fn:
-                options[mev] = [TSFM(feature=mev, transform_fn=fn, max_lag=lag) for lag in self.lags]
+                options[mev] = [TSFM(mev, fn, lag) for lag in self.lags]
         self.options = options
 
     def generate_combinations(self) -> List[List[TSFM]]:
-        """Enumerate all valid feature combinations as lists of TSFM instances."""
         forced = self.forced
         base_count = len(forced)
         extra_max = self.max_var_num - base_count
@@ -115,17 +109,3 @@ class FeatureBuilder:
             f"forced={[ts.feature_name for ts in self.forced]}, "
             f"desired={list(self.desired_pool)}, max_lag={self.max_lag}>"
         )
-
-
-if __name__ == '__main__':
-    # Sample quarter data
-    dates = pd.date_range('2020-01-01', periods=4, freq='Q')
-    df = pd.DataFrame({'GDP':[1000,1050,1100,1150], 'Unemp':[5.0,4.8,4.7,4.5]}, index=dates)
-
-    mev_map = {'GDP':'growthrate','Unemp':'diff'}
-    fb = FeatureBuilder(mev_transMap=mev_map, freq='Q', max_var_num=2,
-                        forced_in=['GDP'], driver_pool=['GDP','Unemp'],
-                        desired_pool=['Unemp'], max_lag=1)
-    for combo in fb.generate_combinations():
-        print(combo)
-    print(f"Total combos: {len(fb.generate_combinations())}")
