@@ -1,12 +1,32 @@
 # TECHNIC/datamgr.py
-
 import os
 import pandas as pd
+import warnings
+import yaml
 from typing import Any, Dict, List, Optional, Callable, Union
 
 from .internal import InternalDataLoader
 from .mev import MEVLoader
 from .transform import TSFM
+from . import transform as transform_module
+
+# Load MEV type mapping and transform specifications once at module import
+_MEV_TYPE_XLSX_PATH = os.path.join('support', 'mev_type.xlsx')
+_TYPE_TSFM_YAML_PATH = os.path.join('support', 'type_tsfm.yaml')
+try:
+    _mev_type_df = pd.read_excel(_MEV_TYPE_XLSX_PATH)
+    MEV_TYPE_MAP: Dict[str, str] = dict(zip(_mev_type_df['mev_code'], _mev_type_df['type']))
+except Exception:
+    MEV_TYPE_MAP = {}
+
+try:
+    with open(_TYPE_TSFM_YAML_PATH) as _f:
+        _tf_spec = yaml.safe_load(_f)
+    TYPE_TSFM_MAP: Dict[str, List[str]] = _tf_spec.get('transforms', {})
+except Exception:
+    TYPE_TSFM_MAP = {}
+
+warnings.simplefilter(action="ignore", category=FutureWarning)
 
 class DataManager:
     """
@@ -175,14 +195,57 @@ class DataManager:
         X.index = X.index.normalize()
         return X
 
+    def build_search_vars(
+        self,
+        specs: List[Union[str, TSFM]],
+        mev_type_map: Dict[str, str] = MEV_TYPE_MAP,
+        type_tsfm_map: Dict[str, List[str]] = TYPE_TSFM_MAP
+    ) -> Dict[str, pd.DataFrame]:
+        """
+        Build DataFrames for each variable based on specs.
+        Returns a dict mapping variable name to its DataFrame of raw and transformed features.
+        """
+        var_df_map: Dict[str, pd.DataFrame] = {}
+        for spec in specs:
+            # Determine TSFM list and variable name
+            if isinstance(spec, TSFM):
+                var_name = spec.feature_name
+                tsfms = [spec]
+            elif isinstance(spec, str):
+                var_name = spec
+                var_type = mev_type_map.get(spec)
+                if var_type is None:
+                    raise KeyError(f"Type for '{spec}' not found.")
+                tf_names = type_tsfm_map.get(var_type)
+                if not tf_names:
+                    raise KeyError(f"No transforms for type '{var_type}'.")
+                tsfms = [TSFM(spec, getattr(transform_module, name)) for name in tf_names]
+            else:
+                raise ValueError(f"Invalid spec: {spec!r}")
+            # Build DataFrame for this variable
+            var_df_map[var_name] = self.build_indep_vars(tsfms)
+        return var_df_map
+    
     @staticmethod
-    def _interpolate_df(df: pd.DataFrame, target_idx: pd.DatetimeIndex) -> pd.DataFrame:
+    def _interpolate_df(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Interpolate quarterly MEV DataFrames to match monthly frequency.
+        If df has quarterly frequency, reindex from its own min to max with monthly freq
+        and cubic-interpolate; otherwise return original df.
+        """
         df2 = df.copy()
         df2.index = pd.to_datetime(df2.index).normalize()
-        df2 = df2.reindex(target_idx).astype(float)
-        df2 = df2.interpolate(method='cubic')
-        df2.index = df2.index.normalize()
-        return df2
+        freq_mev = pd.infer_freq(df2.index)
+        # Only interpolate Q -> M
+        if freq_mev and freq_mev.startswith('Q'):
+            start = df2.index.min()
+            end = df2.index.max()
+            target_idx = pd.date_range(start=start, end=end, freq='M')
+            df2 = df2.reindex(target_idx).astype(float)
+            df2 = df2.interpolate(method='cubic')
+            df2.index = df2.index.normalize()
+            return df2
+        return df
 
     # Delegated loader properties
     @property
@@ -211,25 +274,11 @@ class DataManager:
 
     @property
     def model_mev(self) -> pd.DataFrame:
-        return self._mev_loader.model_mev
-    
-    @property
-    def model_mev(self) -> pd.DataFrame:
         """
-        Model MEV DataFrame, interpolated to monthly if it is quarterly and internal_data is monthly.
+        Model MEV DataFrame, interpolated to match monthly frequency when needed.
         """
         df = self._mev_loader.model_mev
-        # Detect frequencies
-        freq_mev = pd.infer_freq(df.index)
-        freq_int = pd.infer_freq(self.internal_data.index)
-        # If MEV is quarterly and internal data is monthly, interpolate MEV to match monthly index
-        if freq_mev and freq_mev.startswith('Q') and freq_int and freq_int.startswith('M'):
-            # Build monthly index based on MEV's own start and end dates
-            start = df.index.min().normalize()
-            end = df.index.max().normalize()
-            target_idx = pd.date_range(start=start, end=end, freq='M')
-            return self._interpolate_df(df, target_idx)
-        return df
+        return self._interpolate_df(df)
 
     @property
     def model_map(self) -> Dict[str, str]:
@@ -238,27 +287,18 @@ class DataManager:
     @property
     def scen_mevs(self) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
-        Scenario MEVs interpolated to monthly frequency if they are quarterly.
-        Returns a nested dict of workbook_key -> {scenario: DataFrame}.
+        Scenario MEVs interpolated to match monthly frequency.
+        Returns nested dict: workbook_key -> {scenario: DataFrame}.
         """
         raw = self._mev_loader.scen_mevs
         interpolated: Dict[str, Dict[str, pd.DataFrame]] = {}
         for key, df_dict in raw.items():
             interp_dict: Dict[str, pd.DataFrame] = {}
             for scen, df in df_dict.items():
-                freq_mev = pd.infer_freq(df.index)
-                freq_int = pd.infer_freq(self.internal_data.index)
-                if freq_mev and freq_mev.startswith('Q') and freq_int and freq_int.startswith('M'):
-                    # Build target monthly index based on this scenario's MEV dates
-                    start = df.index.min().normalize()
-                    end = df.index.max().normalize()
-                    target_idx = pd.date_range(start=start, end=end, freq='M')
-                    interp_dict[scen] = self._interpolate_df(df, target_idx)
-                else:
-                    interp_dict[scen] = df
+                interp_dict[scen] = self._interpolate_df(df)
             interpolated[key] = interp_dict
         return interpolated
-    
+
     @property
     def scen_maps(self) -> Dict[str, Dict[str, Dict[str, str]]]:
         return self._mev_loader.scen_maps

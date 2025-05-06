@@ -1,0 +1,14 @@
+# type_tsfm.yaml
+
+transforms:
+  level:
+    - LV      # No change
+    - QQGR    # quarter-over-quarter growth rate
+    - MMGR    # month-over-month growth rate
+
+  rate:
+    - LV      # No change
+    - QQGR    # quarter-over-quarter growth rate
+    - MMGR    # month-over-month growth rate
+    - QQ      # QoQ difference
+    - MM      # MoM difference
