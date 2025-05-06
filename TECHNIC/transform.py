@@ -1,6 +1,7 @@
 # TECHNIC/transform.py
 
 import pandas as pd
+import functools
 from typing import Callable, Union
 
 class TSFM:
@@ -59,10 +60,21 @@ class TSFM:
     @property
     def name(self) -> str:
         """
-        Generate the transformed variable name:
-        featureName_transformFnName_Lmax_lag (or without _L if max_lag==0).
+        Construct the feature name as FeatureName_FunctionName[PeriodOrWindow][_Llag].
         """
-        fn_name = getattr(self.transform_fn, "__name__", "transform")
+        # Determine base function name and any period/window suffix
+        if isinstance(self.transform_fn, functools.partial):
+            base_fn = self.transform_fn.func.__name__
+            keywords = getattr(self.transform_fn, 'keywords', {}) or {}
+            if 'periods' in keywords and keywords['periods'] > 1:
+                fn_name = f"{base_fn}{keywords['periods']}"
+            elif 'window' in keywords and keywords['window'] > 1:
+                fn_name = f"{base_fn}{keywords['window']}"
+            else:
+                fn_name = base_fn
+        else:
+            fn_name = getattr(self.transform_fn, "__name__", "transform")
+        # Add shift lag part
         lag_part = f"_L{self.max_lag}" if self.max_lag > 0 else ""
         return f"{self.feature_name}_{fn_name}{lag_part}"
 
@@ -75,17 +87,17 @@ def LV(series: pd.Series) -> pd.Series:
     return series
 
 
-def DF(series: pd.Series, lag: int = 1) -> pd.Series:
+def DF(series: pd.Series, periods: int = 1) -> pd.Series:
     """Difference over lag periods: series - series.shift(lag)."""
-    return series - series.shift(lag)
+    return series - series.shift(periods)
 
 
-def GR(series: pd.Series, lag: int = 1) -> pd.Series:
-    """Growth rate over lag periods: (series / series.shift(lag)) - 1."""
-    return series / series.shift(lag) - 1
+def GR(series: pd.Series, periods: int = 1) -> pd.Series:
+    """Growth rate over lag periods: (series / series.shift(periods)) - 1."""
+    return series / series.shift(periods) - 1
 
 
-def ABSGR(series: pd.Series, lag: int = 1) -> pd.Series:
+def ABSGR(series: pd.Series, periods: int = 1) -> pd.Series:
     """Absolute growth rate over lag periods."""
     return (series / series.shift(lag) - 1).abs()
 
@@ -104,19 +116,19 @@ def DIV_ROLLAVG(series: pd.Series, window: int = 4) -> pd.Series:
 
 def DF2(series: pd.Series) -> pd.Series:
     """2-period difference."""
-    return DF(series, lag=2)
+    return DF(series, periods=2)
 
 
 def DF3(series: pd.Series) -> pd.Series:
     """3-period difference."""
-    return DF(series, lag=3)
+    return DF(series, periods=3)
 
 
 def GR2(series: pd.Series) -> pd.Series:
     """2-period growth rate."""
-    return GR(series, lag=2)
+    return GR(series, periods=2)
 
 
 def GR3(series: pd.Series) -> pd.Series:
     """3-period growth rate."""
-    return GR(series, lag=3)
+    return GR(series, periods=3)
