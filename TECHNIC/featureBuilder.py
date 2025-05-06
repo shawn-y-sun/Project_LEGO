@@ -1,16 +1,15 @@
-# featureBuilder.py
+# tech/featureBuilder.py
 
-import itertools
-from typing import List, Union, Dict
 import itertools
 from typing import List, Union, Dict
 import pandas as pd
 from .transform import TSFM
 from . import transform as tf
+
 # Patch TSFM.__repr__ for readability
 TSFM.__repr__ = lambda self: f"TSFM('{self.feature_name}', '{self.name}')"
 
-class featureBuilder:
+class FeatureBuilder:
     """
     Build combinations of TSFM instances for macroeconomic variables (MEVs).
 
@@ -50,7 +49,7 @@ class featureBuilder:
         self.max_lag = max_lag
         self.lags = range(max_lag + 1)
 
-        # Map keys to dynamic function names
+        # Map transform keys to dynamic function codes
         code_map = {
             'growthrate': f"{self.freq}{self.freq}GR",
             'diff':        f"{self.freq}{self.freq}",
@@ -59,15 +58,9 @@ class featureBuilder:
         # Resolve functions from transform module
         self.fn_map: Dict[str, callable] = {}
         for key, code in code_map.items():
-            fn = getattr(pd.Series, code, None)  # skip pandas methods
-            fn = globals().get(code, None) if fn is None else fn
-            fn = locals().get(code, None) if fn is None else fn
-            fn = globals().get(code) or getattr(pd.Series, code, None) or getattr(self, code, None)
-            # Actually import transform functions
-            transform_module = __import__('tech.transform', fromlist=[code])
-            fn = getattr(transform_module, code, None)
+            fn = getattr(tf, code, None)
             if fn is None:
-                raise ValueError(f"Transform '{code}' not found in tech.transform for freq '{self.freq}'")
+                raise ValueError(f"Transform '{code}' not found in transform.py for freq '{self.freq}'")
             self.fn_map[key] = fn
 
         # Build forced and optional pools
@@ -75,7 +68,7 @@ class featureBuilder:
         self._build_options()
 
     def _build_forced(self, forced_in: List[Union[str, TSFM]]) -> None:
-        """Convert forced_in entries to TSFM instances, preserving TSFM if given."""
+        """Convert forced_in entries to TSFM instances."""
         forced_list: List[TSFM] = []
         for item in forced_in:
             if isinstance(item, TSFM):
@@ -97,9 +90,10 @@ class featureBuilder:
 
     def generate_combinations(self) -> List[List[TSFM]]:
         """Enumerate all valid feature combinations as lists of TSFM instances."""
-        base_count = len(self.forced)
+        forced = self.forced
+        base_count = len(forced)
         extra_max = self.max_var_num - base_count
-        forced_names = {ts.feature_name for ts in self.forced}
+        forced_names = {ts.feature_name for ts in forced}
         avail = [m for m in self.driver_pool if m not in forced_names]
 
         required = None
@@ -112,7 +106,7 @@ class featureBuilder:
                 if required and not (set(subset) & required):
                     continue
                 for prod in itertools.product(*(self.options[m] for m in subset)):
-                    combos.append(self.forced + list(prod))
+                    combos.append(forced + list(prod))
         return combos
 
     def __repr__(self) -> str:
@@ -123,27 +117,15 @@ class featureBuilder:
         )
 
 
-# Example usage when running as script
 if __name__ == '__main__':
-    # Sample quarterly data
+    # Sample quarter data
     dates = pd.date_range('2020-01-01', periods=4, freq='Q')
-    df = pd.DataFrame({
-        'GDP':   [1000, 1050, 1100, 1150],
-        'Unemp': [5.0, 4.8, 4.7, 4.5]
-    }, index=dates)
+    df = pd.DataFrame({'GDP':[1000,1050,1100,1150], 'Unemp':[5.0,4.8,4.7,4.5]}, index=dates)
 
-    # Transform map and builder
-    mev_map = {'GDP': 'growthrate', 'Unemp': 'diff'}
-    fb = FeatureBuilder(
-        mev_transMap=mev_map,
-        freq='Q',
-        max_var_num=2,
-        forced_in=['GDP'],
-        driver_pool=['GDP', 'Unemp'],
-        desired_pool=['Unemp'],
-        max_lag=1
-    )
-    print("Sample TSFM combinations:")
+    mev_map = {'GDP':'growthrate','Unemp':'diff'}
+    fb = FeatureBuilder(mev_transMap=mev_map, freq='Q', max_var_num=2,
+                        forced_in=['GDP'], driver_pool=['GDP','Unemp'],
+                        desired_pool=['Unemp'], max_lag=1)
     for combo in fb.generate_combinations():
         print(combo)
     print(f"Total combos: {len(fb.generate_combinations())}")
