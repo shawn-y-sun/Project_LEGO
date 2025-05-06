@@ -161,7 +161,7 @@ def ols_plot_perf_set(
                 y_out.index,
                 y_out,
                 linestyle='--',
-                label=f"{mid} (OOS)",
+                label=None, #f"{mid} (OOS)",
                 color=color,
                 linewidth=2
             )

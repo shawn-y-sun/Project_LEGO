@@ -36,7 +36,7 @@ class ModelReportBase(ABC):
         self.out_perf_measures = out_perf_measures or {}
         self.test_measures = test_measures or {}
         self.param_measures = param_measures or {}
-        self._perf_set_plot_fn = perf_set_plot_fn
+        self.perf_set_plot_fn = perf_set_plot_fn
 
     @abstractmethod
     def show_in_perf_tbl(self) -> DataFrame:
