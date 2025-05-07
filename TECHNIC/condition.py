@@ -100,7 +100,7 @@ def zero_if_exceeds(
     return result
 
 
-def BurnOut(
+def BO(
     main_series: pd.Series,
     condition_series: pd.Series,
     threshold: float,
@@ -108,6 +108,7 @@ def BurnOut(
     burn_periods: int = 1
 ) -> pd.Series:
     """
+    Burn-Out function
     Sets values of main_series to 0 for `burn_periods` after
     condition_series at time t-lag exceeds threshold, but only if
     the original main_series values are positive.
