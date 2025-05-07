@@ -146,7 +146,7 @@ class DataManager:
         mev_df: Optional[pd.DataFrame]      = None
     ) -> pd.DataFrame:
         """
-        Build independent-variable DataFrame from specs, applying TSFM and CondVar transforms.
+        Build independent-variable DataFrame from specs, applying TSFM transforms and CondVar.
 
         :param specs: list of feature names (str), TSFM instances, or CondVar instances.
         :param internal_df: override for internal data.
@@ -163,41 +163,61 @@ class DataManager:
                     yield it
 
         flat_specs = list(_flatten(specs))
-        pieces = []
+        pieces: List[pd.Series] = []
 
-        for itm in flat_specs:
+        for spec in flat_specs:
             # Conditional variable
-            if isinstance(itm, CondVar):
-                # Ensure main and cond series are set
-                if itm.main_series is None:
-                    itm.main_series = internal[itm.main_name] if itm.main_name in internal.columns else mev[itm.main_name]
-                # For cond_var entries
+            if isinstance(spec, CondVar):
+                # set main_series if needed
+                if spec.main_series is None:
+                    if spec.main_name in internal.columns:
+                        spec.main_series = internal[spec.main_name]
+                    elif spec.main_name in mev.columns:
+                        spec.main_series = mev[spec.main_name]
+                    else:
+                        raise KeyError(f"CondVar main_var '{spec.main_name}' not found")
+                # set cond_var series list
                 cond_series_list = []
-                for cv in itm.cond_var:
-                    cond_series_list.append(cv if isinstance(cv, pd.Series) else (internal[cv] if cv in internal.columns else mev[cv]))
-                # Update cond_fn_kwargs series args
-                pieces.append(itm.apply())
-            # Time-series transform
-            elif isinstance(itm, TSFM):
-                if itm.feature is None:
-                    fn = itm.feature_name
+                for cv in spec.cond_var:
+                    if isinstance(cv, pd.Series):
+                        cond_series_list.append(cv)
+                    elif isinstance(cv, str):
+                        if cv in internal.columns:
+                            cond_series_list.append(internal[cv])
+                        elif cv in mev.columns:
+                            cond_series_list.append(mev[cv])
+                        else:
+                            raise KeyError(f"CondVar cond_var '{cv}' not found")
+                    else:
+                        raise TypeError("`cond_var` must be a column name or pandas Series")
+                spec.cond_var = cond_series_list
+                # apply and collect
+                pieces.append(spec.apply())
+            # Time-series feature transform
+            elif isinstance(spec, TSFM):
+                # pick up the series
+                if spec.feature is not None:
+                    series = spec.feature
+                else:
+                    fn = spec.feature_name
                     if fn in internal.columns:
-                        itm.feature = internal[fn]
+                        series = internal[fn]
                     elif fn in mev.columns:
-                        itm.feature = mev[fn]
+                        series = mev[fn]
                     else:
                         raise KeyError(f"Variable '{fn}' not found for transformation.")
-                pieces.append(itm.apply())
+                    spec.feature = series
+                pieces.append(spec.apply())
             # Raw feature
-            elif isinstance(itm, str):
-                if itm in internal.columns:
-                    pieces.append(internal[itm])
-                elif itm in mev.columns:
-                    pieces.append(mev[itm])
+            elif isinstance(spec, str):
+                if spec in internal.columns:
+                    pieces.append(internal[spec])
+                elif spec in mev.columns:
+                    pieces.append(mev[spec])
                 else:
-                    raise KeyError(f"Column '{itm}' not found in internal or MEV data.")
+                    raise KeyError(f"Column '{spec}' not found in internal or MEV data.")
             else:
-                raise ValueError(f"Invalid spec element: {itm!r}")
+                raise ValueError(f"Invalid spec element: {spec!r}")
 
         # concat and normalize
         X = pd.concat(pieces, axis=1)
