@@ -2,6 +2,8 @@
 import warnings
 warnings.simplefilter(action="ignore", category=FutureWarning)
 import pandas as pd
+import matplotlib.pyplot as plt
+import math
 from typing import Type, Dict, List, Optional, Any
 
 from .cm import CM
@@ -106,6 +108,91 @@ class Segment:
             params_kwargs=params_kwargs,
             test_kwargs=test_kwargs
         )
+    
+    def explore_vars(
+        self,
+        vars_list: List[str],
+        plot_type: str = 'line'
+    ) -> None:
+        """
+        For each variable in vars_list, build transformed DataFrames via DataManager,
+        then plot each feature column against the target variable.
+
+        :param vars_list: list of variable names (or TSFM specs) to explore
+        :param plot_type: 'line' for time-series or 'scatter' for scatter plot
+        """
+        var_dfs = self.dm.build_search_vars(vars_list)
+        target_series = self.dm.internal_data[self.target]
+
+        for var_name, df in var_dfs.items():
+            # Align df and target to their common index
+            common_idx = df.index.intersection(target_series.index)
+            df_aligned = df.loc[common_idx]
+            ts_aligned = target_series.loc[common_idx]
+
+            cols = df_aligned.columns.tolist()
+            n = len(cols)
+            ncols = 3
+            nrows = math.ceil(n / ncols)
+            fig, axes = plt.subplots(
+                nrows=nrows, ncols=ncols,
+                figsize=(5 * ncols, 4 * nrows), squeeze=False
+            )
+            fig.suptitle(f"{var_name} vs. {self.target}", fontsize=16)
+
+            for idx, col in enumerate(cols):
+                row, col_idx = divmod(idx, ncols)
+                ax = axes[row][col_idx]
+
+                # set subplot title to the variable name
+                ax.set_title(col)
+
+                if plot_type == 'line':
+                    # primary vs secondary y-axis
+                    line1, = ax.plot(
+                        ts_aligned.index,
+                        ts_aligned,
+                        color='tab:blue',
+                        label=self.target
+                    )
+                    ax2 = ax.twinx()
+                    line2, = ax2.plot(
+                        df_aligned.index,
+                        df_aligned[col],
+                        color='tab:orange',
+                        label=col
+                    )
+                    ax.legend(handles=[line1, line2], loc='best')
+
+                    # remove all axis labels
+                    ax.set_xlabel('')
+                    ax.set_ylabel('')
+                    ax2.set_xlabel('')
+                    ax2.set_ylabel('')
+
+                elif plot_type == 'scatter':
+                    ax.scatter(
+                        df_aligned[col],
+                        ts_aligned,
+                        color='dodgerblue'
+                    )
+                    # remove both axis labels
+                    ax.set_xlabel('')
+                    ax.set_ylabel('')
+                    # remove any legend
+                    if ax.get_legend() is not None:
+                        ax.get_legend().remove()
+
+                else:
+                    raise ValueError("plot_type must be 'line' or 'scatter'")
+
+            # hide unused subplots
+            for i in range(n, nrows * ncols):
+                r, c = divmod(i, ncols)
+                axes[r][c].axis('off')
+
+            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+            plt.show()
 
     def export(
         self,

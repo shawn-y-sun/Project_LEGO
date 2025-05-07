@@ -71,6 +71,9 @@ class CM:
         :param sample: which sample(s) to build: 'in', 'full', or 'both'.
         :param data_manager: optional override for the DataManager.
         '''
+        # cache input specs
+        self.specs = specs
+        
         dm = data_manager or self.dm
         if dm is None:
             raise ValueError("No data_manager provided to CM.build().")

@@ -98,3 +98,46 @@ def zero_if_exceeds(
     # Zero out values where condition exceeds the threshold
     result = main_series.where(condition_series <= threshold, other=0)
     return result
+
+
+def BO(
+    main_series: pd.Series,
+    condition_series: pd.Series,
+    threshold: float,
+    lag: int = 1,
+    burn_periods: int = 1
+) -> pd.Series:
+    """
+    Burn-Out function
+    Sets values of main_series to 0 for `burn_periods` after
+    condition_series at time t-lag exceeds threshold, but only if
+    the original main_series values are positive.
+
+    :param main_series: Series with original values.
+    :param condition_series: Series to compare against threshold.
+    :param threshold: Numeric cutoff above which burn is triggered.
+    :param lag: Number of periods to look back in condition_series (default=1).
+    :param burn_periods: Number of consecutive periods to zero out in main_series (default=1).
+    :return: A new Series with burn applied.
+    """
+    # Align and prepare
+    cond_shifted = condition_series.shift(lag)
+    events = cond_shifted > threshold
+
+    original = main_series.copy()
+    result = main_series.copy()
+
+    # For each event, zero out next burn_periods only if original>0
+    for idx in events[events].index:
+        try:
+            start_loc = result.index.get_loc(idx)
+        except KeyError:
+            continue
+        end_loc = start_loc + burn_periods
+        positions = result.index[start_loc:end_loc]
+        # Mask positions where original > 0
+        mask = original.loc[positions] > 0
+        zero_positions = positions[mask.values]
+        result.loc[zero_positions] = 0
+
+    return result

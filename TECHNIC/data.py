@@ -10,6 +10,7 @@ from .internal import InternalDataLoader
 from .mev import MEVLoader
 from .transform import TSFM
 from . import transform as transform_module
+from .condition import CondVar
 
 # Determine support directory relative to this module file using pathlib
 _BASE_DIR = Path(__file__).resolve().parent
@@ -105,6 +106,13 @@ class DataManager:
             if scen_in_sample_end else None
         )
 
+        # Interpolate MEV to match monthly frequency when needed
+        self._model_mev_data = self._interpolate_df(self._mev_loader.model_mev)
+        raw_scen = self._mev_loader.scen_mevs
+        self._scen_mevs_data: Dict[str, Dict[str, pd.DataFrame]] = {
+            key: {scen: self._interpolate_df(df) for scen, df in df_dict.items()}
+            for key, df_dict in raw_scen.items()
+        }
 
     # Modeling in‑sample/out‑of‑sample splits
     @property
@@ -131,9 +139,6 @@ class DataManager:
             return pd.DataFrame()
         return self.model_mev.loc[self.in_sample_end + pd.Timedelta(days=1) :]
 
-    def apply_to_mevs(self, func: Callable[[pd.DataFrame], pd.DataFrame]) -> None:
-        self._mev_loader.apply_to_all(func)
-
     def build_indep_vars(
         self,
         specs: Any,
@@ -141,9 +146,9 @@ class DataManager:
         mev_df: Optional[pd.DataFrame]      = None
     ) -> pd.DataFrame:
         """
-        Build independent-variable DataFrame from specs, applying TSFM transforms.
+        Build independent-variable DataFrame from specs, applying TSFM transforms and CondVar.
 
-        :param specs: list of feature names (str) or TSFM instances.
+        :param specs: list of feature names (str), TSFM instances, or CondVar instances.
         :param internal_df: override for internal data.
         :param mev_df: override for MEV data.
         """
@@ -158,47 +163,61 @@ class DataManager:
                     yield it
 
         flat_specs = list(_flatten(specs))
-        raw_names: List[str] = []
-        transformers: List[TSFM] = []
+        pieces: List[pd.Series] = []
 
-        for itm in flat_specs:
-            if isinstance(itm, str):
-                raw_names.append(itm)
-            elif isinstance(itm, TSFM):
-                transformers.append(itm)
-            else:
-                raise ValueError(f"Invalid spec element: {itm!r}")
-
-        pieces = []
-
-        # 1) add raw features
-        for name in raw_names:
-            if name in internal.columns:
-                pieces.append(internal[name])
-            elif name in mev.columns:
-                pieces.append(mev[name])
-            else:
-                raise KeyError(f"Column '{name}' not found in internal or MEV data.")
-
-        # 2) apply each TSFM
-        for tsfm in transformers:
-            # pick up the series
-            if tsfm.feature is not None:
-                series = tsfm.feature
-            else:
-                fn = tsfm.feature_name
-                if fn in internal.columns:
-                    series = internal[fn]
-                elif fn in mev.columns:
-                    series = mev[fn]
+        for spec in flat_specs:
+            # Conditional variable
+            if isinstance(spec, CondVar):
+                # set main_series if needed
+                if spec.main_series is None:
+                    if spec.main_name in internal.columns:
+                        spec.main_series = internal[spec.main_name]
+                    elif spec.main_name in mev.columns:
+                        spec.main_series = mev[spec.main_name]
+                    else:
+                        raise KeyError(f"CondVar main_var '{spec.main_name}' not found")
+                # set cond_var series list
+                cond_series_list = []
+                for cv in spec.cond_var:
+                    if isinstance(cv, pd.Series):
+                        cond_series_list.append(cv)
+                    elif isinstance(cv, str):
+                        if cv in internal.columns:
+                            cond_series_list.append(internal[cv])
+                        elif cv in mev.columns:
+                            cond_series_list.append(mev[cv])
+                        else:
+                            raise KeyError(f"CondVar cond_var '{cv}' not found")
+                    else:
+                        raise TypeError("`cond_var` must be a column name or pandas Series")
+                spec.cond_var = cond_series_list
+                # apply and collect
+                pieces.append(spec.apply())
+            # Time-series feature transform
+            elif isinstance(spec, TSFM):
+                # pick up the series
+                if spec.feature is not None:
+                    series = spec.feature
                 else:
-                    raise KeyError(f"Variable '{fn}' not found for transformation.")
-                # inject it so apply_transform() works
-                tsfm.feature = series
-
-            # apply transform + lag
-            col = tsfm.apply()
-            pieces.append(col)
+                    fn = spec.feature_name
+                    if fn in internal.columns:
+                        series = internal[fn]
+                    elif fn in mev.columns:
+                        series = mev[fn]
+                    else:
+                        raise KeyError(f"Variable '{fn}' not found for transformation.")
+                    spec.feature = series
+                pieces.append(spec.apply())
+            # Raw feature
+            elif isinstance(spec, str):
+                if spec in internal.columns:
+                    pieces.append(internal[spec])
+                elif spec in mev.columns:
+                    pieces.append(mev[spec])
+                else:
+                    raise KeyError(f"Column '{spec}' not found in internal or MEV data.")
+            else:
+                raise ValueError(f"Invalid spec element: {spec!r}")
 
         # concat and normalize
         X = pd.concat(pieces, axis=1)
@@ -271,39 +290,78 @@ class DataManager:
             df2.index = df2.index.normalize()
             return df2
         return df
+    
+    def apply_to_mevs(
+        self,
+        fn: Callable[
+            [pd.DataFrame, pd.DataFrame],
+            pd.DataFrame
+        ]
+    ) -> None:
+        '''
+        Apply a two-arg function to all MEV tables (model and scenarios).
 
-    # Delegated loader properties
-    @property
-    def source(self) -> Optional[str]:
-        return self._internal_loader.source
+        The function signature is:
+            df_mev = fn(df_mev, internal_df)
 
-    @property
-    def raw_df(self) -> Optional[pd.DataFrame]:
-        return self._internal_loader.raw_df
+        It should return a DataFrame (possibly the same df_mev mutated) with new features.
+        These returned columns will be merged back into each MEV table.
+        '''
+        internal_df = self.internal_data
 
-    @property
-    def date_col(self) -> Optional[str]:
-        return self._internal_loader.date_col
+        def _apply_mev(mev_df: pd.DataFrame):
+            result = fn(mev_df.copy(), internal_df)
+            if not isinstance(result, pd.DataFrame):
+                raise TypeError(f"apply_to_mevs: fn must return a DataFrame, got {type(result)}")
+            for col in result.columns:
+                mev_df[col] = result[col].reindex(mev_df.index)
 
-    @property
-    def start(self) -> Optional[str]:
-        return self._internal_loader.start
+        # Apply to main MEV
+        _apply_mev(self._model_mev_data)
 
-    @property
-    def end(self) -> Optional[str]:
-        return self._internal_loader.end
+        # Apply to each scenario
+        for wb_key, scen_map in self._scen_mevs_data.items():
+            for scen_name, df in scen_map.items():
+                _apply_mev(df)
+    
+    def apply_to_internal(
+        self,
+        fn: Callable[
+            [pd.DataFrame],
+            Optional[Union[pd.Series, pd.DataFrame]]
+        ]
+    ) -> None:
+        '''
+        Apply a one-arg feature-engineering function to:
+          • self.internal_data
 
-    @property
-    def freq(self) -> str:
-        return self._internal_loader.freq
+        The function signature is:
+            ret = fn(internal_df)
+
+        - If ret is None, assume fn performed in-place mutations on internal_df.
+        - If ret is a Series or DataFrame, merge its columns back into internal_data only.
+        '''
+        internal_df = self.internal_data
+
+        ret = fn(internal_df)
+        if ret is None:
+            return
+        if isinstance(ret, pd.Series):
+            internal_df[ret.name] = ret.reindex(internal_df.index)
+        elif isinstance(ret, pd.DataFrame):
+            for col in ret.columns:
+                internal_df[col] = ret[col].reindex(internal_df.index)
+        else:
+            raise TypeError(
+                f"apply_to_internal(): fn must return None, Series or DataFrame, got {type(ret)}"
+            )
 
     @property
     def model_mev(self) -> pd.DataFrame:
         """
-        Model MEV DataFrame, interpolated to match monthly frequency when needed.
+        Cached model MEV DataFrame.
         """
-        df = self._mev_loader.model_mev
-        return self._interpolate_df(df)
+        return self._model_mev_data
 
     @property
     def model_map(self) -> Dict[str, str]:
@@ -312,17 +370,9 @@ class DataManager:
     @property
     def scen_mevs(self) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
-        Scenario MEVs interpolated to match monthly frequency.
-        Returns nested dict: workbook_key -> {scenario: DataFrame}.
+        Cached scenario MEV DataFrames.
         """
-        raw = self._mev_loader.scen_mevs
-        interpolated: Dict[str, Dict[str, pd.DataFrame]] = {}
-        for key, df_dict in raw.items():
-            interp_dict: Dict[str, pd.DataFrame] = {}
-            for scen, df in df_dict.items():
-                interp_dict[scen] = self._interpolate_df(df)
-            interpolated[key] = interp_dict
-        return interpolated
+        return self._scen_mevs_data
 
     @property
     def scen_maps(self) -> Dict[str, Dict[str, Dict[str, str]]]:
