@@ -56,18 +56,18 @@ class ModelBase(ABC):
         return self.predict(self.X_out)
     
     @property
-    def tests(self) -> TestSetBase:
+    def tests(self) -> TestSet:
         """
         Build and return the TestSet for this model.
         """
         return self.build_tests()
     
     @property
-    def test_measures(self) -> dict:
+    def assumption_results(self) -> dict:
         """
-        Return the test_results from TestSet as test measures for this model.
+        Return the test_results from TestSet as test results for this model.
         """
-        return self.tests.test_results
+        return self.tests.assumption_results
     
     @property
     def report(self) -> Any:
@@ -86,7 +86,7 @@ class ModelBase(ABC):
             y_pred_out=self.y_pred_out,
             in_perf_measures=getattr(self, 'in_perf_measures', {}),
             out_perf_measures=getattr(self, 'out_perf_measures', {}),
-            test_measures=getattr(self, 'test_measures', {}),
+            test_measures=getattr(self, 'assumption_results', {}),
             param_measures=getattr(self, 'param_measures', {})
         )
 
@@ -102,7 +102,7 @@ class OLS(ModelBase):
         y: pd.Series,
         X_out: Optional[pd.DataFrame] = None,
         y_out: Optional[pd.Series] = None,
-        testset_cls: Optional[Type[Any]] = TestSetBase,
+        testset_cls: Optional[Type[Any]] = TestSet,
         report_cls: Optional[Type[Any]] = OLS_ModelReport
     ):
         super().__init__(
@@ -205,17 +205,17 @@ class OLS(ModelBase):
     def build_tests(
         self,
         alphas: Dict[str, float] = PPNR_OLS_test_alphas
-    ) -> TestSetBase:
+    ) -> TestSet:
         """
-        Build and return a TestSetBase (or custom testset_cls) configured
+        Build and return a TestSet (or custom testset_cls) configured
         with NormalityTest and StationarityTest using individual alpha levels.
         :param alphas: dict mapping "NormalityTest" and "StationarityTest" to alpha values.
         """
 
-        TestSetClass = self.testset_cls or TestSetBase
+        TestSetClass = self.testset_cls or TestSet
 
         test_kwargs: Dict[Type, Dict[str, Any]] = {
-            NormalityTest:   {"resid": self.resid, "alpha": alphas.get("NormalityTest", 0.05)},
+            NormalityTest:   {"series": self.resid, "alpha": alphas.get("NormalityTest", 0.05)},
             StationarityTest:{"series": self.resid, "alpha": alphas.get("StationarityTest", 0.05)}
         }
 

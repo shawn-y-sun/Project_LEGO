@@ -27,61 +27,81 @@ pip install -r requirements.txt
 ## 🚀 Quickstart
 
 ```python
-from TECHNIC.segment      import Segment
-from TECHNIC.data         import DataManager
-from TECHNIC.transform    import TSFM
-from TECHNIC.conditional  import CondVar
-from TECHNIC.model        import OLS
-from TECHNIC.test         import TestSetBase
-from TECHNIC.template     import PPNR_OLS_ExportTemplate
+from TECHNIC.data      import DataManager
+from TECHNIC.segment   import Segment
+from TECHNIC.transform import TSFM
+from TECHNIC.model     import OLS
+from TECHNIC.test      import PPNR_OLS_TestSet
+from TECHNIC.template  import PPNR_OLS_ExportTemplate
 
-# 1. Prepare DataManager with internal data + MEV sources
+# 1. Prepare DataManager with internal + MEV sources
 dm = DataManager(
     internal_df=your_internal_df,
     model_mev_source={'model_rates.xlsx': 'BaseRates'},
     scen_mevs_source={
         'scenario_rates.xlsx': {
-            'base': 'BaseRates',
-            'adv':  'AdverseRates',
-            'sev':  'SevereRates'
+            'base':  'BaseRates',
+            'adv':   'AdverseRates',
+            'sev':   'SevereRates'
         }
     },
     in_sample_end='2023-12-31',
     scen_in_sample_end='2022-12-31'
 )
 
-# 2. Create a Segment and build Candidate Models (CMs)
+# 2. Use DataManager helper methods
+# • build_search_vars → dict of transformed DataFrames per var
+var_dfs = dm.build_search_vars(['GDP','CPI'])
+# • apply_to_all → apply a two-arg fn (internal, mev_df) across all MEVs
+def spread(internal, mev):
+    return (internal['Price'] - mev['NGDP']).rename('Price_minus_NGDP')
+dm.apply_to_all(spread)
+
+# • apply_to_mevs → same two-arg fn but returns full DataFrame
+def multi_feats(mev, internal):
+    df = mev.copy()
+    df['GDP-Price']     = df['GDP']    - internal['Price']
+    df['Unemp-Price']   = df['Unemp']  - internal['Price']
+    return df
+dm.apply_to_mevs(multi_feats)
+
+# • apply_to_internal → apply single-arg fn to internal_data
+def add_macro(internal):
+    internal['Real_GDP'] = internal['GDP'] / (1 + internal['Inflation'])
+dm.apply_to_internal(add_macro)
+
+# 3. Create a Segment, build and compare CMs
 seg = Segment(
     segment_id='SegmentA',
     target='y',
     data_manager=dm,
     model_cls=OLS,
-    testset_cls=PPNR_OLS_TestSet,
-    report_cls=None           # or OLSReport if you want immediate charting
+    testset_cls=PPNR_OLS_TestSet
 )
 
-# build both in-sample and full-sample models (default)
-cm = seg.build_cm(
-    model_id='Model1',
+seg.build_cm(
+    cm_id='Model1',
     specs=[
-      'x1',
-      TSFM(feature='x2', transform_fn=lambda s: s.pct_change(), max_lag=1),
-      CondVar(
-        main_var='x3',
-        cond_var='x4',
-        cond_fn=zero_if_exceeds,
-        cond_fn_kwargs={'threshold': 10}
-      )
+        'x1',
+        TSFM('x2', transform_fn=lambda s: s.pct_change(), max_lag=1),
     ],
     sample='both'
 )
 
-# inspect
-print(cm)                   # e.g. "y~C+x1+x2_pct_change_L1+x3_zero_if_exceeds"
-df_perf_in = cm.report_in.show_perf_tbl()
-df_tests_in = cm.tests_in   # DataFrame of in-sample test results
+# • show_report: aggregate in/out perf, params, tests
+seg.show_report(
+    cm_ids=['Model1'],
+    report_sample='in',
+    show_out=True,
+    show_params=True,
+    show_tests=True,
+    perf_kwargs={'digits': 3}
+)
 
-# 3. Export all CMs in the segment to Excel
+# • explore_vars: visualize each var vs target (line or scatter)
+seg.explore_vars(['x1','x2_pct_change_L1'], plot_type='line')
+
+# 4. Export all CMs in the segment to Excel
 tmpl = PPNR_OLS_ExportTemplate(
     template_files=['templates/PPNR_OLS_Template.xlsx'],
     cms=seg.cms
@@ -97,24 +117,27 @@ tmpl.export({
 
 ```
 Project_LEGO/
-├─ TECHNIC/
-│  ├─ __init__.py           # package entrypoint
-│  ├─ cm.py                 # CM: orchestrates build → fit → tests → report
-│  ├─ data.py               # DataManager: loads internal & MEV, build_indep_vars()
-│  ├─ internal.py           # InternalDataLoader: raw data & period dummies
-│  ├─ mev.py                # MEVLoader: loads model_mev_source & scen_mevs_source
-│  ├─ transform.py          # TSFM: feature-transform manager
-│  ├─ conditional.py        # CondVar: conditional variable generator
-│  ├─ test.py               # ModelTestBase, NormalityTest, StationarityTest
-│  ├─ model.py              # ModelBase (.report, .tests), OLS subclass
-│  ├─ plot.py               # ols_model_perf_plot, ols_model_test_plot, ols_seg_perf_plot
-│  ├─ report.py             # ModelReportBase, OLSReport (general show_test_tbl)
-│  ├─ segment.py            # Segment: manage multiple CMs + build_cm()
-│  ├─ writer.py             # Val, ValueWriter, SheetWriter, WorkbookWriter
-│  └─ template.py           # ExportTemplateBase, PPNR_OLS_ExportTemplate
-├─ templates/               # Excel template files
-├─ requirements.txt
-└─ README.md                # this file
+├─ TECHNIC/                # Core Python package modules
+│  ├─ __init__.py          # Package initializer
+│  ├─ cm.py                # Candidate Model orchestration (build → fit → report)
+│  ├─ data.py              # DataManager: load, interpolate, and engineer features
+│  ├─ internal.py          # InternalDataLoader: handles raw internal data
+│  ├─ mev.py               # MEVLoader: loads model & scenario MEV tables
+│  ├─ transform.py         # TSFM: feature transformation manager
+│  ├─ conditional.py       # CondVar: conditional variable generator
+│  ├─ test.py              # TestSetBase & specific test implementations
+│  ├─ model.py             # ModelBase & OLS model subclass
+│  ├─ plot.py              # Plotting utilities (performance, diagnostics)
+│  ├─ report.py            # ModelReportBase & OLSReport
+│  ├─ segment.py           # Segment: manage multiple CMs & exploration
+│  ├─ writer.py            # Writer utilities for Excel output
+│  └─ template.py          # Export templates (e.g. PPNR_OLS_ExportTemplate)
+├─ support/                # Static support files for DataManager
+│  ├─ mev_type.xlsx        # MEV code → type mapping
+│  └─ type_tsfm.yaml       # Type → transform specification
+├─ templates/              # Excel template files for exports
+├─ requirements.txt        # Python dependencies
+└─ README.md               # This README document
 ```
 
 ---
@@ -188,6 +211,72 @@ Project_LEGO/
 ### `template.py` (ExportTemplateBase)
 
 * **`PPNR_OLS_ExportTemplate`**: maps CM outputs to Excel via `Val` and `ValueWriter`
+
+---
+
+## 🏗️ New Utility Methods
+
+### DataManager (`data.py`)
+
+* **`build_search_vars(specs, mev_type_map=…, type_tsfm_map=…) → Dict[str, DataFrame]`**
+  Builds a DataFrame per variable (raw + transformed features), warning on any unknown types.
+
+* **`apply_to_all(fn)`**
+  Applies a two-arg function `fn(internal_df, mev_df)` to **all** MEV tables (model + scenarios).
+
+  * If `fn` returns a `Series`/`DataFrame`, merges it into each MEV table.
+  * If `fn` returns `None`, assumes `fn` mutated `mev_df` in place.
+
+* **`apply_to_mevs(fn)`**
+  Similar to `apply_to_all`, but expects `fn(mev_df, internal_df)` and merges the returned DataFrame into each MEV table only.
+
+* **`apply_to_internal(fn)`**
+  Runs `fn(internal_df)` on the internal dataset.
+
+  * If `fn` returns a `Series`/`DataFrame`, merges back into `internal_data`.
+  * If `None`, assumes in-place mutation.
+
+* **Support files**
+
+  * `support/mev_type.xlsx` → loaded on import into `MEV_TYPE_MAP`, must exist or raises.
+  * `support/type_tsfm.yaml` → loaded on import into `TYPE_TSFM_MAP`, must exist or raises.
+
+---
+
+### Transformations (`transform.py`)
+
+* Generalized transforms:
+
+  * **`DF(series, periods=1)`** – difference over `periods`.
+  * **`GR(series, periods=1)`** – growth‐rate over `periods`.
+  * **Alias**: `DF2 = partial(DF, periods=2)`, `DF3`, `GR2`, `GR3`.
+* **TSFM** name logic inspects `periods` or `window` args (from `partial`), appending suffix (e.g. `PDI_GR2`).
+
+---
+
+### Segment Exploration (`segment.py`)
+
+* **`explore_vars(vars_list, plot_type='line')`**
+
+  * Builds feature‐DataFrames for each variable via `build_search_vars`.
+  * **Line plots**: dual‐axis time‐series (`target` left, feature right), no axis labels, legend included.
+  * **Scatter plots**: feature vs target, blue dots, no legend, no axis labels.
+  * Grid layout: 3 subplots per row; subplot title = feature name; figure title dynamic (e.g. “Time Series: x1 vs y”).
+
+---
+
+### Reporting Across Models (`report.py` & `segment.py`)
+
+* **`ReportSet.show_report(...)`**
+  Aggregates over multiple `ReportBase` objects to:
+
+  1. Show in‐sample performance table
+  2. Optionally show out‐of‐sample table
+  3. Plot combined performance
+  4. Optionally show per‐model parameter tables
+  5. Optionally show per‐model test results
+
+* **`Segment.show_report(...)`** delegates to `ReportSet`, letting you compare any subset of CMs, pick `'in'` or `'full'` sample, and toggle parameters/tests.
 
 ---
 
