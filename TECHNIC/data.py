@@ -152,8 +152,8 @@ class DataManager:
         :param internal_df: override for internal data.
         :param mev_df: override for MEV data.
         """
-        internal = internal_df or self.internal_data
-        mev      = mev_df      or self.model_mev
+        internal = internal_df if internal_df is not None else self.internal_data
+        mev      = mev_df      if mev_df      is not None else self.model_mev
 
         def _flatten(items):
             for it in items:
