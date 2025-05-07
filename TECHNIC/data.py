@@ -10,6 +10,7 @@ from .internal import InternalDataLoader
 from .mev import MEVLoader
 from .transform import TSFM
 from . import transform as transform_module
+from .condition import CondVar
 
 # Determine support directory relative to this module file using pathlib
 _BASE_DIR = Path(__file__).resolve().parent
@@ -145,9 +146,9 @@ class DataManager:
         mev_df: Optional[pd.DataFrame]      = None
     ) -> pd.DataFrame:
         """
-        Build independent-variable DataFrame from specs, applying TSFM transforms.
+        Build independent-variable DataFrame from specs, applying TSFM and CondVar transforms.
 
-        :param specs: list of feature names (str) or TSFM instances.
+        :param specs: list of feature names (str), TSFM instances, or CondVar instances.
         :param internal_df: override for internal data.
         :param mev_df: override for MEV data.
         """
@@ -162,47 +163,41 @@ class DataManager:
                     yield it
 
         flat_specs = list(_flatten(specs))
-        raw_names: List[str] = []
-        transformers: List[TSFM] = []
-
-        for itm in flat_specs:
-            if isinstance(itm, str):
-                raw_names.append(itm)
-            elif isinstance(itm, TSFM):
-                transformers.append(itm)
-            else:
-                raise ValueError(f"Invalid spec element: {itm!r}")
-
         pieces = []
 
-        # 1) add raw features
-        for name in raw_names:
-            if name in internal.columns:
-                pieces.append(internal[name])
-            elif name in mev.columns:
-                pieces.append(mev[name])
-            else:
-                raise KeyError(f"Column '{name}' not found in internal or MEV data.")
-
-        # 2) apply each TSFM
-        for tsfm in transformers:
-            # pick up the series
-            if tsfm.feature is not None:
-                series = tsfm.feature
-            else:
-                fn = tsfm.feature_name
-                if fn in internal.columns:
-                    series = internal[fn]
-                elif fn in mev.columns:
-                    series = mev[fn]
+        for itm in flat_specs:
+            # Conditional variable
+            if isinstance(itm, CondVar):
+                # Ensure main and cond series are set
+                if itm.main_series is None:
+                    itm.main_series = internal[itm.main_name] if itm.main_name in internal.columns else mev[itm.main_name]
+                # For cond_var entries
+                cond_series_list = []
+                for cv in itm.cond_var:
+                    cond_series_list.append(cv if isinstance(cv, pd.Series) else (internal[cv] if cv in internal.columns else mev[cv]))
+                # Update cond_fn_kwargs series args
+                pieces.append(itm.apply())
+            # Time-series transform
+            elif isinstance(itm, TSFM):
+                if itm.feature is None:
+                    fn = itm.feature_name
+                    if fn in internal.columns:
+                        itm.feature = internal[fn]
+                    elif fn in mev.columns:
+                        itm.feature = mev[fn]
+                    else:
+                        raise KeyError(f"Variable '{fn}' not found for transformation.")
+                pieces.append(itm.apply())
+            # Raw feature
+            elif isinstance(itm, str):
+                if itm in internal.columns:
+                    pieces.append(internal[itm])
+                elif itm in mev.columns:
+                    pieces.append(mev[itm])
                 else:
-                    raise KeyError(f"Variable '{fn}' not found for transformation.")
-                # inject it so apply_transform() works
-                tsfm.feature = series
-
-            # apply transform + lag
-            col = tsfm.apply()
-            pieces.append(col)
+                    raise KeyError(f"Column '{itm}' not found in internal or MEV data.")
+            else:
+                raise ValueError(f"Invalid spec element: {itm!r}")
 
         # concat and normalize
         X = pd.concat(pieces, axis=1)
