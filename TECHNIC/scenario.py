@@ -60,7 +60,7 @@ class Scenario:
         for wb_key, scen_map in dm.scen_mevs.items():
             self.X_scens[wb_key] = {}
             for scen_name, df_mev in scen_map.items():
-                X_full = dm.build_indep_vars(self.specs, mev_df=df_mev)
+                X_full = dm.build_indep_vars(self.specs, internal_df=df_mev, mev_df=df_mev)
                 X_trunc = X_full.loc[X_full.index >= self.P0].copy()
                 self.X_scens[wb_key][scen_name] = X_trunc
 
@@ -88,12 +88,12 @@ class Scenario:
         if not isinstance(y0, pd.Series) or self.P0 not in y0.index:
             raise ValueError("y0 must be a pandas Series with its index including P0")
         P0_inferred = y0.index.max()
-        X_inter = X.loc[X.index >= P0_inferred].copy()
+        X_iter = X.loc[X.index >= P0_inferred].copy()
         y_series = y0.copy()
         preds: List[tuple] = []
-        for idx in X_inter.index:
+        for idx in X_iter.index:
             for spec in self.cond_specs:
-                spec.main_series = X_inter[spec.main_name]
+                spec.main_series = X_iter[spec.name]
                 updated_cond: List[pd.Series] = []
                 for cv in spec.cond_var:
                     if isinstance(cv, str) and cv == self.target:
@@ -104,8 +104,8 @@ class Scenario:
                         updated_cond.append(self.dm.internal_data[cv])
                 spec.cond_var = updated_cond
                 new_series = spec.apply()
-                X_inter[new_series.name] = new_series
-            y_hat = self.model.predict(X_inter.loc[[idx]]).iloc[0]
+                X_iter[new_series.name] = new_series
+            y_hat = self.model.predict(X_iter.loc[[idx]]).iloc[0]
             preds.append((idx, y_hat))
             y_series.loc[idx] = y_hat
         return pd.Series(dict(preds), name=self.target)
