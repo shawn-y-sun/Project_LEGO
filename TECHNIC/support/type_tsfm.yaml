@@ -7,5 +7,4 @@ transforms:
 
   rate:
     - LV      # No change
-    - GR      # MoM or QoQ growth rate
     - DF      # MoM or QoQ difference

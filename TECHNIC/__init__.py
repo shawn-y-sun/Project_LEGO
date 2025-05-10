@@ -12,3 +12,4 @@ from .template import *
 from .test import *
 from .condition import *
 from .scenario import *
+from .search import *
