@@ -1,136 +1,202 @@
-# TECHNIC/featureBuilder.py
+# tech/featureBuilder.py
+"""
+FeatureBuilder: generate TSFM feature combinations based on MEV types and YAML-driven transforms.
 
-
+Usage:
+    from tech.featureBuilder import FeatureBuilder
+    fb = FeatureBuilder(
+        max_var_num=3,
+        forced_in=['GDP'],
+        driver_pool=['GDP','Unemp'],
+        desired_pool=['Unemp', ('A','B')],  # supports single or pair groups
+        max_lag=1
+    )
+    combos = fb.generate_combinations()
+"""
 import itertools
-import QT
-from QT import TSFM
-import QT.transform as tf
+import functools
+from pathlib import Path
+from typing import List, Dict, Union, Tuple
 
-# Patch TSFM.__repr__ to display MEV and suffix
-TSFM.__repr__ = lambda self: f"TSFM('{self.mev}', '{self.suffix}')"
+import pandas as pd
+import yaml
+from .transform import TSFM
+from . import transform as tf
 
+# ----------------------------------------------------------------------------
+# Configuration: load MEV types and transform specs
+# ----------------------------------------------------------------------------
+BASE_DIR = Path(__file__).resolve().parent
+MEV_TYPE_CSV = BASE_DIR / 'support' / 'mev_type.csv'
+TSFM_YAML    = BASE_DIR / 'support' / 'type_tsfm.yaml'
+
+# Load MEV type map
+if not MEV_TYPE_CSV.exists():
+    raise FileNotFoundError(f"Missing MEV type map: {MEV_TYPE_CSV}")
+_mev_df = pd.read_csv(MEV_TYPE_CSV)
+_REQUIRED = {'mev_code', 'type'}
+if not _REQUIRED.issubset(_mev_df.columns):
+    raise ValueError(f"mev_type.csv must contain {_REQUIRED}")
+MEV_TYPE_MAP: Dict[str, str] = dict(zip(_mev_df['mev_code'], _mev_df['type']))
+
+# Load transform spec map
+if not TSFM_YAML.exists():
+    raise FileNotFoundError(f"Missing transform spec: {TSFM_YAML}")
+_yaml = yaml.safe_load(TSFM_YAML.read_text())
+TRANSFORM_MAP = _yaml.get('transforms')
+if not isinstance(TRANSFORM_MAP, dict):
+    raise ValueError("type_tsfm.yaml must define a 'transforms' mapping")
+
+# Patch TSFM repr to handle functools.partial
+
+def _tsfm_repr(self):
+    fn = self.transform_fn
+    if isinstance(fn, functools.partial):
+        name = fn.func.__name__
+    else:
+        name = getattr(fn, '__name__', 'transform')
+    return f"TSFM(variable='{self.feature_name}', transform_fn='{name}', max_lag={self.max_lag})"
+
+TSFM.__repr__ = _tsfm_repr
+
+# ----------------------------------------------------------------------------
+# FeatureBuilder class
+# ----------------------------------------------------------------------------
 class FeatureBuilder:
     """
-    Efficiently build combinations of TSFM instances for macroeconomic variables (MEVs).
+    Build TSFM feature combinations.
 
-    Attributes
-    ----------
-    mev_transMap : dict[str, str]
-        Maps each MEV to a transform key ('growthrate', 'diff', 'level').
-    freq : str
-        Frequency code (first letter, e.g. 'Q', 'M', 'Y') to select transform functions.
-    max_var_num : int
-        Max features per combination (including forced-in items).
-    forced : list[TSFM]
-        TSFM instances or MEV names forced into every combo (converted to TSFM).
-    options : dict[str, list[TSFM]]
-        Available TSFM options per MEV for optional selection.
-    desired_pool : set[str]
-        MEVs that must appear at least once in each combo.
+    Parameters:
+      max_var_num:    max total features per combo (including forced)
+      forced_in:      list of MEV codes or TSFM instances to force in (one per MEV)
+      driver_pool:    all MEV codes available for optional features
+      desired_pool:   list of MEV codes or tuples/groups that must appear together
+      max_lag:        maximum lag to apply to each transform
     """
     def __init__(
         self,
-        mev_transMap: dict[str, str],
-        freq: str,
-        max_var_num: int,
-        forced_in: list,
-        driver_pool: list[str],
-        desired_pool: list[str],
+        max_var_num: int=3,
+        forced_in: List[Union[str, TSFM]] = [],
+        driver_pool: List[str] = [],
+        desired_pool: List[Union[str, Tuple[str, ...]]] = [],
         max_lag: int = 2
     ):
+        # Ensure required parameters
+        if not driver_pool:
+            raise ValueError("'driver_pool' must be provided as a non-empty list of Independent Variables.")
         # Core parameters
-        self.mev_transMap = mev_transMap or {}
-        self.freq = str(freq).upper()[0]
+        # Core parameters
         self.max_var_num = max_var_num
-        self.driver_pool = driver_pool or []
-        self.desired_pool = set(desired_pool or [])
+        self.driver_pool = driver_pool
         self.max_lag = max_lag
         self.lags = range(max_lag + 1)
 
-        # Resolve transformation functions dynamically
-        code_map = {
-            'growthrate': f"{self.freq}{self.freq}GR",
-            'diff': f"{self.freq}{self.freq}",
-            'level': 'LV'
-        }
-        self.fn_map = {}
-        for key, code in code_map.items():
-            fn = getattr(tf, code, None)
-            if not fn:
-                raise ValueError(f"Missing transform function '{code}' for frequency '{self.freq}'")
-            self.fn_map[key] = fn
+        # Defensive checks
+        import warnings
+      
+        # Configuration maps
+        self.mev_type_map = MEV_TYPE_MAP
+        self.transform_map = TRANSFORM_MAP
 
-        # Process forced-in MEVs and build optional TSFM pools
-        self._build_forced(forced_in)
-        self._build_options()
+        # Normalize desired_pool entries into sets
+        self.desired_pool: List[set] = []
+        for d in desired_pool:
+            if isinstance(d, set):
+                grp = d
+            elif isinstance(d, (list, tuple)):
+                grp = set(d)
+            else:
+                grp = {d}
+            self.desired_pool.append(grp)
 
-    def _build_forced(self, forced_in):
-        """Convert forced_in entries to TSFM instances with .mev set."""
-        forced = []
+        # Build forced options: each MEV gets a list of TSFM instances
+        self.forced_mevs: List[str] = []
+        self.forced_options: Dict[str, List[TSFM]] = {}
         for item in forced_in:
             if isinstance(item, TSFM):
-                if not hasattr(item, 'mev') or not item.mev:
-                    raise ValueError("Forced-in TSFM must have 'mev' attribute set.")
-                forced.append(item)
+                key = item.feature_name
+                opts = [item]
             else:
-                tsfm = TSFM(transform_fn=self.fn_map['level'], max_lag=0)
-                tsfm.mev = item
-                forced.append(tsfm)
-        self.forced = forced
+                key = item
+                opts = self._gen_tsfms(key)
+            self.forced_mevs.append(key)
+            self.forced_options[key] = opts
 
-    def _build_options(self):
-        """Build a dict of TSFM option lists for each MEV in driver_pool."""
-        opts = {}
-        for mev, trans_key in self.mev_transMap.items():
-            fn = self.fn_map.get(trans_key)
-            if not fn or mev not in self.driver_pool:
+        # Build optional options for non-forced MEVs
+        self.options: Dict[str, List[TSFM]] = {
+            mev: self._gen_tsfms(mev)
+            for mev in self.driver_pool
+            if mev not in self.forced_mevs
+        }
+
+    def _gen_tsfms(self, mev: str) -> List[TSFM]:
+        """
+        Generate TSFM instances for a given MEV across transforms and lags.
+        If MEV type missing, defaults to only ['LV'] at lag 0.
+        """
+        mtype = self.mev_type_map.get(mev, '')
+        transforms = self.transform_map.get(mtype)
+        # Default to identity only if no transforms
+        if not transforms:
+            return [TSFM(mev, tf.LV, 0)]
+        tsfms: List[TSFM] = []
+        for tkey in transforms:
+            fn = getattr(tf, tkey, None)
+            if not fn:
                 continue
-            # instantiate one TSFM per lag
-            opts[mev] = [self._make_tsfm(mev, fn, lag) for lag in self.lags]
-        self.options = opts
+            for lag in self.lags:
+                if tkey == 'LV':
+                    transform_fn = fn
+                elif tkey in ('DF', 'GR'):
+                    transform_fn = functools.partial(fn, periods=1)
+                else:
+                    transform_fn = functools.partial(fn, window=1)
+                tsfms.append(TSFM(mev, transform_fn, lag))
+        return tsfms
 
-    @staticmethod
-    def _make_tsfm(mev, fn, lag):
-        """Helper: create TSFM with .mev set."""
-        tsfm = TSFM(transform_fn=fn, max_lag=lag)
-        tsfm.mev = mev
-        return tsfm
-
-    def generate_combinations(self) -> list[list[TSFM]]:
+    def generate_combinations(self) -> List[List[TSFM]]:
         """
-        Generate all valid feature combinations as lists of TSFM instances.
-
-        Returns
-        -------
-        combos : list of list of TSFM
-            Each combo respects max_var_num, includes forced TSFMs,
-            and contains at least one MEV from desired_pool.
+        Enumerate valid TSFM feature combinations:
+          - one forced transform per forced MEV
+          - optional features up to max_var_num total
+          - if desired_pool non-empty, at least one group must appear fully
+          - enforce group cohesion for desired groups
         """
-        base = len(self.forced)
-        extra_max = self.max_var_num - base
-        forced_mevs = {t.mev for t in self.forced}
-        avail_mevs = [m for m in self.driver_pool if m not in forced_mevs]
+        combos: List[List[TSFM]] = []
+        # Cartesian product of forced choices
+        forced_lists = [self.forced_options[mev] for mev in self.forced_mevs]
+        for forced_choice in itertools.product(*forced_lists):
+            base = list(forced_choice)
+            base_names = {ts.feature_name for ts in base}
+            remaining = self.max_var_num - len(base)
+            avail = [m for m in self.driver_pool if m not in self.forced_mevs]
 
-        # Determine if we need to enforce desired presence
-        required = None
-        if not (forced_mevs & self.desired_pool):
-            required = set(avail_mevs) & self.desired_pool
+            # Setup desired-group logic
+            if not self.desired_pool:
+                def satisfied(names: set) -> bool: return True
+                def cohesive(names: set) -> bool: return True
+                need_group = False
+            else:
+                def satisfied(names: set) -> bool:
+                    return any(g.issubset(names) for g in self.desired_pool)
+                def cohesive(names: set) -> bool:
+                    return all(not (names & g) or g.issubset(names) for g in self.desired_pool)
+                need_group = not satisfied(base_names)
 
-        combos = []
-        # Iterate over possible counts of optional MEVs
-        for r in range(extra_max + 1):
-            for subset in itertools.combinations(avail_mevs, r):
-                # Skip if subset cannot satisfy desired requirement
-                if required and not required.intersection(subset):
-                    continue
-                # Cartesian product of TSFM options for the subset
-                for prod in itertools.product(*(self.options.get(m, []) for m in subset)):
-                    combos.append(self.forced + list(prod))
+            # Enumerate optional subsets
+            for r in range(remaining + 1):
+                for subset in itertools.combinations(avail, r):
+                    names = base_names | set(subset)
+                    if not cohesive(names) or (need_group and not satisfied(names)):
+                        continue
+                    pools = [self.options[m] for m in subset]
+                    for prod in itertools.product(*pools):
+                        combos.append(base + list(prod))
         return combos
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
-            f"<FeatureBuilder freq={self.freq}, max_var_num={self.max_var_num}, "
-            f"forced={[t.mev for t in self.forced]}, desired={list(self.desired_pool)}, "
-            f"max_lag={self.max_lag}>"
+            f"<FeatureBuilder max_var_num={self.max_var_num}, "
+            f"forced={self.forced_mevs}, "
+            f"desired={self.desired_pool}, max_lag={self.max_lag}>"
         )
