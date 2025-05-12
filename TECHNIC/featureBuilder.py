@@ -75,12 +75,16 @@ class FeatureBuilder:
     """
     def __init__(
         self,
-        max_var_num: int,
-        forced_in: List[Union[str, TSFM]],
-        driver_pool: List[str],
-        desired_pool: List[Union[str, Tuple[str, ...]]],
+        max_var_num: int=3,
+        forced_in: List[Union[str, TSFM]] = [],
+        driver_pool: List[str] = [],
+        desired_pool: List[Union[str, Tuple[str, ...]]] = [],
         max_lag: int = 2
     ):
+        # Ensure required parameters
+        if not driver_pool:
+            raise ValueError("'driver_pool' must be provided as a non-empty list of Independent Variables.")
+        # Core parameters
         # Core parameters
         self.max_var_num = max_var_num
         self.driver_pool = driver_pool
@@ -89,10 +93,7 @@ class FeatureBuilder:
 
         # Defensive checks
         import warnings
-        if not forced_in:
-            warnings.warn("'forced_in' is empty: no forced features applied.")
-        # desired_pool may be empty (no constraint)
-
+      
         # Configuration maps
         self.mev_type_map = MEV_TYPE_MAP
         self.transform_map = TRANSFORM_MAP
