@@ -87,11 +87,17 @@ class FeatureBuilder:
         self.max_lag = max_lag
         self.lags = range(max_lag + 1)
 
-        # Configuration maps as instance attributes
+        # Defensive checks
+        import warnings
+        if not forced_in:
+            warnings.warn("'forced_in' is empty: no forced features applied.")
+        # desired_pool may be empty (no constraint)
+
+        # Configuration maps
         self.mev_type_map = MEV_TYPE_MAP
         self.transform_map = TRANSFORM_MAP
 
-        # Normalize desired_pool into list of sets
+        # Normalize desired_pool entries into sets
         self.desired_pool: List[set] = []
         for d in desired_pool:
             if isinstance(d, set):
@@ -124,12 +130,12 @@ class FeatureBuilder:
 
     def _gen_tsfms(self, mev: str) -> List[TSFM]:
         """
-        Generate TSFM instances for a given MEV across all transforms and lags.
-        If MEV type missing, defaults to only ['LV'] with max_lag=0.
+        Generate TSFM instances for a given MEV across transforms and lags.
+        If MEV type missing, defaults to only ['LV'] at lag 0.
         """
         mtype = self.mev_type_map.get(mev, '')
         transforms = self.transform_map.get(mtype)
-        # If no type or transforms defined, only identity at lag 0
+        # Default to identity only if no transforms
         if not transforms:
             return [TSFM(mev, tf.LV, 0)]
         tsfms: List[TSFM] = []
@@ -152,8 +158,8 @@ class FeatureBuilder:
         Enumerate valid TSFM feature combinations:
           - one forced transform per forced MEV
           - optional features up to max_var_num total
-          - ensure at least one desired_pool group appears fully
-          - enforce group cohesion when selecting optionals
+          - if desired_pool non-empty, at least one group must appear fully
+          - enforce group cohesion for desired groups
         """
         combos: List[List[TSFM]] = []
         # Cartesian product of forced choices
@@ -161,18 +167,23 @@ class FeatureBuilder:
         for forced_choice in itertools.product(*forced_lists):
             base = list(forced_choice)
             base_names = {ts.feature_name for ts in base}
-            rem = self.max_var_num - len(base)
+            remaining = self.max_var_num - len(base)
             avail = [m for m in self.driver_pool if m not in self.forced_mevs]
 
-            # Desired group helpers
-            def satisfied(names: set) -> bool:
-                return any(g.issubset(names) for g in self.desired_pool)
-            def cohesive(names: set) -> bool:
-                return all(not (names & g) or g.issubset(names) for g in self.desired_pool)
-            need_group = not satisfied(base_names)
+            # Setup desired-group logic
+            if not self.desired_pool:
+                def satisfied(names: set) -> bool: return True
+                def cohesive(names: set) -> bool: return True
+                need_group = False
+            else:
+                def satisfied(names: set) -> bool:
+                    return any(g.issubset(names) for g in self.desired_pool)
+                def cohesive(names: set) -> bool:
+                    return all(not (names & g) or g.issubset(names) for g in self.desired_pool)
+                need_group = not satisfied(base_names)
 
             # Enumerate optional subsets
-            for r in range(rem + 1):
+            for r in range(remaining + 1):
                 for subset in itertools.combinations(avail, r):
                     names = base_names | set(subset)
                     if not cohesive(names) or (need_group and not satisfied(names)):
