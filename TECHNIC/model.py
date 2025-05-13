@@ -198,8 +198,9 @@ class OLS(ModelBase):
         }
 
     PPNR_OLS_test_alphas: Dict[str, float] = {
+    "SignificanceTest": 0.05,
     'NormalityTest': 0.05,
-    'StationarityTest': 0.05
+    'StationarityTest': 0.05,
     }
     
     def build_tests(
@@ -215,8 +216,9 @@ class OLS(ModelBase):
         TestSetClass = self.testset_cls or TestSet
 
         test_kwargs: Dict[Type, Dict[str, Any]] = {
+            SignificanceTest: {"pvalues": self.pvalues, "alpha": alphas.get("SignificanceTest", 0.05)},
             NormalityTest:   {"series": self.resid, "alpha": alphas.get("NormalityTest", 0.05)},
-            StationarityTest:{"series": self.resid, "alpha": alphas.get("StationarityTest", 0.05)}
+            #StationarityTest:{"series": self.resid, "alpha": alphas.get("StationarityTest", 0.05)}
         }
 
         return TestSetClass(test_kwargs)
