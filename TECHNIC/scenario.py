@@ -1,4 +1,3 @@
-# TECHNIC/scenario.py
 import pandas as pd
 from typing import Any, Dict, List, Optional, Union
 
@@ -28,7 +27,7 @@ class Scenario:
         self.dm = dm
         self.model = model
         self.specs = specs
-        # Determine P0
+        # Resolve P0
         if P0 is not None:
             self.P0 = pd.to_datetime(P0)
         elif getattr(dm, 'scen_in_sample_end', None) is not None:
@@ -37,81 +36,114 @@ class Scenario:
             self.P0 = dm.in_sample_end
         else:
             raise ValueError("Please specify P0 or ensure DataManager has in_sample_end or scen_in_sample_end.")
-        # Determine target
-        self.target = target or getattr(model, 'y', pd.Series()).name
-        if not self.target:
+        # Resolve target
+        if target:
+            self.target = target
+        elif hasattr(model, 'y') and model.y is not None:
+            self.target = model.y.name
+        else:
             raise ValueError("Target name could not be inferred; please specify explicitly.")
-        # Build scenario feature matrices
-        self.X_scens: Dict[str, pd.DataFrame] = {}
+        # Detect conditional specs globally
+        specs_list = self.specs if isinstance(self.specs, list) else [self.specs]
+        self.cond_specs: List[CondVar] = [
+            spec for spec in specs_list
+            if isinstance(spec, CondVar)
+            and any(
+                (cv == self.target) if isinstance(cv, str)
+                else (cv.name == self.target)
+                for cv in spec.cond_var
+            )
+        ]
+        self._has_cond = bool(self.cond_specs)
+        # Build nested scenario feature matrices: {workbook_key: {scenario_name: X_df}}
+        self.X_scens: Dict[str, Dict[str, pd.DataFrame]] = {}
         for wb_key, scen_map in dm.scen_mevs.items():
+            self.X_scens[wb_key] = {}
             for scen_name, df_mev in scen_map.items():
-                sc_key = f"{wb_key}_{scen_name}"
-                X = dm.build_indep_vars(self.specs, mev_df=df_mev)
-                # restrict to periods > P0
-                X = X.loc[X.index > self.P0]
-                self.X_scens[sc_key] = X
+                X_full = dm.build_indep_vars(self.specs, internal_df=df_mev, mev_df=df_mev)
+                X_trunc = X_full.loc[X_full.index >= self.P0].copy()
+                self.X_scens[wb_key][scen_name] = X_trunc
 
-    def simple_forecast(self) -> pd.DataFrame:
+    def simple_forecast(self, X: pd.DataFrame) -> pd.Series:
         """
-        Run predictions for each scenario without conditional updates.
-        :return: DataFrame of forecasts, columns are scenario keys.
+        Predict target for a single scenario feature table X.
+        :param X: feature DataFrame (e.g. from X_scens)
+        :return: Series of predicted values indexed like X
         """
-        preds = {}
-        for sc, X in self.X_scens.items():
-            preds[sc] = self.model.predict(X)
-        return pd.DataFrame(preds)
+        return self.model.predict(X)
 
-    def conditional_forecast(self) -> pd.DataFrame:
+    def conditional_forecast(
+        self,
+        X: pd.DataFrame,
+        y0: pd.Series
+    ) -> pd.Series:
         """
-        Run predictions handling CondVar specs that depend on prior forecasts.
-        If a CondVar has cond_var equal to target, its main_series shifts as forecasts proceed.
+        Iteratively forecast a single scenario: starting from P0 and initial y0 series,
+        rebuild any CondVar specs depending on the target at each step.
+
+        :param X: feature DataFrame starting from P0
+        :param y0: target Series up to and including P0 (index must include P0)
+        :return: Series of forecasts indexed by X.index (periods > P0)
         """
-        results = {}
-        # Identify which specs are conditional on target
-        cond_specs = [s for s in (self.specs if isinstance(self.specs, list) else [self.specs])
-                      if isinstance(s, CondVar) and any(cv == self.target for cv in s.cond_var)]
-        for sc, X in self.X_scens.items():
-            # Make a copy to iteratively update
-            X_iter = X.copy()
-            y_pred = []
-            # iterate period by period
-            for idx in X_iter.index:
-                # for each conditional spec, update its main_series/cond_var
-                for spec in cond_specs:
-                    # rebuild the single-feature DataFrame for this spec
-                    # assume spec.main_series name exists in X_iter
-                    # get prev forecast if needed
-                    spec_args = {'main_series': None, 'cond_series': None}
-                    # Ideally, re-apply spec.apply() with updated series
-                    # but as placeholder: skip complex rebuild
-                    pass
-                # Predict for this row
-                x_row = X_iter.loc[[idx]]
-                y_hat = self.model.predict(x_row).iloc[0]
-                y_pred.append((idx, y_hat))
-            results[sc] = pd.Series(dict(y_pred))
-        return pd.DataFrame(results)
+        if not isinstance(y0, pd.Series) or self.P0 not in y0.index:
+            raise ValueError("y0 must be a pandas Series with its index including P0")
+        P0_inferred = y0.index.max()
+        X_iter = X.loc[X.index >= P0_inferred].copy()
+        y_series = y0.copy()
+        preds: List[tuple] = []
+        for idx in X_iter.index:
+            for spec in self.cond_specs:
+                spec.main_series = X_iter[spec.name]
+                updated_cond: List[pd.Series] = []
+                for cv in spec.cond_var:
+                    if isinstance(cv, str) and cv == self.target:
+                        updated_cond.append(y_series)
+                    elif isinstance(cv, pd.Series):
+                        updated_cond.append(cv)
+                    else:
+                        updated_cond.append(self.dm.internal_data[cv])
+                spec.cond_var = updated_cond
+                new_series = spec.apply()
+                X_iter[new_series.name] = new_series
+            y_hat = self.model.predict(X_iter.loc[[idx]]).iloc[0]
+            preds.append((idx, y_hat))
+            y_series.loc[idx] = y_hat
+        return pd.Series(dict(preds), name=self.target)
 
     def forecast(
         self,
+        X: pd.DataFrame,
+        y0: Optional[pd.Series] = None,
         conditional: bool = False
-    ) -> pd.DataFrame:
+    ) -> pd.Series:
         """
-        Dispatch to simple or conditional forecast.
+        Forecast a single scenario: simple or conditional based on flag.
 
-        :param conditional: if True and CondVar present, use conditional_forecast; else simple.
+        :param X: feature DataFrame starting from P0
+        :param y0: initial target Series up to P0 (needed if conditional=True)
+        :param conditional: If True and conditional specs exist, uses conditional_forecast
+        :return: Series of predictions indexed like X
         """
-        if conditional and any(isinstance(s, CondVar) for s in (self.specs if isinstance(self.specs, list) else [self.specs])):
-            return self.conditional_forecast()
-        return self.simple_forecast()
+        if conditional and self._has_cond:
+            if y0 is None:
+                y0 = self.dm.internal_data[self.target].loc[:self.P0]
+            return self.conditional_forecast(X, y0)
+        return self.simple_forecast(X)
+
+    @property
+    def y_scens(self) -> Dict[str, Dict[str, pd.Series]]:
+        """
+        Nested forecast results for all scenarios using `forecast`.
+        """
+        y0_series = self.dm.internal_data[self.target].loc[:self.P0]
+        results: Dict[str, Dict[str, pd.Series]] = {}
+        for wb_key, scen_dict in self.X_scens.items():
+            results[wb_key] = {}
+            for scen_name, X in scen_dict.items():
+                results[wb_key][scen_name] = self.forecast(X, y0_series, conditional=self._has_cond)
+        return results
 
     @property
     def scenarios(self) -> List[str]:
-        """List of scenario keys."""
+        """List of scenario set keys."""
         return list(self.X_scens.keys())
-
-    @property
-    def periods(self) -> pd.DatetimeIndex:
-        """Forecast periods (index) based on one scenario."""
-        # assume all scenarios share same index
-        return next(iter(self.X_scens.values())).index
