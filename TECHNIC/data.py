@@ -11,6 +11,8 @@ from .mev import MEVLoader
 from .transform import TSFM
 from . import transform as transform_module
 from .condition import CondVar
+import inspect
+import functools
 
 # Determine support directory relative to this module file using pathlib
 _BASE_DIR = Path(__file__).resolve().parent
@@ -18,15 +20,14 @@ _SUPPORT_DIR = _BASE_DIR / 'support'
 _MEV_TYPE_XLSX_PATH = _SUPPORT_DIR / 'mev_type.xlsx'
 _TYPE_TSFM_YAML_PATH = _SUPPORT_DIR / 'type_tsfm.yaml'
 
-
-# Load and validate MEV type mapping
+# Load and validate variable type mapping
 if not os.path.exists(_MEV_TYPE_XLSX_PATH):
-    raise FileNotFoundError(f"MEV type mapping file not found: {_MEV_TYPE_XLSX_PATH}")
-_mev_type_df = pd.read_excel(_MEV_TYPE_XLSX_PATH)
+    raise FileNotFoundError(f"Variable type mapping file not found: {_MEV_TYPE_XLSX_PATH}")
+_var_type_df = pd.read_excel(_MEV_TYPE_XLSX_PATH)
 required_cols = {'mev_code', 'type'}
-if not required_cols.issubset(_mev_type_df.columns):
-    raise ValueError(f"Expected columns {required_cols} in {_MEV_TYPE_XLSX_PATH}, got {_mev_type_df.columns.tolist()}")
-MEV_TYPE_MAP: Dict[str, str] = dict(zip(_mev_type_df['mev_code'], _mev_type_df['type']))
+if not required_cols.issubset(_var_type_df.columns):
+    raise ValueError(f"Expected columns {required_cols} in {_MEV_TYPE_XLSX_PATH}, got {_var_type_df.columns.tolist()}")
+VAR_TYPE_MAP: Dict[str, str] = dict(zip(_var_type_df['mev_code'], _var_type_df['type']))
 
 # Load and validate transform specifications
 if not os.path.exists(_TYPE_TSFM_YAML_PATH):
@@ -64,10 +65,14 @@ class DataManager:
         mev_loader: Optional[MEVLoader]              = None,
         model_mev_source: Optional[Dict[str, str]]   = None,
         scen_mevs_source: Optional[Dict[str, Dict[str, str]]] = None,
-        # Modeling in-sample cutoff
+        # Modeling in-sample cutoffs
+        in_sample_start: Optional[str]               = None,
         in_sample_end: Optional[str]                 = None,
         # Scenario-testing in-sample cutoff
         scen_in_sample_end: Optional[str]            = None,
+        # Optional override maps
+        var_type_map: Optional[Dict[str, str]]       = None,
+        type_tsfm_map: Optional[Dict[str, List[str]]] = None,
     ):
         # Internal data
         if internal_loader is None:
@@ -83,6 +88,21 @@ class DataManager:
         self._internal_loader = internal_loader
         self.internal_data    = internal_loader.internal_data
 
+        # In-sample range
+        self.in_sample_start = (
+            pd.to_datetime(in_sample_start).normalize()
+            if in_sample_start else None
+        )
+        self.in_sample_end   = (
+            pd.to_datetime(in_sample_end).normalize()
+            if in_sample_end else None
+        )
+        # Scenario-testing in-sample cutoff
+        self.scen_in_sample_end = (
+            pd.to_datetime(scen_in_sample_end).normalize()
+            if scen_in_sample_end else None
+        )
+
         # MEV data
         if mev_loader is None:
             if model_mev_source is None or scen_mevs_source is None:
@@ -96,17 +116,11 @@ class DataManager:
         mev_loader.load()
         self._mev_loader = mev_loader
 
-        # Cutoff dates (stored but not auto-split)
-        self.in_sample_end      = (
-            pd.to_datetime(in_sample_end).normalize()
-            if in_sample_end else None
-        )
-        self.scen_in_sample_end = (
-            pd.to_datetime(scen_in_sample_end).normalize()
-            if scen_in_sample_end else None
-        )
+        # Variable type and transform mappings
+        self.var_type_map = var_type_map.copy() if var_type_map is not None else VAR_TYPE_MAP.copy()
+        self.type_tsfm_map = type_tsfm_map.copy() if type_tsfm_map is not None else TYPE_TSFM_MAP.copy()
 
-        # Interpolate MEV to match monthly frequency when needed
+        # Interpolate MEV to match freq
         self._model_mev_data = self._interpolate_df(self._mev_loader.model_mev)
         raw_scen = self._mev_loader.scen_mevs
         self._scen_mevs_data: Dict[str, Dict[str, pd.DataFrame]] = {
@@ -114,7 +128,7 @@ class DataManager:
             for key, df_dict in raw_scen.items()
         }
 
-    # Modeling in‑sample/out‑of‑sample splits
+     # Modeling in‑sample/out‑of‑sample splits
     @property
     def internal_in(self) -> pd.DataFrame:
         if self.in_sample_end is None:
@@ -138,6 +152,25 @@ class DataManager:
         if self.in_sample_end is None:
             return pd.DataFrame()
         return self.model_mev.loc[self.in_sample_end + pd.Timedelta(days=1) :]
+    
+    def update_var_type_map(self, new_map: Dict[str, str]) -> None:
+        """Merge new variable-type mappings into existing var_type_map."""
+        self.var_type_map.update(new_map)
+
+    def update_type_tsfm_map(self, new_map: Dict[str, List[str]]) -> None:
+        """Merge new transform-type mappings into existing type_tsfm_map."""
+        self.type_tsfm_map.update(new_map)
+
+    def update_mev_maps(
+        self,
+        new_map: Dict[str, str]
+    ) -> None:
+        """Merge a set of MEV code→name mappings into both model_map and all scenario maps."""
+        # Update model_map
+        self._mev_loader._model_map.update(new_map)
+        # Update each scenario mapping under each workbook key
+        for wb_key, scen_map in self._mev_loader._scen_maps.items():
+            scen_map.update(new_map)
 
     def build_indep_vars(
         self,
@@ -224,50 +257,84 @@ class DataManager:
         X.index = X.index.normalize()
         return X
 
-    def build_search_vars(
+    def build_tsfm_specs(
         self,
         specs: List[Union[str, TSFM]],
-        mev_type_map: Dict[str, str] = MEV_TYPE_MAP,
-        type_tsfm_map: Dict[str, List[str]] = TYPE_TSFM_MAP
-    ) -> Dict[str, pd.DataFrame]:
+        var_type_map: Optional[Dict[str, str]] = None,
+        type_tsfm_map: Optional[Dict[str, List[str]]] = None,
+        max_lag: int = 0,
+        periods: int = 1
+    ) -> Dict[str, List[Union[str, TSFM]]]:
         """
-        Build DataFrames for each variable based on specs.
-        Returns a dict mapping variable name to its DataFrame of raw and transformed features.
-        Warns if any variable has no type mapping and builds raw variable only in that case.
+        Generate TSFM specification lists for each variable.
+        Returns { var_name: [TSFM..., 'rawvar', ...] }.
         """
-        var_df_map: Dict[str, pd.DataFrame] = {}
-        missing_vars: List[str] = []
+        if max_lag < 0:
+            raise ValueError("max_lag must be >= 0")
+        if periods < 1:
+            raise ValueError("periods must be >= 1")
+
+        vt_map = var_type_map or self.var_type_map
+        tf_map = type_tsfm_map or self.type_tsfm_map
+        specs_map: Dict[str, List[Union[str, TSFM]]] = {}
+        missing: List[str] = []
 
         for spec in specs:
-            # Determine TSFM list and variable name
             if isinstance(spec, TSFM):
-                var_name = spec.feature_name
-                tsfms = [spec]
+                specs_map[spec.feature_name] = [spec]
+
             elif isinstance(spec, str):
                 var_name = spec
-                var_type = mev_type_map.get(spec)
-                if var_type is None:
-                    missing_vars.append(spec)
-                    # No type mapping → build raw variable only
-                    tsfms = [spec]
+                vtype = vt_map.get(spec)
+                if vtype is None:
+                    missing.append(spec)
+                    specs_map[var_name] = [spec]
                 else:
-                    tf_names = type_tsfm_map.get(var_type)
-                    if not tf_names:
-                        raise KeyError(f"No transforms for type '{var_type}'.")
-                    tsfms = [TSFM(spec, getattr(transform_module, name)) for name in tf_names]
+                    fnames = tf_map.get(vtype, [])
+                    tsfms: List[Union[str, TSFM]] = []
+                    for name in fnames:
+                        fn = getattr(transform_module, name, None)
+                        if not callable(fn):
+                            continue
+                        sig = inspect.signature(fn)
+                        pvals = list(range(1, periods+1)) if 'periods' in sig.parameters else [None]
+                        for p in pvals:
+                            base_fn = functools.partial(fn, periods=p) if p else fn
+                            for lag in range(max_lag+1):
+                                tsfms.append(TSFM(spec, base_fn, lag))
+                    specs_map[var_name] = tsfms
             else:
                 raise ValueError(f"Invalid spec: {spec!r}")
 
-            # Build DataFrame for this variable
-            var_df_map[var_name] = self.build_indep_vars(tsfms)
-
-        if missing_vars:
+        if missing:
             warnings.warn(
-                f"No type mapping found for variables: {', '.join(missing_vars)}. "
-                "Building raw variables only for those.",
-                UserWarning
+                f"No type mapping for variables: {missing!r}, using raw-only", UserWarning
             )
+        return specs_map
 
+    def build_search_vars(
+        self,
+        specs: List[Union[str, TSFM]],
+        var_type_map: Optional[Dict[str, str]] = None,
+        type_tsfm_map: Optional[Dict[str, List[str]]] = None,
+        max_lag: int = 0,
+        periods: int = 1
+    ) -> Dict[str, pd.DataFrame]:
+        """
+        Build DataFrame for each variable by:
+          1) generating TSFM specs via build_tsfm_specs
+          2) passing each spec-list to build_indep_vars
+        """
+        tsfm_specs = self.build_tsfm_specs(
+            specs,
+            var_type_map=var_type_map,
+            type_tsfm_map=type_tsfm_map,
+            max_lag=max_lag,
+            periods=periods
+        )
+        var_df_map: Dict[str, pd.DataFrame] = {}
+        for var, tsfms in tsfm_specs.items():
+            var_df_map[var] = self.build_indep_vars(tsfms)
         return var_df_map
     
     @staticmethod
