@@ -112,16 +112,19 @@ class CM:
                 msgs.append("y contains infinite values")
             raise ValueError("Data validation error: " + "; ".join(msgs))
 
-        # Split in- and out-of-sample
+        # Determine start and cutoff
+        start_idx = dm.in_sample_start if dm.in_sample_start is not None else dm.internal_data.index[0]
         cutoff = dm.in_sample_end
+
+        # Split in-/out-of-sample
         if cutoff is not None:
-            self.X_in, self.y_in = X.loc[:cutoff], y.loc[:cutoff]
-            self.X_out, self.y_out = (
-                X.loc[cutoff + pd.Timedelta(days=1):],
-                y.loc[cutoff + pd.Timedelta(days=1):]
-            )
+            self.X_in = X.loc[start_idx:cutoff]
+            self.y_in = y.loc[start_idx:cutoff]
+            self.X_out = X.loc[cutoff + pd.Timedelta(days=1):]
+            self.y_out = y.loc[cutoff + pd.Timedelta(days=1):]
         else:
-            self.X_in, self.y_in = X, y
+            self.X_in = X.loc[start_idx:]
+            self.y_in = y.loc[start_idx:]
             self.X_out, self.y_out = pd.DataFrame(), pd.Series(dtype=float)
         self.X_full, self.y_full = X, y
 
