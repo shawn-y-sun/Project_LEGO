@@ -96,8 +96,8 @@ class TSFM:
     
 
     def __repr__(self) -> str:
-        """Use the `name` property as the representation."""
-        return self.name
+        """Use the `name` property as the representation, prefixed with 'TSFM:'."""
+        return f"TSFM:{self.name}"
 
 
 
