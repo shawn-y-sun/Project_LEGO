@@ -40,6 +40,10 @@ TYPE_TSFM_MAP: Dict[str, List[str]] = _tf_spec['transforms']
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
+# ----------------------------------------------------------------------------
+# DataManager class
+# ----------------------------------------------------------------------------
+
 class DataManager:
     """
     Manage and combine internal and MEV data for modeling.
@@ -263,16 +267,22 @@ class DataManager:
         var_type_map: Optional[Dict[str, str]] = None,
         type_tsfm_map: Optional[Dict[str, List[str]]] = None,
         max_lag: int = 0,
-        periods: int = 1
+        max_periods: int = 1
     ) -> Dict[str, List[Union[str, TSFM]]]:
         """
         Generate TSFM specification lists for each variable.
-        Returns { var_name: [TSFM..., 'rawvar', ...] }.
+        Returns a mapping { var_name: [TSFM instance, ... ] } or raw string specs if unmapped.
+
+        :param specs: list of variable names or TSFM instances to construct specs for
+        :param var_type_map: optional dict mapping variable code to its type; defaults to self.var_type_map
+        :param type_tsfm_map: optional dict mapping variable type to list of transform fn names; defaults to self.type_tsfm_map
+        :param max_lag: non-negative int, generate TSFM entries for lags 0 through max_lag
+        :param max_periods: positive int, for transforms accepting 'periods', generate TSFM entries for periods 1 through max_periods
         """
         if max_lag < 0:
             raise ValueError("max_lag must be >= 0")
-        if periods < 1:
-            raise ValueError("periods must be >= 1")
+        if max_periods < 1:
+            raise ValueError("max_periods must be >= 1")
 
         vt_map = var_type_map or self.var_type_map
         tf_map = type_tsfm_map or self.type_tsfm_map
@@ -297,7 +307,7 @@ class DataManager:
                         if not callable(fn):
                             continue
                         sig = inspect.signature(fn)
-                        pvals = list(range(1, periods+1)) if 'periods' in sig.parameters else [None]
+                        pvals = list(range(1, max_periods+1)) if 'periods' in sig.parameters else [None]
                         for p in pvals:
                             base_fn = functools.partial(fn, periods=p) if p else fn
                             for lag in range(max_lag+1):
