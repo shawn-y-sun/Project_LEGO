@@ -4,7 +4,7 @@ warnings.simplefilter(action="ignore", category=FutureWarning)
 import pandas as pd
 import matplotlib.pyplot as plt
 import math
-from typing import Type, Dict, List, Optional, Any
+from typing import Type, Dict, List, Optional, Any, Union
 
 from .cm import CM
 from .model import ModelBase
@@ -57,12 +57,15 @@ class Segment:
         self.cms[cm_id] = cm
         return cm
     
-    def remove_cm(self, cm_ids: List[str]) -> None:
+    def remove_cm(self, cm_ids: Union[str, List[str]]) -> None:
         """
-        Remove candidate models with the given IDs from this segment.
+        Remove candidate model(s) with the given ID(s) from this segment.
 
-        :param cm_ids: list of model IDs to remove from self.cms
+        :param cm_ids: a single model ID or list of model IDs to remove
         """
+        # allow passing a single string
+        if isinstance(cm_ids, str):
+            cm_ids = [cm_ids]
         for cm_id in cm_ids:
             if cm_id in self.cms:
                 del self.cms[cm_id]
