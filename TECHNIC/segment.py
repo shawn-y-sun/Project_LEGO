@@ -56,6 +56,16 @@ class Segment:
         cm.build(specs, sample=sample)
         self.cms[cm_id] = cm
         return cm
+    
+    def remove_cm(self, cm_ids: List[str]) -> None:
+        """
+        Remove candidate models with the given IDs from this segment.
+
+        :param cm_ids: list of model IDs to remove from self.cms
+        """
+        for cm_id in cm_ids:
+            if cm_id in self.cms:
+                del self.cms[cm_id]
 
     def show_report(
         self,
@@ -84,6 +94,13 @@ class Segment:
         params_kwargs = params_kwargs or {}
         test_kwargs = test_kwargs or {}
         cm_ids = cm_ids or list(self.cms.keys())
+
+        # Print all selected CM IDs and their representations
+        print("=== Candidate Models to Report ===")
+        for cm_id in cm_ids:
+            cm = self.cms[cm_id]
+            print(f"- {cm_id}: {cm}")
+        print("\n")
 
         if report_sample not in {'in', 'full'}:
             raise ValueError("report_sample must be 'in' or 'full'")
