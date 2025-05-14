@@ -82,12 +82,16 @@ class CM:
         build_in = sample in {'in', 'both'}
         build_full = sample in {'full', 'both'}
 
+        # Determine start and cutoff
+        start_idx = dm.in_sample_start if dm.in_sample_start is not None else dm.internal_data.index[0]
+        cutoff = dm.in_sample_end
+
         # Prepare data
         X = dm.build_indep_vars(specs)
         y = dm.internal_data[self.target].copy()
         idx = dm.internal_data.index
-        X = X.reindex(idx).astype(float)
-        y = y.reindex(idx).astype(float)
+        X = X.reindex(idx).astype(float).loc[start_idx:]
+        y = y.reindex(idx).astype(float).loc[start_idx:]
         self.X, self.y = X, y
 
         # Data validation
@@ -111,10 +115,6 @@ class CM:
             if is_numeric_dtype(y) and not np.isfinite(y.dropna()).all():
                 msgs.append("y contains infinite values")
             raise ValueError("Data validation error: " + "; ".join(msgs))
-
-        # Determine start and cutoff
-        start_idx = dm.in_sample_start if dm.in_sample_start is not None else dm.internal_data.index[0]
-        cutoff = dm.in_sample_end
 
         # Split in-/out-of-sample
         if cutoff is not None:
