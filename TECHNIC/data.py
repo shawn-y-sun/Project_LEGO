@@ -1,4 +1,8 @@
-# TECHNIC/datamgr.py
+# =============================================================================
+# module: data.py
+# Purpose: Manage and combine internal and MEV data for modeling
+# Dependencies: pandas, typing, InternalDataLoader, MEVLoader, TSFM, CondVar, DummyVar
+# =============================================================================
 import os
 from pathlib import Path
 import pandas as pd
@@ -9,6 +13,7 @@ from typing import Any, Dict, List, Optional, Callable, Union
 from .internal import InternalDataLoader
 from .mev import MEVLoader
 from .transform import TSFM
+from .feature import Feature
 from . import transform as transform_module
 from .condition import CondVar
 import inspect
@@ -132,6 +137,16 @@ class DataManager:
             for key, df_dict in raw_scen.items()
         }
 
+        # Add month and quarter indicator columns
+        # Model MEV
+        self._model_mev_data['M'] = self._model_mev_data.index.month
+        self._model_mev_data['Q'] = self._model_mev_data.index.quarter
+        # Scenario MEVs
+        for df_dict in self._scen_mevs_data.values():
+            for df in df_dict.values():
+                df['M'] = df.index.month
+                df['Q'] = df.index.quarter
+
      # Modeling in‑sample/out‑of‑sample splits
     @property
     def internal_in(self) -> pd.DataFrame:
@@ -175,23 +190,35 @@ class DataManager:
         # Update each scenario mapping under each workbook key
         for wb_key, scen_map in self._mev_loader._scen_maps.items():
             scen_map.update(new_map)
-
-    def build_indep_vars(
+    
+    def build_features(
         self,
-        specs: Any,
+        specs: List[Union[str, Feature]],
         internal_df: Optional[pd.DataFrame] = None,
         mev_df: Optional[pd.DataFrame]      = None
     ) -> pd.DataFrame:
         """
-        Build independent-variable DataFrame from specs, applying TSFM transforms and CondVar.
+        Build feature DataFrame from specs, which may include raw variable names
+        (str) or Feature instances (TSFM, CondVar, DummyVar, etc.).
 
-        :param specs: list of feature names (str), TSFM instances, or CondVar instances.
-        :param internal_df: override for internal data.
-        :param mev_df: override for MEV data.
+        Parameters
+        ----------
+        specs : list
+            Each element is either a column name (str) or a Feature object.
+        internal_df : DataFrame, optional
+            Override for internal data; defaults to self.internal_data.
+        mev_df : DataFrame, optional
+            Override for model MEV; defaults to self.model_mev.
+
+        Returns
+        -------
+        DataFrame
+            Combined features indexed by date.
         """
-        internal = internal_df if internal_df is not None else self.internal_data
-        mev      = mev_df      if mev_df      is not None else self.model_mev
+        data_int = internal_df if internal_df is not None else self.internal_data
+        data_mev = mev_df      if mev_df      is not None else self.model_mev
 
+        # Flatten nested spec lists
         def _flatten(items):
             for it in items:
                 if isinstance(it, list):
@@ -200,63 +227,23 @@ class DataManager:
                     yield it
 
         flat_specs = list(_flatten(specs))
-        pieces: List[pd.Series] = []
+        pieces = []
 
         for spec in flat_specs:
-            # Conditional variable
-            if isinstance(spec, CondVar):
-                # set main_series if needed
-                if spec.main_series is None:
-                    if spec.main_name in internal.columns:
-                        spec.main_series = internal[spec.main_name]
-                    elif spec.main_name in mev.columns:
-                        spec.main_series = mev[spec.main_name]
-                    else:
-                        raise KeyError(f"CondVar main_var '{spec.main_name}' not found")
-                # set cond_var series list
-                cond_series_list = []
-                for cv in spec.cond_var:
-                    if isinstance(cv, pd.Series):
-                        cond_series_list.append(cv)
-                    elif isinstance(cv, str):
-                        if cv in internal.columns:
-                            cond_series_list.append(internal[cv])
-                        elif cv in mev.columns:
-                            cond_series_list.append(mev[cv])
-                        else:
-                            raise KeyError(f"CondVar cond_var '{cv}' not found")
-                    else:
-                        raise TypeError("`cond_var` must be a column name or pandas Series")
-                spec.cond_var = cond_series_list
-                # apply and collect
-                pieces.append(spec.apply())
-            # Time-series feature transform
-            elif isinstance(spec, TSFM):
-                # pick up the series
-                if spec.feature is not None:
-                    series = spec.feature
-                else:
-                    fn = spec.feature_name
-                    if fn in internal.columns:
-                        series = internal[fn]
-                    elif fn in mev.columns:
-                        series = mev[fn]
-                    else:
-                        raise KeyError(f"Variable '{fn}' not found for transformation.")
-                    spec.feature = series
-                pieces.append(spec.apply())
-            # Raw feature
+            if isinstance(spec, Feature):
+                # Apply feature transform
+                pieces.append(spec.apply(data_int, data_mev))
             elif isinstance(spec, str):
-                if spec in internal.columns:
-                    pieces.append(internal[spec])
-                elif spec in mev.columns:
-                    pieces.append(mev[spec])
+                # Raw variable
+                if spec in data_int.columns:
+                    pieces.append(data_int[spec])
+                elif spec in data_mev.columns:
+                    pieces.append(data_mev[spec])
                 else:
-                    raise KeyError(f"Column '{spec}' not found in internal or MEV data.")
+                    raise KeyError(f"Feature '{spec}' not found in data sources.")
             else:
-                raise ValueError(f"Invalid spec element: {spec!r}")
+                raise TypeError(f"Invalid spec type: {type(spec)}")
 
-        # concat and normalize
         X = pd.concat(pieces, axis=1)
         X.index = X.index.normalize()
         return X
@@ -333,7 +320,7 @@ class DataManager:
         """
         Build DataFrame for each variable by:
           1) generating TSFM specs via build_tsfm_specs
-          2) passing each spec-list to build_indep_vars
+          2) passing each spec-list to build_features
         """
         tsfm_specs = self.build_tsfm_specs(
             specs,
@@ -344,7 +331,7 @@ class DataManager:
         )
         var_df_map: Dict[str, pd.DataFrame] = {}
         for var, tsfms in tsfm_specs.items():
-            var_df_map[var] = self.build_indep_vars(tsfms)
+            var_df_map[var] = self.build_features(tsfms)
         return var_df_map
     
     @staticmethod
