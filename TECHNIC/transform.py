@@ -1,99 +1,117 @@
-# TECHNIC/transform.py
+# =============================================================================
+# module: transform.py
+# Purpose: Feature transformations as subclasses of Feature
+# Dependencies: pandas, typing, .feature.Feature, importlib, functools
+# =============================================================================
 
 import pandas as pd
 import functools
-from typing import Callable, Union
-import sys
+import importlib
+from typing import Callable, Union, Optional, Dict, Any
+from .feature import Feature
 
-class TSFM:
+class TSFM(Feature):
     """
-    Time-series Feature (Transformation) Manager.
+    Transformation feature subclass of Feature.
 
-    Applies a transform (by name or function) to a pandas Series, then
-    shifts the transformed series by `lag` periods.
+    Applies a specified function (callable or name string) to an input variable series,
+    with optional lag and exponent sign adjustments.
 
-    Parameters:
-    - feature: Union[str, pd.Series]
-      Name of the feature (column) or the actual pandas Series to transform.
-    - transform_fn: Union[str, Callable[[pd.Series], pd.Series]]
-      Either the name of a transform function defined in this module or the function itself.
-    - lag: int
-      Number of periods to lag the transformed series (default=0).
-    - exp_sign: int
-      Expected sign of the transformation (1 for positive, -1 for negative, 0 for none).
+    Parameters
+    ----------
+    var : str or pandas.Series
+        Name or Series of the variable to transform.
+    transform_fn : str or Callable[[pandas.Series], pandas.Series]
+        Function name (string) to look up in this module or a callable function.
+    lag : int, default 0
+        Number of periods to lag the series before transformation.
+    exp_sign : int, default 0
+        Exponent sign adjustment: 1 for absolute, -1 for negated absolute, 0 for none.
+    alias : str, optional
+        Custom name for the output feature.
     """
-
     def __init__(
         self,
-        feature: Union[str, pd.Series],
+        var: Union[str, pd.Series],
         transform_fn: Union[str, Callable[[pd.Series], pd.Series]],
         lag: int = 0,
-        exp_sign: int = 0
+        exp_sign: int = 0,
+        alias: Optional[str] = None
     ):
-        # Feature assignment
-        if isinstance(feature, pd.Series):
-            self.feature = feature
-            self.feature_name = feature.name or "feature"
-        elif isinstance(feature, str):
-            self.feature = None
-            self.feature_name = feature
-        else:
-            raise TypeError("`feature` must be a column name string or a pandas Series")
-
-        # Transform function or name
+        super().__init__(var=var, alias=alias)
+        # Resolve transform function if given by name
         if isinstance(transform_fn, str):
-            self.transform_fn = None
-            self.transform_fn_name = transform_fn
-        elif isinstance(transform_fn, functools.partial):
-            self.transform_fn = transform_fn
-            # partial objects store original function in .func
-            self.transform_fn_name = transform_fn.func.__name__
-        elif callable(transform_fn):
-            self.transform_fn = transform_fn
-            self.transform_fn_name = transform_fn.__name__
+            module = importlib.import_module(__name__)
+            if hasattr(module, transform_fn):
+                self.transform_fn = getattr(module, transform_fn)
+            else:
+                raise ValueError(f"Unknown transform function '{transform_fn}' in {__name__}.")
         else:
-            raise TypeError("`transform_fn` must be a function, functools.partial, or the name of one as a string")
-
+            self.transform_fn = transform_fn
         self.lag = lag
         self.exp_sign = exp_sign
-
-    def apply(self) -> pd.Series:
-        """
-        Apply the transform function (resolved by name if needed) and shift by lag.
-        Returns a Series named by the `name` property.
-        """
-        if self.feature is None:
-            raise ValueError("No feature series provided. Assign `feature` before calling apply()")
-        # Resolve string-specified transform_fn
-        if self.transform_fn is None:
-            fn = sys.modules[__name__].__dict__.get(self.transform_fn_name)
-            if fn is None or not callable(fn):
-                raise ValueError(f"Transform function '{self.transform_fn_name}' not found in module")
-            self.transform_fn = fn
-        # Apply transformation
-        transformed = self.transform_fn(self.feature)
-        result = transformed.shift(self.lag) if self.lag > 0 else transformed
-        result.name = self.name
-        return result
-
     @property
     def name(self) -> str:
         """
-        Construct the feature name as FeatureName_FunctionName[_Llag].
+        Generate the output feature name.
+
+        Uses alias if provided; otherwise combines var, function name,
+        and lag indicator
         """
-        if self.transform_fn is None:
-            fn_name = self.transform_fn_name
-        elif isinstance(self.transform_fn, functools.partial):
-            fn_name = self.transform_fn.func.__name__
-            # include any 'periods' keyword if present and >1
-            keywords = getattr(self.transform_fn, 'keywords', {}) or {}
-            if 'periods' in keywords and keywords['periods'] > 1:
-                fn_name = f"{fn_name}{keywords['periods']}"
+        if isinstance(self.transform_fn, functools.partial):
+            fn_name  = self.transform_fn.func.__name__
         else:
-            fn_name = getattr(self.transform_fn, '__name__', self.transform_fn_name)
-        lag_part = f"_L{self.lag}" if self.lag > 0 else ""
-        return f"{self.feature_name}_{fn_name}{lag_part}"
-    
+            fn_name = getattr(self.transform_fn, "__name__", "transform")
+        parts = [fn_name]
+        if self.lag > 0:
+            parts.append(f"L{self.lag}")
+        return "_".join([self.var] + parts)
+
+    def lookup_map(self) -> Dict[str, Any]:
+        """
+        Map the attribute 'var_series' to the variable name for lookup().
+        """
+        return {"var_series": self.var}
+
+    def apply(self, *dfs: pd.DataFrame) -> pd.Series:
+        """
+        Resolve input series, apply lag, transform, and exponent adjustments.
+
+        Parameters
+        ----------
+        *dfs : pandas.DataFrame
+            DataFrame sources for variable lookup.
+
+        Returns
+        -------
+        pandas.Series
+            Transformed series named by self.name.
+
+        Raises
+        ------
+        KeyError
+            If the variable is not found in provided DataFrames.
+        """
+        # Resolve the input series via lookup()
+        self.lookup(*dfs)
+        series = self.var_series
+
+        # Apply lag if requested
+        if self.lag != 0:
+            series = series.shift(self.lag)
+
+        # Apply the transformation function
+        result = self.transform_fn(series)
+
+        # Apply exponent sign adjustments
+        if self.exp_sign == 1:
+            result = result.abs()
+        elif self.exp_sign == -1:
+            result = -result.abs()
+
+        # Set the result name and return
+        result.name = self.name
+        return result
 
     def __repr__(self) -> str:
         """Use the `name` property as the representation, prefixed with 'TSFM:'."""
