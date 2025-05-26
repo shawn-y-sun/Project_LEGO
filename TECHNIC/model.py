@@ -216,8 +216,8 @@ class OLS(ModelBase):
         TestSetClass = self.testset_cls or TestSet
 
         test_kwargs: Dict[Type, Dict[str, Any]] = {
-            SignificanceTest: {"pvalues": self.pvalues, "alpha": alphas.get("SignificanceTest", 0.05)},
-            NormalityTest:   {"series": self.resid, "alpha": alphas.get("NormalityTest", 0.05)},
+            SignificanceTest: {"pvalues": self.pvalues},
+            NormalityTest:   {"series": self.resid},
             #StationarityTest:{"series": self.resid, "alpha": alphas.get("StationarityTest", 0.05)}
         }
 
