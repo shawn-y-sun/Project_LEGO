@@ -328,7 +328,7 @@ class DataManager:
         var_type_map: Optional[Dict[str, str]] = None,
         type_tsfm_map: Optional[Dict[str, List[str]]] = None,
         max_lag: int = 0,
-        periods: int = 1
+        max_periods: int = 1
     ) -> Dict[str, pd.DataFrame]:
         """
         Build DataFrame for each variable by:
@@ -340,7 +340,7 @@ class DataManager:
             var_type_map=var_type_map,
             type_tsfm_map=type_tsfm_map,
             max_lag=max_lag,
-            periods=periods
+            max_periods=max_periods
         )
         var_df_map: Dict[str, pd.DataFrame] = {}
         for var, tsfms in tsfm_specs.items():
