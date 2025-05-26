@@ -14,19 +14,21 @@ class ModelTestBase(ABC):
 
     Parameters
     ----------
-    model : Optional[ModelBase]
-        Fitted model instance to test.
+    model : Optional[Any]
+        Model instance for context.
     X : Optional[pd.DataFrame]
-        Feature matrix for testing.
+        In-sample features.
     y : Optional[pd.Series]
-        Target vector for testing.
+        In-sample target.
     test_dict : Optional[Dict[str, Any]]
-        Dictionary of test configuration parameters.
+        Dictionary mapping test names to functions or parameters.
     alias : Optional[str]
         Custom display name for this test instance.
+    filter_mode : str, default 'moderate'
+        How to evaluate passed results: 'strict' or 'moderate'.
     """
-    # Category of the test: 'assumption', 'performance', or 'base'
     category: str = 'base'
+    _allowed_modes = {'strict', 'moderate'}  # Allowed evaluation modes
 
     def __init__(
         self,
@@ -34,36 +36,52 @@ class ModelTestBase(ABC):
         X: Optional[pd.DataFrame] = None,
         y: Optional[pd.Series] = None,
         test_dict: Optional[Dict[str, Any]] = None,
-        alias: Optional[str] = None
+        alias: Optional[str] = None,
+        filter_mode: str = 'moderate'
     ):
+        # Basic context and test configuration
         self.model = model
         self.X = X
         self.y = y
         self.test_dict = test_dict or {}
         self.alias = alias or ''
+        # Validate filter_mode
+        if filter_mode not in self._allowed_modes:
+            raise ValueError(f"filter_mode must be one of {self._allowed_modes}")
+        self.filter_mode = filter_mode
+        # Status flag to enable/disable this test
+        self.status = 'on'
 
     @property
     def name(self) -> str:
         """
         Display name for the test: alias if provided, else class name.
         """
-        return self.alias if self.alias else type(self).__name__
+        return self.alias or type(self).__name__
 
     @property
     @abstractmethod
-    def test_result(self) -> Any:
+    def test_result(self) -> Dict[str, Any]:
         """
-        Returns the computed test result (outcome) of the testing.
+        Execute the test(s) and return a mapping of results for each metric.
+
+        Returns
+        -------
+        Dict[str, Any]
+            Keys are test labels; values include metric results and pass/fail.
         """
-        ...
+        pass
 
     @property
     @abstractmethod
     def test_filter(self) -> bool:
         """
-        Returns True if test conditions are met, False otherwise.
+        Evaluate the overall test pass/fail based on filter_mode.
+
+        Implementations should consider filter_mode ('strict' or 'moderate')
+        and use results from test_result.
         """
-        ...
+        pass
 
 class TestSet:
     """
@@ -138,9 +156,9 @@ normality_test_dict: Dict[str, callable] = {
 
 class NormalityTest(ModelTestBase):
     """
-    Concrete ModelTestBase implementation for normality diagnostics on a series of data.
+    Concrete test for normality diagnostics on a pandas Series.
 
-    Performs specified normality tests on the provided series.
+    Uses multiple tests (Jarque-Bera, Shapiro) and applies filter_mode logic.
     """
     category = 'assumption'
 
@@ -148,48 +166,37 @@ class NormalityTest(ModelTestBase):
         self,
         series: pd.Series,
         alpha: Union[float, Dict[str, float]] = 0.05,
-        alias: Optional[str] = None
+        filter_mode: str = 'moderate'
     ):
-        super().__init__(
-            model=None,
-            X=None,
-            y=None,
-            test_dict=normality_test_dict,
-            alias=alias
-        )
+        super().__init__(filter_mode=filter_mode)
         self.series = series
         self.alpha = alpha
-    
+        self.test_dict = normality_test_dict
+        # Custom descriptions for strict vs moderate
+        self.filter_mode_descs = {
+            'strict': 'All normality tests must pass.',
+            'moderate': 'At least half of normality tests must pass.'
+        }
+        self.filter_mode_desc = self.filter_mode_descs[self.filter_mode]
+
     @property
     def test_result(self) -> Dict[str, Dict[str, Any]]:
-        """Run each normality test, returning stat, pvalue, and pass flag."""
-        results: Dict[str, Dict[str, Any]] = {}
-        for test_name, fn in self.test_dict.items():
-            output = fn(self.series)
-            stat = output[0]
-            pvalue = output[1]
-            # allow alpha per test if dict
-            level = self.alpha[test_name] if isinstance(self.alpha, dict) else self.alpha
+        # Run each normality test and record results
+        results = {}
+        for name, fn in self.test_dict.items():
+            stat, pvalue = fn(self.series)[0:2]
+            level = self.alpha[name] if isinstance(self.alpha, dict) else self.alpha
             passed = pvalue > level
-            results[test_name] = {
-                'statistic': stat,
-                'pvalue': pvalue,
-                'passed': passed
-            }
+            results[name] = {'statistic': stat, 'pvalue': pvalue, 'passed': passed}
         return results
-
 
     @property
     def test_filter(self) -> bool:
-        """
-        Returns True if all tests in test_result are passed, False otherwise.
-        """
-        results = self.test_result
-        if not results:
-            return False
-        return all(
-            test_info.get('passed', False) for test_info in results.values()
-        )
+        # Base logic: strict requires all pass, moderate requires half
+        passed_flags = [info['passed'] for info in self.test_result.values()]
+        if self.filter_mode == 'strict':
+            return all(passed_flags)
+        return sum(passed_flags) >= (len(passed_flags) / 2)
     
 
 # Dictionary of stationarity diagnostic tests
@@ -216,47 +223,34 @@ class StationarityTest(ModelTestBase):
 
     def __init__(
         self,
-        series: Optional[pd.Series] = None,
-        alpha : Union[float, Dict[str, float]] = 0.05,
-        test_dict: Dict[str, Any] = stationarity_test_dict,
-        model: Optional[Any] = None
+        series: pd.Series,
+        regression: str = 'c',
+        autolag: str = 'AIC',
+        filter_mode: str = 'moderate'
     ):
-        super().__init__(model=model, X=None, y=None, test_dict=test_dict)
-        self.alpha  = alpha
-        # Assign series: explicit or from model residuals/target
-        if series is not None:
-            self.series = series
-        elif self.model is not None and hasattr(self.model, 'resid'):
-            self.series = getattr(self.model, 'resid')
-        else:
-            self.series = None
+        super().__init__(filter_mode=filter_mode)
+        self.series = series
+        self.regression = regression
+        self.autolag = autolag
+        self.test_dict = stationarity_test_dict
+        # Single-test descriptions
+        self.filter_mode_descs = {
+            'strict': 'Stationarity must pass.',
+            'moderate': 'Stationarity must pass.'
+        }
+        self.filter_mode_desc = self.filter_mode_descs[self.filter_mode]
 
     @property
     def test_result(self) -> Dict[str, Dict[str, Any]]:
-        """Run each stationarity test, returning stat, pvalue, and pass flag."""
-        results: Dict[str, Dict[str, Any]] = {}
-        for test_name, fn in self.test_dict.items():
-            output = fn(self.series)
-            stat = output[0]
-            pvalue = output[1]
-            level = self.alpha[test_name] if isinstance(self.alpha, dict) else self.alpha
-            passed = pvalue < level
-            results[test_name] = {
-                'statistic': stat,
-                'pvalue': pvalue,
-                'passed': passed
-            }
-        return results
+        stat, pvalue = adfuller(self.series, regression=self.regression, autolag=self.autolag)[0:2]
+        passed = pvalue < 0.05
+        return {'ADF': {'statistic': stat, 'pvalue': pvalue, 'passed': passed}}
 
     @property
     def test_filter(self) -> bool:
-        """
-        Returns True if all stationarity tests passed, False otherwise.
-        """
-        results = self.test_result
-        if not results:
-            return False
-        return all(info.get('passed', False) for info in results.values())
+        # Single test; same threshold for both modes
+        return list(self.test_result.values())[0]['passed']
+    
 
     @property
     def test_result_legacy(self) -> pd.DataFrame:
@@ -307,27 +301,36 @@ class StationarityTest(ModelTestBase):
 
 class SignificanceTest(ModelTestBase):
     """
-    Concrete ModelTestBase implementation for checking that each p-value
-    for a set of variables meets a significance threshold.
+    Concrete test for checking coefficient significance of model parameters.
+
+    Evaluates p-values against alpha thresholds.
     """
     category = 'performance'
 
-    def __init__(self, pvalues: pd.Series, alpha: float = 0.05):
-        super().__init__(model=None, X=None, y=None, test_dict=None)
+    def __init__(
+        self,
+        pvalues: pd.Series,
+        filter_mode: str = 'strict'
+    ):
+        super().__init__(filter_mode=filter_mode)
         self.pvalues = pvalues
-        self.alpha = alpha
+        # Custom descriptions and alpha per mode
+        self.filter_mode_descs = {
+            'strict': 'Require p-value < 0.05 for all coefficients.',
+            'moderate': 'Require p-value < 0.1 for all coefficients.'
+        }
+        self.filter_mode_desc = self.filter_mode_descs[self.filter_mode]
+        self.alpha = 0.05 if self.filter_mode == 'strict' else 0.1
 
     @property
     def test_result(self) -> Dict[str, Dict[str, Any]]:
-        results: Dict[str, Dict[str, Any]] = {}
+        # Map each variable's p-value to pass/fail
+        results = {}
         for var, p in self.pvalues.items():
-            passed = (p < self.alpha)
-            results[var] = {
-                'pvalue': float(p),
-                'passed': bool(passed)
-            }
+            results[var] = {'pvalue': float(p), 'passed': p < self.alpha}
         return results
 
     @property
     def test_filter(self) -> bool:
-        return all(info.get('passed', False) for info in self.test_result.values())
+        # All coefficients must meet their threshold
+        return all(info['passed'] for info in self.test_result.values())
