@@ -87,7 +87,7 @@ class CM:
         cutoff = dm.in_sample_end
 
         # Prepare data
-        X = dm.build_indep_vars(specs)
+        X = dm.build_features(specs)
         y = dm.internal_data[self.target].copy()
         idx = dm.internal_data.index
         X = X.reindex(idx).astype(float).loc[start_idx:]
