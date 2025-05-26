@@ -111,6 +111,7 @@ class CondVar(Feature):
         if not isinstance(result, pd.Series):
             raise TypeError("`cond_fn` must return a pandas Series")
         result.name = self.name
+        self.output_names = [self.name]
         return result
     
 

@@ -228,7 +228,7 @@ class DataManager:
 
         flat_specs = list(_flatten(specs))
         pieces = []
-
+        
         for spec in flat_specs:
             if isinstance(spec, Feature):
                 # Apply feature transform
@@ -275,7 +275,7 @@ class DataManager:
         tf_map = type_tsfm_map or self.type_tsfm_map
         specs_map: Dict[str, List[Union[str, TSFM]]] = {}
         missing: List[str] = []
-
+    
         for spec in specs:
             if isinstance(spec, TSFM):
                 specs_map[spec.feature_name] = [spec]

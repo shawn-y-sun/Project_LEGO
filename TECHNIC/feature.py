@@ -51,6 +51,8 @@ class Feature(ABC):
             raise TypeError("`var` must be a column name or pandas Series")
 
         self.alias = alias or ""
+        # List of output column names after apply()
+        self.output_names: List[str] = []
 
     @property
     @abstractmethod
@@ -153,9 +155,38 @@ class DumVar(Feature):
     @property
     def name(self) -> str:
         """
-        Base name for generated dummy variables.
+        Identifier for the dummy‐variable group, including selected categories or bins.
+
+        - In 'categories' or 'group' mode, shows the exact levels joined by apostrophes:
+          e.g. M:2'3'4
+        - In 'quantile' mode, appends the number of bins: e.g. M:q5
+        - In 'custom' mode, shows the explicit cut edges: e.g. X:bins(0-10-20)
         """
-        return self.alias or str(self.var)
+        base = self.alias or str(self.var)
+
+        # Categorical/grouped levels
+        if hasattr(self, 'categories') and self.categories:
+            levels = []
+            for lvl in self.categories:
+                if isinstance(lvl, (list, tuple)):
+                    levels.append('/'.join(map(str, lvl)))
+                else:
+                    levels.append(str(lvl))
+            # simpler quoting: build the sep once
+            sep = "'"
+            return f"{base}:{sep.join(levels)}"
+
+        # Even‐spaced quantile bins
+        if getattr(self, 'mode', None) == 'quantile' and getattr(self, 'bins', None):
+            return f"{base}:q{self.bins}"
+
+        # User‐defined custom cut edges
+        if getattr(self, 'mode', None) == 'custom' and getattr(self, 'bin_edges', None):
+            edge_str = '-'.join(map(str, self.bin_edges))
+            return f"{base}:bins({edge_str})"
+
+        # Fallback to just the variable name or alias
+        return base
 
     def lookup_map(self) -> Dict[str, str]:
         """
@@ -180,7 +211,7 @@ class DumVar(Feature):
         # Resolve series
         self.lookup(*dfs)
         series = self.var_series
-        var_name = self.name
+        var_name = self.var
 
         # Prepare raw dummy mapping
         if self.mode == 'categories':
@@ -247,4 +278,7 @@ class DumVar(Feature):
         # Drop first column if effective and more than one
         if drop_first_effective and raw.shape[1] > 1:
             raw = raw.iloc[:, 1:]
+        
+        # capture all generated column names
+        self.output_names = list(raw.columns)
         return raw

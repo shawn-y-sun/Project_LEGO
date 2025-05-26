@@ -4,9 +4,10 @@ warnings.simplefilter(action="ignore", category=FutureWarning)
 import pandas as pd
 import numpy as np
 from pandas.api.types import is_numeric_dtype
-from typing import Type, List, Dict, Any, Optional, Union
+from typing import Type, List, Dict, Any, Optional, Union, Tuple
 
 from .model import ModelBase
+from .feature import DumVar, Feature
 
 class CM:
     """
@@ -34,6 +35,8 @@ class CM:
         self.X_full = self.y_full = None
         self.model_in: Optional[ModelBase] = None
         self.model_full: Optional[ModelBase] = None
+        # leave specs un-mapped until build()
+        self.specs: List[Any] = []
 
     def __repr__(self) -> str:
         '''
@@ -134,15 +137,76 @@ class CM:
                 self.X_in,
                 self.y_in,
                 X_out=self.X_out,
-                y_out=self.y_out
+                y_out=self.y_out,
+                spec_map=self.spec_map
             ).fit()
         if build_full:
             self.model_full = self.model_cls(
                 self.X_full,
                 self.y_full,
                 X_out=self.X_out,
-                y_out=self.y_out
+                y_out=self.y_out,
+                spec_map=self.spec_map
             ).fit()
+    
+    @property
+    def spec_map(self) -> Dict[str, List[Union[str, Tuple[str, ...]]]]:
+        """
+        Categorize self.specs into:
+          • 'common': flat list of individual column-name strings
+          • 'group':  list of tuples, each tuple containing column-name strings
+                      for one grouped driver set
+
+        Examples:
+          specs = [
+              'x1',
+              TSFM('x2', DF, lag=1),
+              ('a','b'),
+              DummyVar(var='M', mode='categories', categories=[3,5,7])
+          ]
+          → {
+              'common': ['x1', 'x2_DF_L1'],
+              'group':  [('a','b'), ('M:3','M:5','M:7')]
+          }
+        """
+        common_drivers: List[str] = []
+        group_drivers: List[Tuple[str, ...]] = []
+
+        def _flatten(items):
+            """Recursively flatten nested lists but leave tuples intact."""
+            for item in items:
+                if isinstance(item, list):
+                    yield from _flatten(item)
+                else:
+                    yield item
+
+        for spec in _flatten(self.specs):
+            # 1) Explicit tuple spec → group of raw vars or Feature names
+            if isinstance(spec, tuple):
+                names = tuple(
+                    n
+                    for s in spec
+                    for n in (
+                        s.output_names if isinstance(s, Feature) else [str(s)]
+                    )
+                )
+                group_drivers.append(names)
+
+            # 2) DumVar instance → one tuple of its dummy-column names
+            elif isinstance(spec, DumVar):
+                group_drivers.append(tuple(spec.output_names))
+
+            # 3) Everything else → common driver
+            else:
+                if isinstance(spec, Feature):
+                    common_drivers.extend(spec.output_names)
+                else:
+                    common_drivers.append(str(spec))
+
+        return {
+            'common': common_drivers,
+            'group':  group_drivers
+        }
 
     @property
     def report_in(self) -> Any:

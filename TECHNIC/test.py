@@ -1,4 +1,8 @@
-# TECHNIC/test.py
+# =============================================================================
+# module: test.py
+# Purpose: Model testing framework with base and concrete test implementations
+# Dependencies: pandas, statsmodels, scipy, abc, typing
+# =============================================================================
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Union, Type, List, Tuple
 import pandas as pd
@@ -85,17 +89,22 @@ class ModelTestBase(ABC):
 
 class TestSet:
     """
-    Aggregator for ModelTestBase instances, with easy filtering and pass/fail logic.
-    """
+    Aggregator for ModelTestBase instances, with filtering and reporting utilities.
 
+    Parameters
+    ----------
+    tests : dict
+        Mapping from test alias (str) to ModelTestBase instance.
+    """
     def __init__(
         self,
-        test_kwargs: Dict[Type[ModelTestBase], dict]
+        tests: Dict[str, ModelTestBase]
     ):
-        """
-        :param test_kwargs: Mapping of ModelTestBase subclasses to their init kwargs.
-        """
-        self.tests: List[ModelTestBase] = [test_cls(**kwargs) for test_cls, kwargs in test_kwargs.items()]
+        # Override each test's alias and collect in defined order
+        self.tests: List[ModelTestBase] = []
+        for alias, test_obj in tests.items():
+            test_obj.alias = alias
+            self.tests.append(test_obj)
 
     @property
     def assumption_tests(self) -> List[ModelTestBase]:
@@ -110,42 +119,56 @@ class TestSet:
         Return the test_result dict for each assumption test.
         """
         return {t.name: t.test_result for t in self.assumption_tests}
+    
 
-    @property
-    def performance_tests(self) -> List[ModelTestBase]:
-        """
-        Return only the tests categorized as 'performance'.
-        """
-        return [t for t in self.tests if getattr(t, 'category', None) == 'performance']
-
-    def search_pass(
+    def filter_pass(
         self,
-        test_list: Optional[List[str]] = None,
         fast_test: bool = False
     ) -> Tuple[bool, List[str]]:
         """
-        Evaluate selected tests and return overall pass flag and list of failed test names.
+        Run active tests and return overall pass flag and failed test names.
 
-        :param test_list: List of test.name to include (in that order). If None, use all tests in original order.
-        :param fast_test: If True, stops at first failure (fail-fast). If False, evaluates all tests (collecting all failures).
-        :return: (passed: bool, failed_tests: List[str])
+        Parameters
+        ----------
+        fast_test : bool, default False
+            If True, stops on first failure.
+
+        Returns
+        -------
+        passed : bool
+            True if all active tests pass.
+        failed_tests : list of str
+            Names of tests that did not pass.
         """
-        # Determine execution sequence
-        if test_list:
-            name_map = {t.name: t for t in self.tests}
-            seq = [name_map[n] for n in test_list if n in name_map]
-        else:
-            seq = list(self.tests)
-
-        failed: List[str] = []
-        for t in seq:
+        failed = []
+        for t in self.tests:
+            if t.status != 'on':
+                continue
             if not t.test_filter:
                 failed.append(t.name)
                 if fast_test:
-                    # fail-fast: stop at first failure
                     return False, failed
-        # if not fast_test, or no failures occurred during fast test
-        return (len(failed) == 0), failed
+        return len(failed) == 0, failed
+
+    def print_test_info(self) -> None:
+        """
+        Print summary of test configurations:
+          - Active tests: name, category, filter_mode, filter_mode_desc
+          - Inactive tests: name only, with note.
+        """
+        print("Active Tests:")
+        for t in self.tests:
+            if t.status == 'on':
+                print(f"- {t.name} | category: {t.category} | mode: {t.filter_mode} | desc: {t.filter_mode_desc}")
+        print("\nInactive Tests:")
+        inactive = [t for t in self.tests if t.status != 'on']
+        for t in inactive:
+            print(f"- {t.name}")
+        if inactive:
+            print(
+                "\nNote: These tests are included but not turned on. "
+                "Set `status='on'` on a test to include it in filter_pass results."
+            )
 
 
 # Dictionary of normality diagnostic tests

@@ -50,23 +50,39 @@ class TSFM(Feature):
             self.transform_fn = transform_fn
         self.lag = lag
         self.exp_sign = exp_sign
+
     @property
     def name(self) -> str:
         """
         Generate the output feature name.
 
-        Uses alias if provided; otherwise combines var, function name,
-        and lag indicator
+        Uses alias if provided; otherwise combines:
+          • var
+          • function name (with a period‐suffix if periods>1)
+          • lag indicator (L# if lag>0)
+
+        Examples:
+          x_DF2        ← DF with periods=2, no lag
+          x_GR3_L1     ← GR with periods=3 and lag=1
         """
+        # 1) Handle functools.partial with a 'periods' keyword
         if isinstance(self.transform_fn, functools.partial):
-            fn_name  = self.transform_fn.func.__name__
+            func = self.transform_fn.func
+            base = func.__name__
+            period = self.transform_fn.keywords.get('periods', None)
+            if isinstance(period, int) and period > 1:
+                fn_name = f"{base}{period}"
+            else:
+                fn_name = base
         else:
+            # 2) Direct callables or alias functions
             fn_name = getattr(self.transform_fn, "__name__", "transform")
+
         parts = [fn_name]
         if self.lag > 0:
             parts.append(f"L{self.lag}")
-        return "_".join([self.var] + parts)
 
+        return "_".join([self.var] + parts)
     def lookup_map(self) -> Dict[str, Any]:
         """
         Map the attribute 'var_series' to the variable name for lookup().
@@ -97,8 +113,7 @@ class TSFM(Feature):
         series = self.var_series
 
         # Apply lag if requested
-        if self.lag != 0:
-            series = series.shift(self.lag)
+        series = series.shift(self.lag)
 
         # Apply the transformation function
         result = self.transform_fn(series)
@@ -111,6 +126,8 @@ class TSFM(Feature):
 
         # Set the result name and return
         result.name = self.name
+        # record column name
+        self.output_names = [self.name]
         return result
 
     def __repr__(self) -> str:
