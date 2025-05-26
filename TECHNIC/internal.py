@@ -154,7 +154,6 @@ class InternalDataLoader:
         Existing dummy columns are dropped first to avoid duplication.
         """
         df = df.copy()
-
         # Define dummy column names
         q_cols = [f"Q{i}" for i in range(1, 5)]
         m_cols = [f"M{i}" for i in range(1, 13)] if self.freq.upper() == 'M' else []
@@ -162,24 +161,20 @@ class InternalDataLoader:
         # Drop any existing dummy columns
         drop_cols = [col for col in q_cols + m_cols if col in df.columns]
         if drop_cols:
-            df.drop(columns=drop_cols, inplace=True)
+            df = df.drop(columns=drop_cols)
 
-        # Generate quarter dummies
+        # Quarter dummies
         quarters = df.index.quarter
-        qd = pd.get_dummies(quarters, prefix='', prefix_sep='').rename(
-            columns={i: f"Q{i}" for i in range(1,5)}
-        )
-        for col in q_cols:
-            df[col] = qd[col]
+        qd = pd.get_dummies(quarters, prefix='Q', prefix_sep='')
+        qd.index = df.index
+        df = pd.concat([df, qd], axis=1)
 
-        # Generate month dummies if monthly frequency
-        if m_cols:
+        # Monthly dummies
+        if self.freq.upper() == 'M':
             months = df.index.month
-            md = pd.get_dummies(months, prefix='', prefix_sep='').rename(
-                columns={i: f"M{i}" for i in range(1,13)}
-            )
-            for col in m_cols:
-                df[col] = md[col]
+            md = pd.get_dummies(months, prefix='M', prefix_sep='')
+            md.index = df.index
+            df = pd.concat([df, md], axis=1)
 
         return df
 
