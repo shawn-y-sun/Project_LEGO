@@ -33,6 +33,8 @@ class Feature(ABC):
             Input column name to lookup or Series to use directly.
         alias : str, optional
             Custom name for the output feature; defaults to the input name.
+        var_series : pandas.Series
+            Cached series obtained via lookup().
 
         Raises
         ------
@@ -93,7 +95,7 @@ class Feature(ABC):
                 raise KeyError(f"Var '{var_name}' for '{attr}' not found.")
 
     @abstractmethod
-    def apply(self) -> pd.Series:
+    def apply(self, *dfs: pd.DataFrame) -> pd.Series:
         """
         Execute transformation logic and return the feature series.
 
@@ -118,9 +120,9 @@ class DumVar(Feature):
     ----------
     var : str or pandas.Series
         Source variable name or series.
-    mode : str, default 'categories'
+    ode : str, default 'categories'
         One of 'categories', 'group', 'quantile', or 'custom'.
-    categories : list of str, optional
+    categories : list of Any, optional
         Values or list of values to dummy; for 'categories' or 'group'.
     bins : int, default 5
         Number of bins for 'quantile' mode.
@@ -197,8 +199,16 @@ class DumVar(Feature):
             mapped = series.map(mapper)
             raw = pd.get_dummies(mapped)
             # If user specified all categories exactly, drop 'Others'
-            if self.categories and set(groups) >= set(series.dropna().unique()):
-                raw = raw.drop(columns=['Others'], errors='ignore')
+            if self.categories:
+                # flatten specified categories
+                specified = set()
+                for grp in self.categories:
+                    if isinstance(grp, (list, tuple)):
+                        specified.update(grp)
+                    else:
+                        specified.add(grp)
+                if specified >= set(series.dropna().unique()):
+                    raw = raw.drop(columns=['Others'], errors='ignore')
         elif self.mode == 'quantile':
             labels = list(range(1, self.bins + 1))
             binned = pd.qcut(series, q=self.bins, labels=labels, duplicates='drop')
@@ -214,8 +224,27 @@ class DumVar(Feature):
         # Rename to 'var:value'
         raw.columns = [f"{var_name}:{col}" for col in raw.columns]
 
-        # Drop first column if full set and drop_first
-        if self.drop_first and raw.shape[1] > 1:
-            raw = raw.iloc[:, 1:]
+        # Determine effective drop_first
+        if self.mode in ['categories', 'group']:
+            unique_vals = set(series.dropna().unique())
+            if self.mode == 'categories':
+                specified = set(self.categories) if self.categories else unique_vals
+            else:
+                specified = set()
+                if self.categories:
+                    for grp in self.categories:
+                        if isinstance(grp, (list, tuple)):
+                            specified.update(grp)
+                        else:
+                            specified.add(grp)
+                else:
+                    specified = unique_vals
+            full_coverage = specified >= unique_vals
+            drop_first_effective = self.drop_first and full_coverage
+        else:
+            drop_first_effective = self.drop_first
 
+        # Drop first column if effective and more than one
+        if drop_first_effective and raw.shape[1] > 1:
+            raw = raw.iloc[:, 1:]
         return raw
