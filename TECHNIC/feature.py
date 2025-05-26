@@ -5,9 +5,10 @@
 # Dependencies: abc, pandas
 # =============================================================================
 
-from abc import ABC, abstractmethod
 import pandas as pd
-from typing import Optional, Union, Dict
+from abc import ABC, abstractmethod
+from typing import Any, Dict, List, Union, Optional
+
 
 class Feature(ABC):
     """
@@ -100,3 +101,121 @@ class Feature(ABC):
         The returned Series must have its `.name` set to `self.name`.
         """
         ...
+
+
+class DumVar(Feature):
+    """
+    One-hot encoding for categorical or continuous variables with multiple modes.
+
+    Modes
+    -----
+    'categories' : simple dummy for each unique value or specified list (e.g. period dummies)
+    'group'      : group specified categories and optionally Others
+    'quantile'   : cut into equal-frequency bins (default n=5)
+    'custom'     : cut into bins defined by user-provided edges
+
+    Parameters
+    ----------
+    var : str or pandas.Series
+        Source variable name or series.
+    mode : str, default 'categories'
+        One of 'categories', 'group', 'quantile', or 'custom'.
+    categories : list of str, optional
+        Values or list of values to dummy; for 'categories' or 'group'.
+    bins : int, default 5
+        Number of bins for 'quantile' mode.
+    bin_edges : list of float, optional
+        Explicit bin edges for 'custom' mode.
+    drop_first : bool, default True
+        Drop the first dummy to avoid multicollinearity if full set.
+    alias : str, optional
+        Base name for resulting dummy columns.
+    """
+    def __init__(
+        self,
+        var: Union[str, pd.Series],
+        mode: str = 'categories',
+        categories: Optional[List[Any]] = None,
+        bins: int = 5,
+        bin_edges: Optional[List[float]] = None,
+        drop_first: bool = True,
+        alias: Optional[str] = None
+    ):
+        super().__init__(var=var, alias=alias)
+        self.mode = mode
+        self.categories = categories
+        self.bins = bins
+        self.bin_edges = bin_edges
+        self.drop_first = drop_first
+
+    @property
+    def name(self) -> str:
+        """
+        Base name for generated dummy variables.
+        """
+        return self.alias or str(self.var)
+
+    def lookup_map(self) -> Dict[str, str]:
+        """
+        Map var_series to source var for lookup().
+        """
+        return {"var_series": self.var}
+
+    def apply(self, *dfs: pd.DataFrame) -> pd.DataFrame:
+        """
+        Generate dummy variables based on the specified mode.
+
+        Parameters
+        ----------
+        *dfs : pandas.DataFrame
+            DataFrame sources for variable lookup.
+
+        Returns
+        -------
+        pandas.DataFrame
+            DataFrame of dummy columns named 'var:value'.
+        """
+        # Resolve series
+        self.lookup(*dfs)
+        series = self.var_series
+        var_name = self.name
+
+        # Prepare raw dummy mapping
+        if self.mode == 'categories':
+            levels = self.categories or sorted(series.dropna().unique())
+            raw = pd.get_dummies(series.astype(object))
+            raw = raw.reindex(columns=levels, fill_value=0)
+        elif self.mode == 'group':
+            groups = self.categories or []
+            def mapper(x):
+                for grp in groups:
+                    if isinstance(grp, (list, tuple)) and x in grp:
+                        return '/'.join(map(str, grp))
+                    if x == grp:
+                        return str(grp)
+                return 'Others'
+            mapped = series.map(mapper)
+            raw = pd.get_dummies(mapped)
+            # If user specified all categories exactly, drop 'Others'
+            if self.categories and set(groups) >= set(series.dropna().unique()):
+                raw = raw.drop(columns=['Others'], errors='ignore')
+        elif self.mode == 'quantile':
+            labels = list(range(1, self.bins + 1))
+            binned = pd.qcut(series, q=self.bins, labels=labels, duplicates='drop')
+            raw = pd.get_dummies(binned)
+        elif self.mode == 'custom':
+            if not self.bin_edges:
+                raise ValueError("custom mode requires bin_edges")
+            binned = pd.cut(series, bins=self.bin_edges, include_lowest=True)
+            raw = pd.get_dummies(binned)
+        else:
+            raise ValueError(f"Unknown mode '{self.mode}' for DummyVar.")
+
+        # Rename to 'var:value'
+        raw.columns = [f"{var_name}:{col}" for col in raw.columns]
+
+        # Drop first column if full set and drop_first
+        if self.drop_first and raw.shape[1] > 1:
+            raw = raw.iloc[:, 1:]
+
+        return raw
