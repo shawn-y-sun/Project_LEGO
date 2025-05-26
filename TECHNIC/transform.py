@@ -100,9 +100,6 @@ class TSFM:
         return f"TSFM:{self.name}"
 
 
-
-
-
 # Core transform functions
 
 def LV(series: pd.Series) -> pd.Series:
