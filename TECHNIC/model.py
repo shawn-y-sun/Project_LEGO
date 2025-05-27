@@ -10,14 +10,8 @@ import numpy as np
 import statsmodels.api as sm
 from typing import Optional, Any, Callable, Type, Dict
 from statsmodels.stats.outliers_influence import variance_inflation_factor
-from .test import (
-    TestSet,
-    ModelTestBase,
-    NormalityTest,
-    StationarityTest,
-    SignificanceTest
-)
-from .report import OLS_ModelReport
+from .test import *
+from .report import ModelReportBase, OLS_ModelReport
 
 class ModelBase(ABC):
     """
@@ -107,31 +101,15 @@ class ModelBase(ABC):
         return self._y_pred_out
 
     @property
-    def report(self) -> Any:
+    def report(self) -> ModelReportBase:
         """
-        Build and return the report instance using report_cls
-        and all of this model's data and measures.
-
-        Raises
-        ------
-        ValueError
-            If no report_cls was provided.
+        Build and return the report instance using report_cls and this model.
         """
         if not self.report_cls:
             raise ValueError("No report_cls provided for building report.")
-        # Standard report construction
-        return self.report_cls(
-            X=self.X,
-            y=self.y,
-            y_fitted_in=getattr(self, 'y_fitted_in', None),
-            X_out=self.X_out,
-            y_out=self.y_out,
-            y_pred_out=self._y_pred_out,
-            in_perf_measures=getattr(self, 'in_perf_measures', {}),
-            out_perf_measures=getattr(self, 'out_perf_measures', {}),
-            test_measures=getattr(self.testset, 'assumption_results', {}),
-            param_measures=getattr(self, 'param_measures', {})
-        )
+        # Now report_cls must accept only model=self
+        return self.report_cls(model=self)
+
 
     def load_testset(
         self,
@@ -167,34 +145,70 @@ class ModelBase(ABC):
 # Default PPNR OLS testset builder
 def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
     """
-    Pre-defined TestSet for PPNR OLS models:
-      - Residual Stationarity
-      - Residual Normality
-      - Significance of common drivers
-      - Significance of grouped drivers
+    Pre-defined TestSet for PPNR OLS models with improved group labels:
+    - In-sample R²
+    - Individual significance (common drivers)
+    - Joint F-tests (group drivers)
+    - Residual stationarity & normality
     """
     tests: Dict[str, ModelTestBase] = {}
-    # Residual tests
-    tests['Residual Stationarity'] = StationarityTest(
-        series=mdl.resid
+
+    # In-sample R²
+    tests['In-Sample R²'] = R2Test(
+        r2=mdl.rsquared,
+        alias='In-Sample R²',
+        filter_mode='strict'
     )
-    tests['Residual Normality'] = NormalityTest(
-        series=mdl.resid
-    )
-    # Common driver significance
+
+    # Common-driver significance
     common = mdl.spec_map.get('common', [])
     if common:
         tests['Common Driver Significance'] = SignificanceTest(
-            pvalues=mdl.pvalues.loc[common]
+            pvalues=mdl.pvalues.loc[common],
+            alias='Common Driver Significance',
+            filter_mode='strict'
         )
-    # Group driver significance
+
+    # Group-driver significance with '^' labels
     for grp in mdl.spec_map.get('group', []):
-        label = '/'.join(grp) if isinstance(grp, (list, tuple)) else str(grp)
-        alias = f"Group Driver Significance {label}"
-        vars_for = list(grp) if isinstance(grp, (list, tuple)) else [grp]
-        tests[alias] = SignificanceTest(
-            pvalues=mdl.pvalues.loc[vars_for]
+        # list of names
+        if isinstance(grp, (list, tuple)):
+            names = list(grp)
+            parts = [name.split(':', 1) if ':' in name else [None, name] for name in names]
+            prefixes = [p[0] for p in parts]
+            suffixes = [p[1] for p in parts]
+            # detect common prefix
+            if None not in prefixes and len(set(prefixes)) == 1:
+                prefix = prefixes[0] + ':'
+                label_body = '^'.join(suffixes)
+                group_label = f"{prefix}{label_body}"
+            else:
+                group_label = '^'.join(names)
+            vars_for = names
+        else:
+            group_label = str(grp)
+            vars_for = [grp]
+
+        alias = f"Group Driver F-Test {group_label}"
+        tests[alias] = FTest(
+            model_result=mdl.fitted,
+            vars=vars_for,
+            alias=alias,
+            filter_mode='strict'
         )
+
+    # Residual diagnostics
+    tests['Residual Stationarity'] = StationarityTest(
+        series=mdl.resid,
+        alias='Residual Stationarity',
+        filter_mode='strict'
+    )
+    tests['Residual Normality'] = NormalityTest(
+        series=mdl.resid,
+        alias='Residual Normality',
+        filter_mode='moderate'
+    )
+
     return tests
 
 
@@ -256,7 +270,7 @@ class OLS(ModelBase):
         })
         self.coefs_ = self.params
         self.is_fitted = True
-        # Automatically build tests after fitting
+        # Automatically load testset after fitting
         self.load_testset()
         return self
 

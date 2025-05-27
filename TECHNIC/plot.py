@@ -122,8 +122,8 @@ def ols_plot_perf_set(
     Parameters
     ----------
     reports : dict
-        Mapping of model_id to ModelReportBase instances (must have .y, .y_out,
-        .y_fitted_in, and .y_pred_out attributes).
+        Mapping of model_id to ModelReportBase instances (must have .model.y, .model.y_out,
+        .model.y_fitted_in, and .model.y_pred_out attributes).
     full : bool
         If True, plot only in-sample fits; otherwise include out-of-sample predictions.
     figsize : tuple, optional
@@ -132,40 +132,54 @@ def ols_plot_perf_set(
         Passed to plt.subplots().
     """
     # Determine the actual series
-    first = next(iter(reports.values()))
-    if not full and hasattr(first, 'y_out') and first.y_out is not None and not first.y_out.empty:
-        actual = pd.concat([first.y, first.y_out]).sort_index()
+    first_report = next(iter(reports.values()))
+    model = first_report.model
+    if (
+        not full
+        and hasattr(model, 'y_out')
+        and model.y_out is not None
+        and not model.y_out.empty
+    ):
+        actual = pd.concat([model.y, model.y_out]).sort_index()
     else:
-        actual = first.y.sort_index()
+        actual = model.y.sort_index()
 
     fig, ax = plt.subplots(figsize=figsize, **kwargs)
     ax.plot(actual.index, actual, label='Actual', color='black', linewidth=2)
 
+    # Color cycle for model lines
     colors = plt.rcParams['axes.prop_cycle'].by_key().get('color', [])
+
     for idx, (mid, rpt) in enumerate(reports.items()):
         color = colors[idx % len(colors)] if colors else None
         # In-sample fitted
-        y_in = rpt.y_fitted_in.sort_index()
+        y_in = rpt.model.y_fitted_in.sort_index()
         ax.plot(
             y_in.index,
             y_in,
-            linestyle='-', # noqa: E231
+            linestyle='-',  # solid for in-sample
             label=f"{mid} (IS)",
             color=color,
             linewidth=2
         )
         # Out-of-sample predicted
-        if not full and hasattr(rpt, 'y_pred_out') and rpt.y_pred_out is not None and not rpt.y_pred_out.empty:
-            y_out = rpt.y_pred_out.sort_index()
+        if (
+            not full
+            and hasattr(rpt.model, 'y_pred_out')
+            and rpt.model.y_pred_out is not None
+            and not rpt.model.y_pred_out.empty
+        ):
+            y_out = rpt.model.y_pred_out.sort_index()
             ax.plot(
                 y_out.index,
                 y_out,
-                linestyle='--',
-                label=None, #f"{mid} (OOS)",
+                linestyle='--',  # dashed for out-of-sample
+                label=None,
                 color=color,
                 linewidth=2
             )
-    ax.set_title('Segment Performance Comparison')
+
+    ax.set_title('Model Performance Comparison')
     ax.set_ylabel('Value')
     ax.legend(loc='best')
     fig.tight_layout()

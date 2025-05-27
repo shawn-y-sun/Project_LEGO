@@ -10,33 +10,23 @@ from .plot import *
 
 class ModelReportBase(ABC):
     """
-    Abstract base for model-specific reports.
+    Abstract base for model-specific reports, now initialized with a ModelBase.
+
+    Parameters
+    ----------
+    model : ModelBase
+        Fitted ModelBase instance containing data, predictions, and measures.
+    perf_set_plot_fn : callable, optional
+        Function to plot performance across multiple reports.
     """
     def __init__(
         self,
-        X: DataFrame,
-        y: Series,
-        y_fitted_in: Series,
-        X_out: Optional[DataFrame] = None,
-        y_out: Optional[Series] = None,
-        y_pred_out: Optional[Series] = None,
-        in_perf_measures: Dict[str, Any] = None,
-        out_perf_measures: Dict[str, Any] = None,
-        test_measures: Dict[str, Any] = None,
-        param_measures: Dict[str, Dict[str, Any]] = None,
+        model: Any,
         perf_set_plot_fn: Optional[Callable[[Dict[str, 'ModelReportBase']], Any]] = None
     ):
-        # Store model data and measures
-        self.X = X
-        self.y = y
-        self.y_fitted_in = y_fitted_in
-        self.X_out = X_out
-        self.y_out = y_out
-        self.y_pred_out = y_pred_out
-        self.in_perf_measures = in_perf_measures or {}
-        self.out_perf_measures = out_perf_measures or {}
-        self.test_measures = test_measures or {}
-        self.param_measures = param_measures or {}
+        # Store model for attribute access
+        self.model = model
+        # Optional performance-set plotting function
         self.perf_set_plot_fn = perf_set_plot_fn
 
     @abstractmethod
@@ -49,10 +39,20 @@ class ModelReportBase(ABC):
         """Return out-of-sample performance measures as a DataFrame."""
         ...
 
-    @abstractmethod
-    def show_test_tbl(self) -> DataFrame:
-        """Return testing measures as a DataFrame."""
-        ...
+    def show_test_tbl(self) -> None:
+        """
+        Print all test results from the model's TestSet in a reader-friendly format.
+        """
+        # Gather all test results (both active and inactive)
+        results = self.model.testset.all_test_results
+        for test_name, result in results.items():
+            print(f"--- {test_name} ---")
+            # Print DataFrame or Series, fallback to default print
+            if hasattr(result, 'to_string'):
+                print(result.to_string())
+            else:
+                print(result)
+            print()
 
     @abstractmethod
     def show_params_tbl(self) -> DataFrame:
@@ -61,7 +61,7 @@ class ModelReportBase(ABC):
 
     @abstractmethod
     def plot_perf(self, **kwargs) -> Any:
-        """Plot performance metrics."""
+        """Plot performance metrics for this model."""
         ...
 
 class ReportSet:
@@ -174,78 +174,37 @@ class ReportSet:
         if show_tests:
             for model_id, report in self._reports.items():
                 print(f"\n=== Model: {model_id} — Testing Metrics ===")
-                df_test = report.show_test_tbl(**test_kwargs)
-                print(df_test.to_string())
-
+                report.show_test_tbl(**test_kwargs)
 
 
 class OLS_ModelReport(ModelReportBase):
     """
-    Report for OLS models: displays performance, tests, and parameters.
+    Report for OLS models: displays performance, tests, and parameter tables.
     """
     def __init__(
         self,
-        X: DataFrame,
-        y: Series,
-        y_fitted_in: Series,
-        X_out: Optional[DataFrame] = None,
-        y_out: Optional[Series] = None,
-        y_pred_out: Optional[Series] = None,
-        in_perf_measures: Dict[str, Any] = None,
-        out_perf_measures: Dict[str, Any] = None,
-        test_measures: Dict[str, Any] = None,
-        param_measures: Dict[str, Dict[str, Any]] = None,
-        perf_plot_fn: Callable[..., Any] = ols_model_perf_plot,
-        test_plot_fn: Callable[..., Any] = ols_model_test_plot,
+        model: Any,
+        perf_plot_fn: Callable[['ModelReportBase'], Any] = ols_model_perf_plot,
+        test_plot_fn: Callable[['ModelReportBase'], Any] = ols_model_test_plot,
         perf_set_plot_fn: Callable[[Dict[str, 'ModelReportBase']], Any] = ols_plot_perf_set
     ):
-        super().__init__(
-            X=X,
-            y=y,
-            y_fitted_in=y_fitted_in,
-            X_out=X_out,
-            y_out=y_out,
-            y_pred_out=y_pred_out,
-            in_perf_measures=in_perf_measures,
-            out_perf_measures=out_perf_measures,
-            test_measures=test_measures,
-            param_measures=param_measures,
-            perf_set_plot_fn=perf_set_plot_fn
-        )
+        super().__init__(model=model, perf_set_plot_fn=perf_set_plot_fn)
+        # Store specific plot routines
         self.perf_plot_fn = perf_plot_fn
         self.test_plot_fn = test_plot_fn
 
     def show_in_perf_tbl(self) -> pd.DataFrame:
-        """In-sample performance metrics as a single-row DataFrame."""
-        return pd.DataFrame([self.in_perf_measures])
+        """Single-row DataFrame of in-sample metrics."""
+        return pd.DataFrame([self.model.in_perf_measures])
 
     def show_out_perf_tbl(self) -> pd.DataFrame:
-        """Out-of-sample performance metrics as a single-row DataFrame (empty if none)."""
-        out = self.out_perf_measures
+        """Single-row DataFrame of out-of-sample metrics (empty if none)."""
+        out = self.model.out_perf_measures
         return pd.DataFrame([out]) if out else pd.DataFrame()
-
-    def show_test_tbl(self) -> pd.DataFrame:
-        """
-        Flatten self.test_measures into a DataFrame, with a MultiIndex
-        (Category, Test) and one column per metric found in the innermost dicts.
-        Works for arbitrary metrics.
-        """
-        records = []
-        for test_name, subtests in self.test_measures.items():
-            for subtest_name, metrics in subtests.items():
-                # metrics is any dict: {"statistic":…, "pvalue":…, "foo":…, ...}
-                row = {"Category": test_name, "Test": subtest_name}
-                row.update(metrics)
-                records.append(row)
-        if not records:
-            return pd.DataFrame()  # no tests to show
-        df = pd.DataFrame.from_records(records)
-        # Set a clean MultiIndex
-        return df.set_index(["Category", "Test"])
 
     def show_params_tbl(self) -> pd.DataFrame:
         """Parameter table with columns: Variable, Coef, Pvalue, Sig, VIF, Std."""
-        pm = self.param_measures
+        pm = self.model.param_measures
         df = pd.DataFrame.from_dict(pm, orient='index')
         df.index.name = 'Variable'
         df = df.reset_index()
@@ -263,12 +222,12 @@ class OLS_ModelReport(ModelReportBase):
     def plot_perf(self, **kwargs) -> Any:
         """Plot actual vs fitted/in-sample and predicted/out-of-sample values."""
         return self.perf_plot_fn(
-            self.X,
-            self.y,
-            X_out=self.X_out,
-            y_out=self.y_out,
-            y_fitted_in=self.y_fitted_in,
-            y_pred_out=self.y_pred_out,
+            self.model.X,
+            self.model.y,
+            X_out=self.model.X_out,
+            y_out=self.model.y_out,
+            y_fitted_in=self.model.y_fitted_in,
+            y_pred_out=self.model.y_pred_out,
             **kwargs
         )
 
@@ -339,4 +298,4 @@ class OLS_ModelReport(ModelReportBase):
 
         if show_tests:
             print('\n=== Model Testing ===')
-            print(self.show_test_tbl().to_string(index=True))
+            self.show_test_tbl()
