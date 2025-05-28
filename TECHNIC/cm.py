@@ -218,15 +218,6 @@ class CM:
         return self.model_in.report
 
     @property
-    def tests_in(self) -> Any:
-        '''
-        Expose the in-sample tests property at the CM level.
-        '''
-        if self.model_in is None:
-            raise RuntimeError("In-sample model not built; call build(sample='in') first.")
-        return self.model_in.tests
-
-    @property
     def report_full(self) -> Any:
         '''
         Expose the full-sample report property at the CM level.
@@ -234,16 +225,6 @@ class CM:
         if self.model_full is None:
             raise RuntimeError("Full-sample model not built; call build(sample='full') first.")
         return self.model_full.report
-
-    @property
-    def tests_full(self) -> Any:
-        '''
-        Expose the full-sample tests property at the CM level.
-        '''
-        if self.model_full is None:
-            raise RuntimeError("Full-sample model not built; call build(sample='full') first.")
-        return self.model_full.tests
-    
 
     def show_report(
         self,

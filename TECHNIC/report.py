@@ -173,7 +173,7 @@ class ReportSet:
         # 5) Optional per-model testing metrics
         if show_tests:
             for model_id, report in self._reports.items():
-                print(f"\n=== Model: {model_id} — Testing Metrics ===")
+                print(f"\n=== Model: {model_id} — Testing Metrics ===\n")
                 report.show_test_tbl(**test_kwargs)
 
 

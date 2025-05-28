@@ -157,7 +157,7 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
     tests['In-Sample R²'] = R2Test(
         r2=mdl.rsquared,
         alias='In-Sample R²',
-        filter_mode='strict'
+        filter_mode='moderate'
     )
 
     # Common-driver significance
@@ -166,7 +166,7 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
         tests['Common Driver Significance'] = SignificanceTest(
             pvalues=mdl.pvalues.loc[common],
             alias='Common Driver Significance',
-            filter_mode='strict'
+            filter_mode='moderate'
         )
 
     # Group-driver significance with '^' labels
@@ -194,14 +194,14 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
             model_result=mdl.fitted,
             vars=vars_for,
             alias=alias,
-            filter_mode='strict'
+            filter_mode='moderate'
         )
 
     # Residual diagnostics
     tests['Residual Stationarity'] = StationarityTest(
         series=mdl.resid,
         alias='Residual Stationarity',
-        filter_mode='strict'
+        filter_mode='moderate'
     )
     tests['Residual Normality'] = NormalityTest(
         series=mdl.resid,

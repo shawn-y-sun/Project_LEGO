@@ -294,7 +294,7 @@ class StationarityTest(ModelTestBase):
         series: pd.Series,
         alpha: Union[float, Dict[str, float]] = 0.05,
         alias: Optional[str] = None,
-        filter_mode: str = 'strict'
+        filter_mode: str = 'moderate'
     ):
         super().__init__(alias=alias, filter_mode=filter_mode)
         self.series = series
@@ -503,7 +503,7 @@ class FTest(ModelTestBase):
             'F-statistic': fstat,
             'P-value':     pvalue,
             'Passed':      passed
-        }], index=[self.name])
+        }], index=['Joint F Test'])
         return df
 
     @property
