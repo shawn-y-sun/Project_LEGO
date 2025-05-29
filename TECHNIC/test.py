@@ -6,6 +6,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Union, Type, List, Tuple
 import pandas as pd
+import numpy as np
 
 from statsmodels.stats.stattools import jarque_bera
 from scipy.stats import shapiro
@@ -39,7 +40,7 @@ class ModelTestBase(ABC):
             raise ValueError(f"filter_mode must be one of {self._allowed_modes}")
         self.alias = alias or ''
         self.filter_mode = filter_mode
-        self.status = 'on'
+        self.filter_on = True
 
     @property
     def name(self) -> str:
@@ -105,14 +106,14 @@ class TestSet:
 
     def filter_pass(
         self,
-        fast_test: bool = False
+        fast_filter: bool = True
     ) -> Tuple[bool, List[str]]:
         """
         Run active tests and return overall pass flag and failed test names.
 
         Parameters
         ----------
-        fast_test : bool, default False
+        fast_filter : bool, default True
             If True, stops on first failure.
 
         Returns
@@ -124,11 +125,11 @@ class TestSet:
         """
         failed = []
         for t in self.tests:
-            if t.status != 'on':
+            if not t.filter_on:
                 continue
             if not t.test_filter:
                 failed.append(t.name)
-                if fast_test:
+                if fast_filter:
                     return False, failed
         return len(failed) == 0, failed
 
@@ -140,17 +141,134 @@ class TestSet:
         """
         print("Active Tests:")
         for t in self.tests:
-            if t.status == 'on':
-                print(f"- {t.name} | category: {t.category} | mode: {t.filter_mode} | desc: {t.filter_mode_desc}")
+            if t.filter_on:
+                print(f"- {t.name} | category: {t.category} | filter_mode: {t.filter_mode} | desc: {t.filter_mode_desc}")
         print("\nInactive Tests:")
-        inactive = [t for t in self.tests if t.status != 'on']
+        inactive = [t for t in self.tests if not t.filter_on]
         for t in inactive:
             print(f"- {t.name}")
         if inactive:
             print(
                 "\nNote: These tests are included but not turned on. "
-                "Set `status='on'` on a test to include it in filter_pass results."
+                "Set `filter_on=True` on a test to include it in filter_pass results."
             )
+
+# ----------------------------------------------------------------------------
+# FitMeasure class
+# ----------------------------------------------------------------------------
+class FitMeasure(ModelTestBase):
+    """
+    Compute and expose fit metrics for a fitted model.
+
+    Parameters
+    ----------
+    actual : pd.Series
+        The observed target values.
+    predicted : pd.Series
+        The model’s fitted or predicted values (in-sample).
+    n_features : int
+        Number of predictors (not including the intercept) used in fitting.
+    alias : str, optional
+        Display name for this test (defaults to class name).
+    filter_mode : {'strict','moderate'}, default 'moderate'
+        Not used—always passes. Exists to satisfy ModelTestBase interface.
+    """
+    category = 'measure'
+
+    def __init__(
+        self,
+        actual: pd.Series,
+        predicted: pd.Series,
+        n_features: int,
+        alias: Optional[str] = None,
+        filter_mode: str = 'moderate'
+    ):
+        super().__init__(alias=alias, filter_mode=filter_mode)
+        self.actual = actual
+        self.predicted = predicted
+        self.n = len(actual)
+        self.p = n_features
+        # this is only for reporting: do not include in filter_pass
+        self.filter_on = False
+
+    @property
+    def test_result(self) -> pd.Series:
+        """
+        Returns
+        -------
+        pd.Series
+            {'R²': ..., 'Adj R²': ...}
+        """
+        # compute sum of squares
+        ss_res = ((self.actual - self.predicted) ** 2).sum()
+        ss_tot = ((self.actual - self.actual.mean()) ** 2).sum()
+        r2 = 1 - ss_res / ss_tot if ss_tot > 0 else float('nan')
+        # adjusted R² = 1 - (1−R²)*(n−1)/(n−p−1)
+        adj_r2 = 1 - (1 - r2) * (self.n - 1) / (self.n - self.p - 1) if self.n > self.p + 1 else float('nan')
+
+        return pd.Series({'R²': float(r2), 'Adj R²': float(adj_r2)}, name=self.name)
+
+    @property
+    def test_filter(self) -> bool:
+        """
+        Always pass—this test is for reporting measures, not for filtering.
+        """
+        return True
+
+
+# ----------------------------------------------------------------------------
+# ErrorMeasure class
+# ----------------------------------------------------------------------------
+class ErrorMeasure(ModelTestBase):
+    """
+    Compute and expose error diagnostics for a fitted model.
+
+    Parameters
+    ----------
+    actual : pd.Series
+        The observed target values.
+    predicted : pd.Series
+        The model’s fitted or predicted values (in- or out-of-sample).
+    alias : str, optional
+        Display name for this test (defaults to class name).
+    filter_mode : {'strict','moderate'}, default 'moderate'
+        Not used—always passes. Exists to satisfy ModelTestBase interface.
+    """
+    category = 'measure'
+
+    def __init__(
+        self,
+        actual: pd.Series,
+        predicted: pd.Series,
+        alias: Optional[str] = None,
+        filter_mode: str = 'moderate'
+    ):
+        super().__init__(alias=alias, filter_mode=filter_mode)
+        self.errors = actual - predicted
+        # this is only for reporting: do not include in filter_pass
+        self.filter_on = False
+
+    @property
+    def test_result(self) -> pd.Series:
+        """
+        Returns
+        -------
+        pd.Series
+            {'ME': ..., 'MAE': ..., 'RMSE': ...}
+        """
+        abs_err = self.errors.abs()
+        me = float(abs_err.max())
+        mae = float(abs_err.mean())
+        rmse = float(np.sqrt((self.errors ** 2).mean()))
+
+        return pd.Series({'ME': me, 'MAE': mae, 'RMSE': rmse}, name=self.name)
+
+    @property
+    def test_filter(self) -> bool:
+        """
+        Always pass—this test is for reporting measures, not for filtering.
+        """
+        return True
 
 # ----------------------------------------------------------------------------
 # R2Test class

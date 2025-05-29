@@ -153,6 +153,28 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
     """
     tests: Dict[str, ModelTestBase] = {}
 
+    #---Fit & Error Measures (inactive for filtering)---
+    # Goodness of fit (in-sample)
+    tests['Fit Measures'] = FitMeasure(
+        actual=mdl.y,
+        predicted=mdl.y_fitted_in,
+        n_features=len(mdl.params) - 1  # subtract intercept
+    )
+
+    # Add error measures (in-sample)
+    tests['IS Error Measures'] = ErrorMeasure(
+        actual=mdl.y,
+        predicted=mdl.y_fitted_in
+    )
+
+    # Optionally, out-of-sample:
+    if not mdl.X_out.empty:
+        tests['OOS Error Measures'] = ErrorMeasure(
+            actual=mdl.y_out,
+            predicted=mdl.y_pred_out
+        )
+
+    #---Filtering Test---
     # In-sample R²
     tests['In-Sample R²'] = R2Test(
         r2=mdl.rsquared,
@@ -180,10 +202,10 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
             # detect common prefix
             if None not in prefixes and len(set(prefixes)) == 1:
                 prefix = prefixes[0] + ':'
-                label_body = '^'.join(suffixes)
+                label_body = "'".join(suffixes)
                 group_label = f"{prefix}{label_body}"
             else:
-                group_label = '^'.join(names)
+                group_label = "'".join(names)
             vars_for = names
         else:
             group_label = str(grp)

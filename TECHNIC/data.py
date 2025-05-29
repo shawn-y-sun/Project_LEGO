@@ -218,14 +218,15 @@ class DataManager:
         data_int = internal_df if internal_df is not None else self.internal_data
         data_mev = mev_df      if mev_df      is not None else self.model_mev
 
-        # Flatten nested spec lists
+        # Flatten nested spec lists and tuples
         def _flatten(items):
             for it in items:
-                if isinstance(it, list):
+                # treat tuples just like lists so group-tuples 
+                # get unpacked into their member specs
+                if isinstance(it, (list, tuple)):
                     yield from _flatten(it)
                 else:
                     yield it
-
         flat_specs = list(_flatten(specs))
         pieces = []
         
@@ -242,7 +243,7 @@ class DataManager:
                 else:
                     raise KeyError(f"Feature '{spec}' not found in data sources.")
             else:
-                raise TypeError(f"Invalid spec type: {type(spec)}")
+                raise TypeError(f"Invalid spec type after flatten(): {type(spec)}")
 
         X = pd.concat(pieces, axis=1)
         X.index = X.index.normalize()

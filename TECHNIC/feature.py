@@ -282,3 +282,7 @@ class DumVar(Feature):
         # capture all generated column names
         self.output_names = list(raw.columns)
         return raw
+    
+    def __repr__(self) -> str:
+        """Use the `name` property as the representation, prefixed with 'DumVar:'."""
+        return f"DumVar:{self.name}"
