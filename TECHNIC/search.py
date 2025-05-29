@@ -38,8 +38,11 @@ class ModelSearch:
         self.dm = dm
         self.target = target
         self.model_cls = model_cls
-        # All generated spec combinations (preserves tuple groupings)
         self.all_specs: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
+        self.passed_cms: List[CM] = []
+        self.failed_info: List[Tuple[List[Any], List[str]]] = []
+        self.df_scores: Optional[pd.DataFrame] = None
+        self.top_cms: List[CM] = []
 
     def build_spec_combos(
         self,
@@ -350,12 +353,23 @@ class ModelSearch:
             mdl_example.testset.print_test_info()
             print()
 
-        # 4. Filter specs
-        print("--- Filtering Spec Combos ---")
-        passed, failed = self.filter_specs("cm", sample, n_cpu, test_update_func)
-        self.passed_cms = passed
-        self.failed_info = failed
-        print(f"Passed {len(passed)} combos; Failed {len(failed)} combos.\n")
+        # 4) Filter specs
+        self.passed_cms, self.failed_info = self.filter_specs(
+            sample=sample,
+            n_jobs=n_cpu,
+            test_update_func=test_update_func
+        )
+        # Early exit if nothing passed
+        if not self.passed_cms:
+            print("\n⚠️  No candidate models passed the filter tests. Search terminated.\n")
+            return
+
+        # # 4. Filter specs
+        # print("--- Filtering Spec Combos ---")
+        # passed, failed = self.filter_specs("cm", sample, n_cpu, test_update_func)
+        # self.passed_cms = passed
+        # self.failed_info = failed
+        # print(f"Passed {len(passed)} combos; Failed {len(failed)} combos.\n")
 
         # 5. Rank models
         df = ModelSearch.rank_cms(passed, sample, rank_weights)
