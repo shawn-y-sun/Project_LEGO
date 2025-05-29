@@ -4,17 +4,26 @@ warnings.simplefilter(action="ignore", category=FutureWarning)
 import pandas as pd
 import matplotlib.pyplot as plt
 import math
-from typing import Type, Dict, List, Optional, Any, Union
+from typing import Type, Dict, List, Optional, Any, Union, Callable, Tuple
 
 from .cm import CM
 from .model import ModelBase
 from .template import ExportTemplateBase
 from .report import ReportSet
+from .search import ModelSearch  # new import
 
 
 class Segment:
     """
     Manages a collection of Candidate Models (CM) and their reporting/export.
+
+    :param segment_id: Unique identifier for this Segment.
+    :param target: Name of the target variable.
+    :param data_manager: DataManager instance.
+    :param model_cls: ModelBase subclass to use for model fitting.
+    :param export_template_cls: Optional Excel export template class.
+    :param reportset_cls: Class for assembling report sets.
+    :param search_cls: Class to use for exhaustive model search (default: ModelSearch).
     """
     def __init__(
         self,
@@ -23,7 +32,8 @@ class Segment:
         data_manager: Any,
         model_cls: Type[ModelBase],
         export_template_cls: Optional[Type[ExportTemplateBase]] = None,
-        reportset_cls: Type[ReportSet] = ReportSet
+        reportset_cls: Type[ReportSet] = ReportSet,
+        search_cls: Type[ModelSearch] = ModelSearch  # added parameter
     ):
         self.segment_id = segment_id
         self.target = target
@@ -31,7 +41,9 @@ class Segment:
         self.model_cls = model_cls
         self.export_template_cls = export_template_cls
         self.reportset_cls = reportset_cls
-        self.cms: Dict[str, CM] = {}
+        self.search_cls = search_cls                # store search class
+        self.cms: Dict[str, CM] = {}               # existing CMs in this segment
+        self.top_cms: List[CM] = []                # placeholder for top models
 
     def build_cm(
         self,
@@ -233,3 +245,73 @@ class Segment:
             raise ValueError("No export_template_cls provided for exporting.")
         exporter = self.export_template_cls(self.cms, *args, **kwargs)
         exporter.export(output_map)
+
+
+    def search_cms(
+        self,
+        desired_pool: List[Union[str, Any]],
+        forced_in: Optional[List[Union[str, Any]]] = None,
+        top_n: int = 10,
+        sample: str = 'in',
+        max_var_num: int = 5,
+        max_lag: int = 3,
+        max_periods: int = 3,
+        n_cpu: int = 1,
+        rank_weights: Tuple[float, float, float] = (1, 1, 1),
+        test_update_func: Optional[Callable] = None,
+        add_in: bool = True
+    ) -> List[CM]:
+        """
+        Run an exhaustive search over feature-spec combinations.
+
+        :param desired_pool: List of variables or TSFM specs to consider.
+        :param forced_in:  List of vars/TSFMs always included (treated as one group if provided).
+        :param top_n:      Number of top models to retain based on ranking.
+        :param sample:     Which sample to build ('in' or 'full').
+        :param max_var_num: Maximum number of features per model.
+        :param max_lag:    Max lag to consider in TSFM specs.
+        :param max_periods:Max periods to consider in TSFM specs.
+        :param n_cpu:      Number of CPUs/threads for parallel assessment.
+        :param rank_weights:
+                             Weights for (Fit Measures, IS Error, OOS Error) when ranking.
+        :param test_update_func:
+                             Optional function to update each CM’s testset.
+        :param add_to_segment:
+                             If True, add the resulting top CMs into `self.cms`.
+        :return:           List of the top_n passing CM instances.
+        """
+        # 1) Instantiate the search engine
+        searcher = self.search_cls(self.dm, self.target, self.model_cls)
+
+        # 2) Run the search (populates searcher.top_cms; no return value)
+        searcher.run_search(
+            desired_pool=desired_pool,
+            forced_in=forced_in or [],
+            top_n=top_n,
+            sample=sample,
+            max_var_num=max_var_num,
+            max_lag=max_lag,
+            max_periods=max_periods,
+            n_cpu=n_cpu,
+            rank_weights=rank_weights,
+            test_update_func=test_update_func
+        )
+
+        # 3) Collect the top_n results from the searcher
+        self.top_cms = searcher.top_cms[:top_n]
+
+        # 4) Optionally add them to this segment’s cms
+        if add_in:
+            for cm in self.top_cms:
+                # Resolve any model_id collisions by appending _2, _3, etc.
+                base_id = cm.model_id
+                new_id = base_id
+                # If there's a collision, find the next available suffix
+                if new_id in self.cms:
+                    suffix = 2
+                    while f"{base_id}_{suffix}" in self.cms:
+                        suffix += 1
+                    new_id = f"{base_id}_{suffix}"
+                # Assign the unique ID back to the CM and register it
+                cm.model_id = new_id
+                self.cms[new_id] = cm
