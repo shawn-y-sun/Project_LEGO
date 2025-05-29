@@ -288,7 +288,7 @@ class ModelSearch:
     def run_search(
         self,
         desired_pool: List[Union[str, TSFM, Feature, Tuple[Any, ...]]],
-        forced_in: Optional[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = [None],
+        forced_in: Optional[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = None,
         top_n: int = 10,
         sample: str = 'in',
         max_var_num: int = 5,

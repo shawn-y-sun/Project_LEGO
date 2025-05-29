@@ -42,6 +42,8 @@ class Segment:
         self.export_template_cls = export_template_cls
         self.reportset_cls = reportset_cls
         self.search_cls = search_cls                # store search class
+        # Will hold the ModelSearch instance once we've run a search
+        self.searcher: Optional[ModelSearch] = None
         self.cms: Dict[str, CM] = {}               # existing CMs in this segment
         self.top_cms: List[CM] = []                # placeholder for top models
 
@@ -250,7 +252,7 @@ class Segment:
     def search_cms(
         self,
         desired_pool: List[Union[str, Any]],
-        forced_in: Optional[List[Union[str, Any]]] = [None],
+        forced_in: Optional[List[Union[str, Any]]] = None,
         top_n: int = 10,
         sample: str = 'in',
         max_var_num: int = 5,
@@ -278,8 +280,10 @@ class Segment:
                              If True, add the resulting top CMs into `self.cms`.
         :return:           List of the top_n passing CM instances.
         """
-        # 1) Instantiate the search engine
-        searcher = self.search_cls(self.dm, self.target, self.model_cls)
+        # 1) Reuse existing searcher if present, else create & store one
+        if self.searcher is None:
+            self.searcher = self.search_cls(self.dm, self.target, self.model_cls)
+        searcher = self.searcher
 
         # 2) Run the search (populates searcher.top_cms; no return value)
         searcher.run_search(
@@ -295,7 +299,7 @@ class Segment:
         )
 
         # 3) Collect the top_n results from the searcher
-        self.top_cms = searcher.top_cms[:top_n]
+        self.top_cms = self.searcher.top_cms[:top_n]
 
         # 4) Optionally add them to this segment’s cms
         if add_in:
