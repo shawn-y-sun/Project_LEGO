@@ -41,17 +41,24 @@ class ModelSearch:
         self.failed_info: List[Tuple[List[Any], List[str]]] = []
         self.df_scores: Optional[pd.DataFrame] = None
         self.top_cms: List[CM] = []
-
+    
     def build_spec_combos(
         self,
-        forced_in: List[Union[str, TSFM, Feature, Tuple[Any, ...]]],
-        desired_pool: List[Union[str, TSFM, Feature, Tuple[Any, ...]]],
+        forced_in: Optional[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]],
+        desired_pool: List[Union[str, TSFM, Feature, Tuple[Any, ...], set]],
         max_var_num: int,
         max_lag: int = 0,
         max_periods: int = 1
     ) -> List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]]:
         """
-        Build valid spec combos combining static forced_in with all subsets of desired_pool.
+        Build all valid feature-spec combos:
+        - If forced_in is provided, include those specs in every combo.
+        - desired_pool can contain:
+            * str, TSFM, Feature, tuple, or set.
+          * tuple: items stay grouped together.
+          * set: treated as a pool where exactly one must be selected.
+        - Strings at top-level are expanded into TSFM variants via DataManager.
+        - Respects max_var_num (total features per combo).
 
         Parameters
         ----------
@@ -71,51 +78,67 @@ class ModelSearch:
         combos : list of spec lists
             Each combo is a list including str, TSFM, Feature, or tuple elements.
         """
-        def expand(item):
-            if isinstance(item, tuple):
-                return [[item]]
-            if isinstance(item, (TSFM, Feature)):
-                return [[item]]
-            if isinstance(item, str):
-                tsfm_map = self.dm.build_tsfm_specs([item], max_lag=max_lag, max_periods=max_periods)
-                variants = tsfm_map.get(item, [item])
-                return [[spec] for spec in variants]
-            raise ValueError(f"Invalid spec item: {item!r}")
+        # Handle forced_in being optional
+        forced_specs = (forced_in or []).copy()
 
-        # If forced_in is None, we treat it as “no forced specs”;
-        # otherwise copy the provided list
-        if forced_in is None:
-            forced_specs: List[Union[str, TSFM, Feature, Tuple[Any, ...]]] = []
-            include_forced = False
-        else:
-            forced_specs = forced_in.copy()
-            include_forced = True
-        
-        desired_combos: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
-        n = len(desired_pool)
-        for r in range(1, n + 1):
-            for subset in itertools.combinations(desired_pool, r):
-                expansions = [expand(x) for x in subset]
-                for combo in itertools.product(*expansions):
-                    specs: List[Union[str, TSFM, Feature, Tuple[Any, ...]]] = []
-                    for elem in combo:
-                        specs.extend(elem)
-                    desired_combos.append(specs)
+        # Step 1: Build raw combos from desired_pool with set-as-exclusives
+        pools: List[List[Any]] = []
+        for item in desired_pool:
+            if isinstance(item, set):
+                # Flatten nested sets into a single pool of choices
+                flat: set = set()
+                def _flatten(s):
+                    for el in s:
+                        if isinstance(el, set):
+                            _flatten(el)
+                        else:
+                            flat.add(el)
+                _flatten(item)
+                pools.append(list(flat))
+            else:
+                pools.append([item])
 
-        combos: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
-        # only append the pure-forced combo if the user really passed forced_in
-        if include_forced and len(forced_specs) <= max_var_num:
+        # Combine pools by choosing any non-empty subset of pools
+        raw_combos: List[List[Any]] = []
+        m = len(pools)
+        for r in range(1, m+1):
+            for indices in itertools.combinations(range(m), r):
+                selected_pools = [pools[i] for i in indices]
+                # pick exactly one from each selected pool
+                for choice in itertools.product(*selected_pools):
+                    raw_combos.append(list(choice))
+
+        # Step 2: Prepend forced_in-only combo if any forced specs exist
+        combos: List[List[Any]] = []
+        if forced_specs and len(forced_specs) <= max_var_num:
             combos.append(forced_specs.copy())
-        for d in desired_combos:
-            if len(forced_specs) + len(d) <= max_var_num:
-                # forced_specs may be empty, so this yields just d if no forced_in
-                combos.append(forced_specs + d)
- 
-        # ──────────── drop any “empty” spec‐lists ────────────
-        combos = [c for c in combos if c]
- 
-        self.all_specs = combos
-        return combos
+
+        # Mix forced with each raw combo within max_var_num
+        for rc in raw_combos:
+            if len(forced_specs) + len(rc) <= max_var_num:
+                combos.append(forced_specs + rc)
+
+        # Step 3: Expand only top-level strings into TSFM variants
+        # Gather unique strings to expand
+        top_strings = {spec for combo in combos for spec in combo if isinstance(spec, str)}
+        tsfm_map = self.dm.build_tsfm_specs(
+            list(top_strings), max_lag=max_lag, max_periods=max_periods
+        )
+
+        expanded: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
+        for combo in combos:
+            variant_lists: List[List[Any]] = []
+            for spec in combo:
+                if isinstance(spec, str):
+                    variant_lists.append(tsfm_map.get(spec, [spec]))
+                else:
+                    variant_lists.append([spec])
+            # Cartesian product over variant lists
+            for prod in itertools.product(*variant_lists):
+                expanded.append(list(prod))
+
+        self.all_specs = expanded
+        return expanded
 
     def assess_spec(
         self,
