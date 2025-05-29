@@ -89,8 +89,18 @@ def ols_model_perf_plot(
 
     # Plot absolute errors on secondary axis
     ax2 = ax1.twinx()
+    # if len(abs_err) > 1:
+    #     width = (abs_err.index[1] - abs_err.index[0]) * 0.8
+    # else:
+    #     width = 0.8
     if len(abs_err) > 1:
-        width = (abs_err.index[1] - abs_err.index[0]) * 0.8
+        # compute raw gap between first two x’s
+        delta = abs_err.index[1] - abs_err.index[0]
+        # if time‐based, convert timedelta to days as a float
+        if isinstance(delta, pd.Timedelta):
+            width = float(delta / pd.Timedelta(days=1)) * 0.8
+        else:
+            width = delta * 0.8
     else:
         width = 0.8
     ax2.bar(abs_err.index, abs_err, width=width, alpha=0.2, color="grey", label="|Error|")
