@@ -82,7 +82,15 @@ class ModelSearch:
                 return [[spec] for spec in variants]
             raise ValueError(f"Invalid spec item: {item!r}")
 
-        forced_specs = forced_in.copy()
+        # If forced_in is None, we treat it as “no forced specs”;
+        # otherwise copy the provided list
+        if forced_in is None:
+            forced_specs: List[Union[str, TSFM, Feature, Tuple[Any, ...]]] = []
+            include_forced = False
+        else:
+            forced_specs = forced_in.copy()
+            include_forced = True
+        
         desired_combos: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
         n = len(desired_pool)
         for r in range(1, n + 1):
@@ -95,10 +103,12 @@ class ModelSearch:
                     desired_combos.append(specs)
 
         combos: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
-        if len(forced_specs) <= max_var_num:
+        # only append the pure-forced combo if the user really passed forced_in
+        if include_forced and len(forced_specs) <= max_var_num:
             combos.append(forced_specs.copy())
         for d in desired_combos:
             if len(forced_specs) + len(d) <= max_var_num:
+                # forced_specs may be empty, so this yields just d if no forced_in
                 combos.append(forced_specs + d)
  
         # ──────────── drop any “empty” spec‐lists ────────────
@@ -345,6 +355,7 @@ class ModelSearch:
         if not self.passed_cms:
             print("\n⚠️  No candidate models passed the filter tests. Search terminated.\n")
             return
+        print(f"Passed {len(passed)} combos; Failed {len(failed)} combos.\n")
 
         # 5. Rank models
         df = ModelSearch.rank_cms(passed, sample, rank_weights)
