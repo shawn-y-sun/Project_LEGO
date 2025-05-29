@@ -390,6 +390,22 @@ stationarity_test_dict: Dict[str, Any] = {
     )
 }
 
+# def _adf_test_fn(series: pd.Series):
+#     """ADF unit-root test wrapper for pickling."""
+#     res = adfuller(series.dropna(), autolag="AIC")
+#     return res
+
+# def _pp_test_fn(series: pd.Series):
+#     """Phillips–Perron test wrapper for pickling."""
+#     pp = PhillipsPerron(series.dropna())
+#     return pp.stat, pp.pvalue
+
+# # then replace
+# stationarity_test_dict = {
+#     'ADF': _adf_test_fn,
+#     'PP':  _pp_test_fn
+# }
+
 class StationarityTest(ModelTestBase):
     """
     Concrete ModelTestBase implementation for stationarity testing using ADF.

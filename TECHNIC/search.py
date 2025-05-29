@@ -2,9 +2,7 @@ from typing import List, Union, Tuple, Type, Any, Optional, Callable
 import itertools
 import time
 import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
@@ -102,7 +100,10 @@ class ModelSearch:
         for d in desired_combos:
             if len(forced_specs) + len(d) <= max_var_num:
                 combos.append(forced_specs + d)
-
+ 
+        # ──────────── drop any “empty” spec‐lists ────────────
+        combos = [c for c in combos if c]
+ 
         self.all_specs = combos
         return combos
 
@@ -155,7 +156,6 @@ class ModelSearch:
         self,
         model_id_prefix: str = 'cm',
         sample: str = 'in',
-        n_jobs: int = 1,
         test_update_func: Optional[Callable[[ModelBase], dict]] = None
     ) -> Tuple[List[CM], List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]]]:
         """
@@ -168,8 +168,6 @@ class ModelSearch:
             Prefix for auto-generated model IDs (appended with index).
         sample : {'in','full'}
             Sample to use for all assessments (default 'in').
-        n_jobs : int, default 1
-            Number of parallel workers; use 1 for sequential processing.
         test_update_func : callable, optional
             Function to update/regenerate the testset for each model.
 
@@ -184,46 +182,31 @@ class ModelSearch:
         failed_info: List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]] = []
         total = len(self.all_specs)
         start_time = time.time()
-
-        # Prepare executor and futures
-        executor = ThreadPoolExecutor(max_workers=n_jobs)
-        futures = []
+ 
+        # Sequential assessment with one tqdm bar
+        bar = tqdm(total=total, desc="Filtering Specs")
         for i, specs in enumerate(self.all_specs):
-            futures.append(
-                executor.submit(
-                    self.assess_spec,
-                    f"{model_id_prefix}{i}",
-                    specs,
-                    sample,
-                    test_update_func
-                )
-            )
-        future_map = {f: specs for f, specs in zip(futures, self.all_specs)}
-
-        # Single tqdm progress bar
-        bar = tqdm(total=total, desc="Assessing spec combos")
-        for future in as_completed(future_map):
-            specs = future_map[future]
-            result = future.result()
+            model_id = f"{model_id_prefix}{i}"
+            result = self.assess_spec(model_id, specs, sample, test_update_func)
             if isinstance(result, CM):
                 passed_cms.append(result)
             else:
                 failed_info.append(result)
-
-            # Update progress bar and ETA
+ 
+            # ETA update
             processed = bar.n + 1
             elapsed = time.time() - start_time
-            progress = processed / total
-            eta = ''
+            progress = processed / total if total > 0 else 1
             if progress > 0:
                 est_total = elapsed / progress
                 rem = est_total - elapsed
                 finish_dt = datetime.datetime.now() + datetime.timedelta(seconds=rem)
                 eta = finish_dt.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                eta = ''
             bar.set_postfix(estimated_finish=eta)
             bar.update(1)
         bar.close()
-        executor.shutdown()
         return passed_cms, failed_info
 
     @staticmethod
@@ -295,13 +278,12 @@ class ModelSearch:
     def run_search(
         self,
         desired_pool: List[Union[str, TSFM, Feature, Tuple[Any, ...]]],
-        forced_in: Optional[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = None,
+        forced_in: Optional[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = [None],
         top_n: int = 10,
         sample: str = 'in',
         max_var_num: int = 5,
         max_lag: int = 3,
         max_periods: int = 3,
-        n_cpu: int = 1,
         rank_weights: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         test_update_func: Optional[Callable[[ModelBase], dict]] = None
     ) -> List[CM]:
@@ -332,7 +314,6 @@ class ModelSearch:
               f"Max var num     : {max_var_num}\n"
               f"Max lag         : {max_lag}\n"
               f"Max periods     : {max_periods}\n"
-              f"CPUs (n_jobs)   : {n_cpu}\n"
               f"Top N           : {top_n}\n"
               f"Rank weights    : {rank_weights}\n"
               f"Test update func: {test_update_func}")
@@ -356,7 +337,6 @@ class ModelSearch:
         # 4) Filter specs
         passed, failed = self.filter_specs(
             sample=sample,
-            n_jobs=n_cpu,
             test_update_func=test_update_func
         )
         self.passed_cms = passed

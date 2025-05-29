@@ -250,13 +250,12 @@ class Segment:
     def search_cms(
         self,
         desired_pool: List[Union[str, Any]],
-        forced_in: Optional[List[Union[str, Any]]] = None,
+        forced_in: Optional[List[Union[str, Any]]] = [None],
         top_n: int = 10,
         sample: str = 'in',
         max_var_num: int = 5,
         max_lag: int = 3,
         max_periods: int = 3,
-        n_cpu: int = 1,
         rank_weights: Tuple[float, float, float] = (1, 1, 1),
         test_update_func: Optional[Callable] = None,
         add_in: bool = True
@@ -271,7 +270,6 @@ class Segment:
         :param max_var_num: Maximum number of features per model.
         :param max_lag:    Max lag to consider in TSFM specs.
         :param max_periods:Max periods to consider in TSFM specs.
-        :param n_cpu:      Number of CPUs/threads for parallel assessment.
         :param rank_weights:
                              Weights for (Fit Measures, IS Error, OOS Error) when ranking.
         :param test_update_func:
@@ -292,7 +290,6 @@ class Segment:
             max_var_num=max_var_num,
             max_lag=max_lag,
             max_periods=max_periods,
-            n_cpu=n_cpu,
             rank_weights=rank_weights,
             test_update_func=test_update_func
         )
