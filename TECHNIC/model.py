@@ -178,20 +178,18 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
     # In-sample R²
     tests['In-Sample R²'] = R2Test(
         r2=mdl.rsquared,
-        alias='In-Sample R²',
         filter_mode='moderate'
     )
 
     # Common-driver significance
     common = mdl.spec_map.get('common', [])
     if common:
-        tests['Common Driver Significance'] = SignificanceTest(
+        tests['Common Driver Significance'] = PvalueTest(
             pvalues=mdl.pvalues.loc[common],
-            alias='Common Driver Significance',
             filter_mode='moderate'
         )
 
-    # Group-driver significance with '^' labels
+    # Group-driver significance with "'" labels
     for grp in mdl.spec_map.get('group', []):
         # list of names
         if isinstance(grp, (list, tuple)):
@@ -215,21 +213,36 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
         tests[alias] = FTest(
             model_result=mdl.fitted,
             vars=vars_for,
-            alias=alias,
             filter_mode='moderate'
         )
-
+    
+    # Coefficient Multicollinearity
+    tests['Multicollinearity'] = VIFTest(
+        exog=sm.add_constant(mdl.X),
+        filter_mode='moderate'
+     )
+    
     # Residual diagnostics
     tests['Residual Stationarity'] = StationarityTest(
         series=mdl.resid,
-        alias='Residual Stationarity',
         filter_mode='moderate'
     )
     tests['Residual Normality'] = NormalityTest(
         series=mdl.resid,
-        alias='Residual Normality',
         filter_mode='moderate'
     )
+    tests['Residual Autocorrelation'] = AutocorrTest(
+        results=mdl.fitted,
+        filter_mode='moderate',
+        filter_on=False
+    )
+    tests['Residual Heteroscedasticity'] = HetTest(
+        resids=mdl.resid,
+        exog=sm.add_constant(mdl.X),
+        filter_mode='moderate',
+        filter_on=False
+    )
+
 
     return tests
 

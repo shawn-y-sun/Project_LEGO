@@ -4,14 +4,21 @@
 # Dependencies: pandas, statsmodels, scipy, abc, typing
 # =============================================================================
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Union, Type, List, Tuple
+from typing import Any, Dict, Optional, Union, Callable, List, Tuple
 import pandas as pd
 import numpy as np
 
-from statsmodels.stats.stattools import jarque_bera
-from scipy.stats import shapiro
-from statsmodels.tsa.stattools import adfuller
-from arch.unitroot import PhillipsPerron
+from statsmodels.stats.stattools import jarque_bera, durbin_watson
+from statsmodels.stats.diagnostic import acorr_breusch_godfrey, het_breuschpagan, het_white, normal_ad
+from scipy.stats import shapiro, kstest, cramervonmises
+from statsmodels.tsa.stattools import adfuller, zivot_andrews, range_unit_root_test, kpss
+from arch.unitroot import PhillipsPerron, DFGLS
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+import warnings
+from statsmodels.tools.sm_exceptions import InterpolationWarning
+# ignore out-of-range interpolation warnings
+warnings.filterwarnings('ignore', category=InterpolationWarning)
 
 # ----------------------------------------------------------------------------
 # ModelTestBase class
@@ -34,13 +41,14 @@ class ModelTestBase(ABC):
     def __init__(
         self,
         alias: Optional[str] = None,
-        filter_mode: str = 'moderate'
+        filter_mode: str = 'moderate',
+        filter_on: bool = True,
     ):
         if filter_mode not in self._allowed_modes:
             raise ValueError(f"filter_mode must be one of {self._allowed_modes}")
         self.alias = alias or ''
         self.filter_mode = filter_mode
-        self.filter_on = True
+        self.filter_on = filter_on
 
     @property
     def name(self) -> str:
@@ -181,15 +189,15 @@ class FitMeasure(ModelTestBase):
         predicted: pd.Series,
         n_features: int,
         alias: Optional[str] = None,
-        filter_mode: str = 'moderate'
+        filter_mode: str = 'moderate',
+        filter_on: bool = False
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode)
+        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
         self.actual = actual
         self.predicted = predicted
         self.n = len(actual)
         self.p = n_features
         # this is only for reporting: do not include in filter_pass
-        self.filter_on = False
 
     @property
     def test_result(self) -> pd.Series:
@@ -241,12 +249,12 @@ class ErrorMeasure(ModelTestBase):
         actual: pd.Series,
         predicted: pd.Series,
         alias: Optional[str] = None,
-        filter_mode: str = 'moderate'
+        filter_mode: str = 'moderate',
+        filter_on: bool = False
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode)
+        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
         self.errors = actual - predicted
         # this is only for reporting: do not include in filter_pass
-        self.filter_on = False
 
     @property
     def test_result(self) -> pd.Series:
@@ -296,9 +304,10 @@ class R2Test(ModelTestBase):
         r2: float,
         thresholds: Optional[Dict[str, float]] = {'strict': 0.6, 'moderate': 0.4},
         alias: Optional[str] = None,
-        filter_mode: str = 'strict'
+        filter_mode: str = 'strict',
+        filter_on: bool = True
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode)
+        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
         self.r2 = r2
         self.thresholds = thresholds
         self.filter_mode_descs = {
@@ -317,13 +326,212 @@ class R2Test(ModelTestBase):
         return self.r2 >= thr
 
 # ----------------------------------------------------------------------------
+# AutocorrTest class
+# ----------------------------------------------------------------------------
+
+# Default test functions for autocorrelation diagnostics
+autocorr_test_dict: Dict[str, Callable] = {
+    # 'Durbin–Watson': lambda res: float(durbin_watson(res)),
+    # 'Breusch–Godfrey': lambda res: _bg_pvalue(res)
+    'Durbin–Watson':             lambda m: float(durbin_watson(m.resid)),
+    'Breusch–Godfrey': lambda m: acorr_breusch_godfrey(m, nlags=1)[1]
+}
+
+class AutocorrTest(ModelTestBase):
+    """
+    Test for autocorrelation in residuals using multiple diagnostics.
+
+    Parameters
+    ----------
+    results : any
+        Results from a fitted regression model (e.g., `model.resid`).
+    alias : str, optional
+        A label for this test when reporting. If None, uses `self.name`.
+    filter_mode : {'strict', 'moderate'}, default 'moderate'
+        - 'strict': all tests must pass.
+        - 'moderate': at least half of the tests must pass.
+    test_dict : dict, optional
+        Mapping of test names to functions computing the statistic. Defaults to DEFAULT_AUTOCORR_TEST_FUNCS.
+
+    Attributes
+    ----------
+    test_funcs : dict
+        Mapping test names to statistic functions.
+    thresholds : dict
+        Threshold definitions per test name.
+    filter_mode_descs : dict
+        Descriptions of filter modes.
+    """
+    category = 'assumption'
+
+    # Descriptions of filter_mode behaviors
+    filter_mode_descs = {
+        'strict': 'All tests must pass',
+        'moderate': 'At least half of the tests must pass'
+    }
+
+    # Threshold definitions (Durbin–Watson: (lower, upper); BG: p-value cutoff)
+    threshold_defs = {
+        'Durbin–Watson': (1.5, 2.5),
+        'Breusch–Godfrey': 0.1
+    }
+
+    def __init__(
+        self,
+        results: Any,
+        alias: Optional[str] = None,
+        filter_mode: str = 'moderate',
+        test_dict: Optional[Dict[str, Callable]] = None,
+        filter_on: bool = True
+    ):
+        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        # store residuals array
+        self.results = results
+        # assign test functions (default or user-provided)
+        self.test_funcs = test_dict if test_dict is not None else autocorr_test_dict
+        # assign thresholds
+        self.thresholds = self.threshold_defs
+
+    @property
+    def test_result(self) -> pd.DataFrame:
+        """
+        Compute each autocorrelation test and package with threshold & pass/fail.
+
+        Returns
+        -------
+        pd.DataFrame
+            Index: test names.
+            Columns:
+              - 'statistic': computed value (float or p-value)
+              - 'threshold': tuple or float threshold
+              - 'passed': bool if statistic meets threshold criteria
+        """
+        records = []
+        for name, func in self.test_funcs.items():
+            stat = func(self.results)
+            thresh = self.thresholds[name]
+            if name == 'Durbin–Watson':
+                lower, upper = thresh
+                passed = lower <= stat <= upper
+            else:
+                alpha = thresh
+                passed = stat > alpha
+            records.append({'Test': name, 'Statistic': stat, 'Threshold': thresh, 'Passed': passed})
+        df = pd.DataFrame(records).set_index('Test')
+        return df
+
+    @property
+    def test_filter(self) -> bool:
+        """
+        Aggregate pass/fail according to filter_mode:
+        - strict: all tests must pass
+        - moderate: at least half of tests must pass
+        """
+        results = self.test_result['Passed']
+        passed_count = int(results.sum())
+        total = len(results)
+        if self.filter_mode == 'strict':
+            return passed_count == total
+        else:
+            return passed_count >= (total / 2)
+
+# ----------------------------------------------------------------------------
+# HetTest class
+# ----------------------------------------------------------------------------
+
+# Default test functions for homoscedasticity diagnostics
+het_test_dict: Dict[str, Callable] = {
+    'Breusch–Pagan': lambda res, exog: het_breuschpagan(res, exog)[1],
+    'White': lambda res, exog: het_white(res, exog)[1]
+}
+
+class HetTest(ModelTestBase):
+    """
+    Test for homoscedasticity using Breusch–Pagan and White's tests.
+
+    Parameters
+    ----------
+    resids : array-like
+        Residuals from a fitted regression model (e.g., `model.resid`).
+    exog : array-like
+        Exogenous regressors (design matrix) used in the original model.
+    alias : str, optional
+        A label for this test when reporting. If None, uses `self.name`.
+    filter_mode : {'strict', 'moderate'}, default 'moderate'
+        - 'strict': all tests must pass.
+        - 'moderate': at least half of the tests must pass.
+    test_dict : dict, optional
+        Mapping of test names to functions computing the statistic. Defaults to DEFAULT_HETTEST_FUNCS.
+
+    Attributes
+    ----------
+    test_funcs : dict
+        Mapping test names to statistic functions.
+    thresholds : dict
+        Threshold definitions per test name.
+    filter_mode_descs : dict
+        Descriptions of filter modes.
+    """
+    category = 'assumption'
+
+    filter_mode_descs = {
+        'strict': 'All tests must pass',
+        'moderate': 'At least half of the tests must pass'
+    }
+
+    threshold_defs = {
+        'Breusch–Pagan': 0.05,
+        'White': 0.05
+    }
+
+    def __init__(
+        self,
+        resids: Union[np.ndarray, List[float]],
+        exog: Union[np.ndarray, pd.DataFrame, List[List[float]]],
+        alias: Optional[str] = None,
+        filter_mode: str = 'moderate',
+        test_dict: Optional[Dict[str, Callable]] = None,
+        filter_on: bool = True
+    ):
+        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        self.resids = np.asarray(resids)
+        self.exog = np.asarray(exog)
+        self.test_funcs = test_dict if test_dict is not None else het_test_dict
+        self.thresholds = self.threshold_defs
+
+    @property
+    def test_result(self) -> pd.DataFrame:
+        records = []
+        for name, func in self.test_funcs.items():
+            pval = func(self.resids, self.exog)
+            alpha = self.thresholds[name]
+            passed = pval > alpha
+            records.append({'Test': name, 'P-value': pval, 'Passed': passed})
+        df = pd.DataFrame(records).set_index('Test')
+        return df
+
+    @property
+    def test_filter(self) -> bool:
+        passed_count = int(self.test_result['Passed'].sum())
+        total = len(self.test_funcs)
+        return passed_count == total if self.filter_mode == 'strict' else passed_count >= (total / 2)
+
+# ----------------------------------------------------------------------------
 # NormalityTest class
 # ----------------------------------------------------------------------------
-    
+
+def _cvm_test_fn(series: pd.Series):
+    """Cramér–von Mises test against fitted Normal (mean, std)."""
+    res = cramervonmises(series, 'norm', args=(series.mean(), series.std(ddof=1)))
+    return res.statistic, res.pvalue
+
 # Dictionary of normality diagnostic tests
-normality_test_dict: Dict[str, callable] = {
-    'Jarque_Bera': jarque_bera,
-    'Shapiro': shapiro
+normality_test_dict: Dict[str, Callable] = {
+   'JB': lambda s: jarque_bera(s)[0:2],
+   'SW': lambda s: shapiro(s)[0:2],
+   'KS': lambda s: kstest(s, 'norm', args=(s.mean(), s.std(ddof=1)))[0:2],
+   'CM': _cvm_test_fn,
+   'AD': lambda s: normal_ad(s)
 }
 
 class NormalityTest(ModelTestBase):
@@ -339,9 +547,10 @@ class NormalityTest(ModelTestBase):
         series: pd.Series,
         alpha: Union[float, Dict[str, float]] = 0.05,
         alias: Optional[str] = None,
-        filter_mode: str = 'strict'
+        filter_mode: str = 'strict',
+        filter_on: bool = True
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode)
+        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
         self.series = series
         self.alpha = alpha
         self.test_dict = normality_test_dict
@@ -359,7 +568,7 @@ class NormalityTest(ModelTestBase):
         │ Test │ Statistic│ P-value │ Passed │
         ├──────┼──────────┼─────────┼────────┤
         │ JB   │   …      │   …     │  True  │
-        │ Sh   │   …      │   …     │  True  │
+        │ SW   │   …      │   …     │  True  │
         └──────┴──────────┴─────────┴────────┘
         """
         rows = []
@@ -381,30 +590,62 @@ class NormalityTest(ModelTestBase):
 # ----------------------------------------------------------------------------
 # StationarityTest class
 # ----------------------------------------------------------------------------
+# Wrapper for KPSS test
+def _kpss_test_fn(series: pd.Series):
+    """KPSS test for level stationarity (null: stationary), suppressing interpolation warnings."""
+    stat, pvalue, _, _ = kpss(series, regression='c', nlags='auto')
+    return stat, pvalue
+
+# Wrapper for Zivot–Andrews test
+def _za_test_fn(series: pd.Series):
+    """Zivot–Andrews test for unit root with one structural break (null: unit root)."""
+    try:
+        stat, crit_vals, pvalue = zivot_andrews(series, regression='c', maxlag=3)
+    except ValueError:
+        # if auxiliary regression fails due to rank deficiency, return NaNs
+        stat, pvalue = np.nan, np.nan
+    return stat, pvalue
+
+# Wrapper for DF-GLS test using arch.unitroot
+def _dfgls_test_fn(series: pd.Series):
+    """DF-GLS test for unit root after GLS detrending (null: unit root)."""
+    test = DFGLS(series)
+    return float(test.stat), float(test.pvalue)
+
+# Wrapper for ADF test
+def _adf_test_fn(series: pd.Series):
+    """Augmented Dickey–Fuller test for unit root (null: unit root)."""
+    stat, pvalue, *_ = adfuller(series, autolag='AIC')
+    return stat, pvalue
+
+# Wrapper for Phillips–Perron test using arch.unitroot
+def _pp_test_fn(series: pd.Series):
+    """Phillips–Perron test for unit root (null: unit root)."""
+    test = PhillipsPerron(series)
+    return float(test.stat), float(test.pvalue)
+
+def _rur_test_fn(series: pd.Series):
+    """Range Unit Root (RUR) test for stationarity (null: stationary)."""
+    # range_unit_root_test may return an object or tuple
+    result = range_unit_root_test(series)
+    # If result has attributes stat and pvalue
+    if hasattr(result, 'stat') and hasattr(result, 'pvalue'):
+        return float(result.stat), float(result.pvalue)
+    # If result is tuple-like
+    try:
+        return result[0], result[1]
+    except Exception:
+        raise ValueError('Unexpected RUR test output format')
 
 # Dictionary of stationarity diagnostic tests
-stationarity_test_dict: Dict[str, Any] = {
-    'ADF': lambda s: adfuller(s.dropna(), autolag='AIC'),
-    'PP': lambda s: (  # Phillips–Perron unit-root test
-        (lambda pp: (pp.stat, pp.pvalue))(PhillipsPerron(s.dropna()))
-    )
+stationarity_test_dict: Dict[str, Callable] = {
+    'ADF': _adf_test_fn,
+    'PP': _pp_test_fn,
+    'KPSS': _kpss_test_fn,
+    'ZA': _za_test_fn,
+    'DFGLS': _dfgls_test_fn,
+    'RUR': _rur_test_fn
 }
-
-# def _adf_test_fn(series: pd.Series):
-#     """ADF unit-root test wrapper for pickling."""
-#     res = adfuller(series.dropna(), autolag="AIC")
-#     return res
-
-# def _pp_test_fn(series: pd.Series):
-#     """Phillips–Perron test wrapper for pickling."""
-#     pp = PhillipsPerron(series.dropna())
-#     return pp.stat, pp.pvalue
-
-# # then replace
-# stationarity_test_dict = {
-#     'ADF': _adf_test_fn,
-#     'PP':  _pp_test_fn
-# }
 
 class StationarityTest(ModelTestBase):
     """
@@ -414,26 +655,33 @@ class StationarityTest(ModelTestBase):
     ----------
     series : Optional[pd.Series]
         Time series to test for stationarity.
-    alpha  : float or Dict[str, float]
-        Significance level(s) for test(s); default is 0.05.
     test_dict : Dict[str, callable]
-        Mapping of test names to functions; default is {'adf': adfuller}.
-    model : Optional[ModelBase]
-        Optional, a ModelBase instance whose residuals or target can be tested.
+        Mapping of test names to functions; default is {'adf': adfuller}..
     """
     category = 'assumption'
 
+    # Thresholds and directions: (alpha, direction)
+    threshold_defs = {
+        'ADF': (0.05, '<'),
+        'PP': (0.05, '<'),
+        'KPSS': (0.05, '>'),
+        'ZA': (0.05, '<'),
+        'DFGLS': (0.05, '<'),
+        'RUR': (0.05, '>' )
+    }
+
     def __init__(
         self,
-        series: pd.Series,
-        alpha: Union[float, Dict[str, float]] = 0.05,
+        series: Union[np.ndarray, pd.Series, list],
         alias: Optional[str] = None,
-        filter_mode: str = 'moderate'
+        filter_mode: str = 'strict',
+        test_dict: Optional[Dict[str, Callable]] = None,
+        filter_on: bool = True
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode)
-        self.series = series
-        self.alpha = alpha
-        self.test_dict = stationarity_test_dict
+        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        self.series = pd.Series(series)
+        self.test_dict = test_dict if test_dict is not None else stationarity_test_dict
+        self.thresholds = self.threshold_defs
         self.filter_mode_descs = {
             'strict':   'All stationarity tests must pass.',
             'moderate': 'At least half of stationarity tests must pass.'
@@ -451,18 +699,19 @@ class StationarityTest(ModelTestBase):
         │ PP   │   …      │   …     │  True  │
         └──────┴──────────┴─────────┴────────┘
         """
-        rows = []
-        for name, fn in self.test_dict.items():
-            stat, pvalue = fn(self.series)[0:2]
-            level = self.alpha[name] if isinstance(self.alpha, dict) else self.alpha
-            passed = pvalue < level
-            rows.append({
+        records = []
+        for name, func in self.test_dict.items():
+            stat, pvalue = func(self.series)
+            alpha, direction = self.thresholds[name]
+            passed = pvalue < alpha if direction == '<' else pvalue > alpha
+            records.append({
                 'Test': name,
                 'Statistic': stat,
                 'P-value': pvalue,
                 'Passed': passed
             })
-        return pd.DataFrame(rows).set_index('Test')
+        df = pd.DataFrame(records).set_index('Test')
+        return df
 
     @property
     def test_filter(self) -> bool:
@@ -471,12 +720,12 @@ class StationarityTest(ModelTestBase):
         - strict:  all tests must pass
         - moderate: at least half of tests must pass
         """
-        df = self.test_result
-        passed = df['Passed']
+        results = self.test_result['Passed']
+        passed_count = int(results.sum())
+        total = len(results)
         if self.filter_mode == 'strict':
-            return passed.all()
-        # moderate
-        return passed.sum() >= len(passed) / 2
+            return passed_count == total
+        return passed_count >= (total / 2)
     
 
     @property
@@ -527,10 +776,10 @@ class StationarityTest(ModelTestBase):
 
 
 # ----------------------------------------------------------------------------
-# SignificanceTest class
+# PvalueTest class
 # ----------------------------------------------------------------------------
 
-class SignificanceTest(ModelTestBase):
+class PvalueTest(ModelTestBase):
     """
     Concrete test for checking coefficient significance of model parameters.
 
@@ -551,9 +800,10 @@ class SignificanceTest(ModelTestBase):
         pvalues: pd.Series,
         alpha: float = 0.05,
         alias: Optional[str] = None,
-        filter_mode: str = 'moderate'
+        filter_mode: str = 'moderate',
+        filter_on: bool = True
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode)
+        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
         self.pvalues = pvalues
         self.alpha = alpha
         self.filter_mode_descs = {
@@ -600,7 +850,7 @@ class FTest(ModelTestBase):
         'strict'   → p-value < alpha;
         'moderate' → p-value < 2*alpha.
     """
-    category = 'group'
+    category = 'performance'
 
     def __init__(
         self,
@@ -608,9 +858,10 @@ class FTest(ModelTestBase):
         vars: list,
         alpha: float = 0.05,
         alias: Optional[str] = None,
-        filter_mode: str = 'moderate'
+        filter_mode: str = 'moderate',
+        filter_on: bool = True
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode)
+        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
         self.model_result = model_result
         self.vars = vars
         self.alpha = alpha
@@ -646,3 +897,66 @@ class FTest(ModelTestBase):
         Return True if the F-test p-value meets threshold for filter_mode.
         """
         return bool(self.test_result['Passed'].iloc[0])
+
+
+# ----------------------------------------------------------------------------
+# VIF Test for Multicollinearity
+# ----------------------------------------------------------------------------
+
+class VIFTest(ModelTestBase):
+    """
+    Test for multicollinearity by computing Variance Inflation Factors (VIF) for each predictor.
+
+    Parameters
+    ----------
+    exog : array-like or pandas.DataFrame
+        Exogenous regressors (design matrix) including an intercept if appropriate.
+    alias : str, optional
+        Label for this test. If None, uses `self.name`.
+    filter_mode : {'strict', 'moderate'}, default 'strict'
+        - 'strict': threshold = 5
+        - 'moderate': threshold = 10
+    """
+    def __init__(
+        self,
+        exog: Union[np.ndarray, pd.DataFrame, list],
+        alias: Optional[str] = None,
+        filter_mode: str = 'strict',
+        filter_on: bool = True
+    ):
+        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        self.exog = pd.DataFrame(exog)
+        self.filter_mode_descs = {
+        'strict': 'Threshold = 5',
+        'moderate': 'Threshold = 10'
+        }
+        self.filter_mode_desc = self.filter_mode_descs[self.filter_mode]
+
+    @property
+    def test_result(self) -> pd.DataFrame:
+        """
+        Compute VIF for each variable.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Index: variable names
+            Columns: 'VIF'
+        """
+        vif_values = []
+        X = self.exog.values
+        cols = self.exog.columns
+        for i, col in enumerate(cols):
+            vif = float(variance_inflation_factor(X, i))
+            vif_values.append({'VIF': vif})
+        df = pd.DataFrame(vif_values, index=cols)
+        df.index.name = 'Variable'
+        return df
+
+    @property
+    def test_filter(self) -> bool:
+        """
+        Passes if all VIFs are below the threshold implied by filter_mode.
+        """
+        threshold = 5.0 if self.filter_mode == 'strict' else 10.0
+        return (self.test_result['VIF'] <= threshold).all()
