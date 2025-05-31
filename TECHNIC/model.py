@@ -243,6 +243,23 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
         filter_on=False
     )
 
+    # --- Target Stationarity & Cointegration ---
+    # 1) Check if Y itself is stationary
+    input_y = mdl.y.copy()
+    y_stat = StationarityTest(
+        series=input_y,
+        filter_mode='moderate',
+        filter_on=False
+    )
+    tests['Y Stationarity'] = y_stat
+
+    # 2) If Y is nonstationary, test cointegration of Y with all X
+    if not y_stat.test_filter:
+        tests['Y–X Cointegration'] = CointTest(
+            y=mdl.y.copy(),
+            X=mdl.X.copy(),
+            filter_mode='moderate'
+        )
 
     return tests
 
@@ -282,14 +299,20 @@ class OLS(ModelBase):
         self.y_fitted_in = None
         self.resid = None
         self.bse = None
+        self.tvalues = None
         self.vif = None
+        # track covariance type
+        self.cov_type: str = 'OLS'
+        self.is_fitted = False
 
     def fit(self) -> 'OLS':
         """
-        Fit OLS and store coefficients, residuals, VIF, etc.
+        Fit OLS, detect residual issues, and if needed refit with robust covariances.
         """
+        # initial OLS fit
         Xc = sm.add_constant(self.X)
         res = sm.OLS(self.y, Xc).fit()
+        # store core attributes
         self.fitted = res
         self.params = res.params
         self.pvalues = res.pvalues
@@ -298,14 +321,52 @@ class OLS(ModelBase):
         self.y_fitted_in = res.fittedvalues
         self.resid = res.resid
         self.bse = res.bse
-        # Compute VIF on X with intercept
+        self.tvalues = res.tvalues
+        # VIF
         self.vif = pd.Series({
             col: variance_inflation_factor(Xc.values, i)
             for i, col in enumerate(Xc.columns)
         })
-        self.coefs_ = self.params
         self.is_fitted = True
-        # Automatically load testset after fitting
+
+        # Residual diagnostics
+        ac_test = AutocorrTest(
+            results=self.fitted,
+            alias='Residual Autocorrelation',
+            filter_mode='moderate'
+        )
+        het_test = HetTest(
+            resids=self.resid,
+            exog=Xc,
+            alias='Residual Heteroscedasticity',
+            filter_mode='moderate'
+        )
+        ac_fail = not ac_test.test_filter
+        het_fail = not het_test.test_filter
+
+        # Determine cov_type based on diagnostics
+        if ac_fail or het_fail:
+            if het_fail and not ac_fail:
+                # heteroskedasticity only
+                robust = self.fitted.get_robustcov_results(cov_type='HC1')
+                self.cov_type = 'HC1'
+            else:
+                # autocorrelation (with or without heteroskedasticity)
+                n = len(self.y)
+                lag = int(np.floor(4 * (n / 100) ** (2/9)))
+                robust = self.fitted.get_robustcov_results(
+                    cov_type='HAC', maxlags=lag
+                )
+                self.cov_type = f'HAC({lag})'
+            # update fitted results and inferential attributes
+            self.fitted = robust
+            # ensure pandas Series for consistency
+            idx = self.params.index
+            self.bse = pd.Series(robust.bse, index=idx)
+            self.tvalues = pd.Series(robust.tvalues, index=idx)
+            self.pvalues = pd.Series(robust.pvalues, index=idx)
+        
+        # load tests
         self.load_testset()
         return self
 

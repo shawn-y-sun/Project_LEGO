@@ -9,10 +9,11 @@ import pandas as pd
 import numpy as np
 
 from statsmodels.stats.stattools import jarque_bera, durbin_watson
-from statsmodels.stats.diagnostic import acorr_breusch_godfrey, het_breuschpagan, het_white, normal_ad
+from .helper import het_white
+from statsmodels.stats.diagnostic import acorr_breusch_godfrey, het_breuschpagan, normal_ad
 from scipy.stats import shapiro, kstest, cramervonmises
 from statsmodels.tsa.stattools import adfuller, zivot_andrews, range_unit_root_test, kpss
-from arch.unitroot import PhillipsPerron, DFGLS
+from arch.unitroot import PhillipsPerron, DFGLS, engle_granger
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 import warnings
@@ -794,6 +795,10 @@ class PvalueTest(ModelTestBase):
         'moderate' → p-value < 2*alpha.
     """
     category = 'performance'
+    filter_mode_descs = {
+        'strict':'p-value < 5%',   
+        'moderate': 'p-value < 10%'
+    }
 
     def __init__(
         self,
@@ -951,6 +956,8 @@ class VIFTest(ModelTestBase):
             vif_values.append({'VIF': vif})
         df = pd.DataFrame(vif_values, index=cols)
         df.index.name = 'Variable'
+        # drop the intercept (constant) if present
+        df = df.drop(index='const', errors='ignore')
         return df
 
     @property
@@ -960,3 +967,83 @@ class VIFTest(ModelTestBase):
         """
         threshold = 5.0 if self.filter_mode == 'strict' else 10.0
         return (self.test_result['VIF'] <= threshold).all()
+    
+# ----------------------------------------------------------------------------
+# Co-integration Test
+# ----------------------------------------------------------------------------
+
+class CointTest(ModelTestBase):
+    """
+    Test for cointegration of y with X via Engle–Granger using p-values.
+
+    Parameters
+    ----------
+    y : array-like
+        Dependent series (e.g., pd.Series).
+    X : array-like
+        Explanatory variables (2D array or DataFrame).
+    alias : str, optional
+        Label for this test. If None, uses self.name.
+    filter_mode : {'strict', 'moderate'}, default 'strict'
+        - 'strict':   require p-value < 0.05
+        - 'moderate': require p-value < 0.10
+
+    Attributes
+    ----------
+    alpha : float
+        Significance level for pass criteria (0.05 or 0.10).
+    filter_mode_descs : dict
+        Descriptions of the pass criteria for each mode.
+    """
+    category = 'assumption'
+
+    filter_mode_descs = {
+        'strict':   'Require Engle–Granger p-value < 0.05',
+        'moderate': 'Require Engle–Granger p-value < 0.10'
+    }
+
+    def __init__(
+        self,
+        y: Union[np.ndarray, pd.Series, list],
+        X: Union[np.ndarray, pd.DataFrame, list],
+        alias: Optional[str] = None,
+        filter_mode: str = 'strict'
+    ):
+        super().__init__(alias=alias, filter_mode=filter_mode)
+        # Align y and X, drop missing
+        self.y = pd.Series(y).dropna()
+        self.X = pd.DataFrame(X, index=self.y.index).dropna(axis=1, how='any')
+        # Set alpha based on mode
+        self.alpha = 0.05 if filter_mode == 'strict' else 0.10
+        self.filter_mode_desc = self.filter_mode_descs[filter_mode]
+
+    @property
+    def test_result(self) -> pd.DataFrame:
+        """
+        Run Engle-Granger and report statistic, p-value, and pass/fail.
+        """
+        try:
+            result = engle_granger(
+                self.y.values,
+                self.X.values,
+                trend='c', lags=None, max_lags=None, method='bic'
+            )
+            stat = float(result.stat)
+            pval = float(result.pvalue)
+            passed = pval < self.alpha
+        except Exception:
+            stat, pval, passed = np.nan, np.nan, False
+
+        df = pd.DataFrame([{
+            'Statistic': stat,
+            'P-value':   pval,
+            'Passed':     passed
+        }], index=[self.name])
+        return df
+
+    @property
+    def test_filter(self) -> bool:
+        """
+        Indicates whether the cointegration test passed based on alpha.
+        """
+        return bool(self.test_result['Passed'].iloc[0])
