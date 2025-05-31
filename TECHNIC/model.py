@@ -245,9 +245,8 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
 
     # --- Target Stationarity & Cointegration ---
     # 1) Check if Y itself is stationary
-    input_y = mdl.y.copy()
     y_stat = StationarityTest(
-        series=input_y,
+        series=mdl.y.copy(),
         filter_mode='moderate',
         filter_on=False
     )

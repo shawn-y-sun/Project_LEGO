@@ -786,39 +786,42 @@ class PvalueTest(ModelTestBase):
 
     Parameters
     ----------
-    alpha : float, optional
-        Significance level for p-value (default=0.05 strict).
+    pvalues : pd.Series
+        Series of p-values for each coefficient.
     alias : str, optional
-        Display name for this test (defaults to 'SignificanceTest').
+        Display name for this test (defaults to class name).
     filter_mode : {'strict','moderate'}, default 'moderate'
-        'strict'   → p-value < alpha;
-        'moderate' → p-value < 2*alpha.
+        - 'strict'   → require p-value < 0.05 for all.
+        - 'moderate' → require p-value < 0.10 for all.
     """
     category = 'performance'
+
+    # Updated descriptions
     filter_mode_descs = {
-        'strict':'p-value < 5%',   
-        'moderate': 'p-value < 10%'
+        'strict':   'Require p-value < 0.05 for all coefficients.',
+        'moderate': 'Require p-value < 0.10 for all coefficients.'
     }
 
     def __init__(
         self,
         pvalues: pd.Series,
-        alpha: float = 0.05,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
         filter_on: bool = True
     ):
         super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
         self.pvalues = pvalues
-        self.alpha = alpha
-        self.filter_mode_descs = {
-            'strict':   f'Require p < {alpha} for all.',
-            'moderate': f'Require p < {alpha*2} for at least half.'
-        }
-        self.filter_mode_desc = self.filter_mode_descs[self.filter_mode]
+        # Set α based on mode
+        self.alpha = 0.05 if filter_mode == 'strict' else 0.10
+        self.filter_mode_desc = self.filter_mode_descs[filter_mode]
 
     @property
     def test_result(self) -> pd.DataFrame:
+        """
+        Returns a DataFrame with columns:
+          - 'P-value': the original p-values
+          - 'Passed' : True if p-value < α
+        """
         df = pd.DataFrame({
             'P-value': self.pvalues,
             'Passed':  self.pvalues < self.alpha
@@ -827,10 +830,10 @@ class PvalueTest(ModelTestBase):
 
     @property
     def test_filter(self) -> bool:
-        passed = self.test_result['Passed']
-        if self.filter_mode == 'strict':
-            return passed.all()
-        return passed.sum() >= len(passed) / 2
+        """
+        All coefficients must pass (p-value < α) to pass the test.
+        """
+        return self.test_result['Passed'].all()
 
 
 # ----------------------------------------------------------------------------
