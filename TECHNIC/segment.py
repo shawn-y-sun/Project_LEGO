@@ -260,6 +260,7 @@ class Segment:
         max_periods: int = 3,
         rank_weights: Tuple[float, float, float] = (1, 1, 1),
         test_update_func: Optional[Callable] = None,
+        outlier_idx: Optional[List[Any]] = None,
         add_in: bool = True
     ) -> List[CM]:
         """
@@ -276,8 +277,9 @@ class Segment:
                              Weights for (Fit Measures, IS Error, OOS Error) when ranking.
         :param test_update_func:
                              Optional function to update each CM’s testset.
-        :param add_to_segment:
-                             If True, add the resulting top CMs into `self.cms`.
+        :param outlier_index:
+                            List of index labels (e.g. timestamps or keys) corresponding to outliers
+        :param add_in:     If True, add the resulting top CMs into `self.cms`.
         :return:           List of the top_n passing CM instances.
         """
         # 1) Reuse existing searcher if present, else create & store one
@@ -295,7 +297,8 @@ class Segment:
             max_lag=max_lag,
             max_periods=max_periods,
             rank_weights=rank_weights,
-            test_update_func=test_update_func
+            test_update_func=test_update_func,
+            outlier_idx=outlier_idx
         )
 
         # 3) Collect the top_n results from the searcher

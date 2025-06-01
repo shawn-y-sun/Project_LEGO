@@ -420,3 +420,6 @@ class OLS(ModelBase):
             'mae': float(np.mean(np.abs(errors))),
             'rmse': float(np.sqrt((errors ** 2).mean()))
         }
+
+    def __repr__(self) -> str:
+        return f'OLS'

@@ -311,11 +311,22 @@ class R2Test(ModelTestBase):
         super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
         self.r2 = r2
         self.thresholds = thresholds
-        self.filter_mode_descs = {
+        # self.filter_mode_descs = {
+        #     'strict':   f"Require R² ≥ {self.thresholds['strict']}.",
+        #     'moderate': f"Require R² ≥ {self.thresholds['moderate']}."
+        # }
+        # self.filter_mode_desc = self.filter_mode_descs[self.filter_mode]
+    
+    @property
+    def filter_mode_descs(self):
+        return {
             'strict':   f"Require R² ≥ {self.thresholds['strict']}.",
             'moderate': f"Require R² ≥ {self.thresholds['moderate']}."
         }
-        self.filter_mode_desc = self.filter_mode_descs[self.filter_mode]
+    
+    @property
+    def filter_mode_desc(self):
+        return self.filter_mode_descs[self.filter_mode]
 
     @property
     def test_result(self) -> pd.Series:
@@ -392,6 +403,10 @@ class AutocorrTest(ModelTestBase):
         self.test_funcs = test_dict if test_dict is not None else autocorr_test_dict
         # assign thresholds
         self.thresholds = self.threshold_defs
+    
+    @property
+    def filter_mode_desc(self):
+        return self.filter_mode_descs[self.filter_mode]
 
     @property
     def test_result(self) -> pd.DataFrame:
@@ -499,6 +514,10 @@ class HetTest(ModelTestBase):
         self.exog = np.asarray(exog)
         self.test_funcs = test_dict if test_dict is not None else het_test_dict
         self.thresholds = self.threshold_defs
+    
+    @property
+    def filter_mode_desc(self):
+        return self.filter_mode_descs[self.filter_mode]
 
     @property
     def test_result(self) -> pd.DataFrame:
@@ -559,7 +578,10 @@ class NormalityTest(ModelTestBase):
             'strict':   'All normality tests must pass.',
             'moderate': 'At least half of normality tests must pass.'
         }
-        self.filter_mode_desc = self.filter_mode_descs[self.filter_mode]
+    
+    @property
+    def filter_mode_desc(self):
+        return self.filter_mode_descs[self.filter_mode]
 
     @property
     def test_result(self) -> pd.DataFrame:
@@ -687,7 +709,10 @@ class StationarityTest(ModelTestBase):
             'strict':   'All stationarity tests must pass.',
             'moderate': 'At least half of stationarity tests must pass.'
         }
-        self.filter_mode_desc = self.filter_mode_descs[self.filter_mode]
+    
+    @property
+    def filter_mode_desc(self):
+        return self.filter_mode_descs[self.filter_mode]
 
     @property
     def test_result(self) -> pd.DataFrame:
@@ -813,7 +838,10 @@ class PvalueTest(ModelTestBase):
         self.pvalues = pvalues
         # Set α based on mode
         self.alpha = 0.05 if filter_mode == 'strict' else 0.10
-        self.filter_mode_desc = self.filter_mode_descs[filter_mode]
+    
+    @property
+    def filter_mode_desc(self):
+        return self.filter_mode_descs[self.filter_mode]
 
     @property
     def test_result(self) -> pd.DataFrame:
@@ -873,12 +901,17 @@ class FTest(ModelTestBase):
         self.model_result = model_result
         self.vars = vars
         self.alpha = alpha
-        # set per-mode descriptions
-        self.filter_mode_descs = {
+    
+    @property
+    def filter_mode_descs(self):
+        return {
             'strict':   f"F-test p < {self.alpha} for group {vars}.",
             'moderate': f"F-test p < {self.alpha*2} for group {vars}."
         }
-        self.filter_mode_desc = self.filter_mode_descs[self.filter_mode]
+    
+    @property
+    def filter_mode_desc(self):
+        return self.filter_mode_descs[self.filter_mode]
 
     @property
     def test_result(self) -> pd.DataFrame:
@@ -938,7 +971,10 @@ class VIFTest(ModelTestBase):
         'strict': 'Threshold = 5',
         'moderate': 'Threshold = 10'
         }
-        self.filter_mode_desc = self.filter_mode_descs[self.filter_mode]
+    
+    @property
+    def filter_mode_desc(self):
+        return self.filter_mode_descs[self.filter_mode]
 
     @property
     def test_result(self) -> pd.DataFrame:
@@ -1018,7 +1054,10 @@ class CointTest(ModelTestBase):
         self.X = pd.DataFrame(X, index=self.y.index).dropna(axis=1, how='any')
         # Set alpha based on mode
         self.alpha = 0.05 if filter_mode == 'strict' else 0.10
-        self.filter_mode_desc = self.filter_mode_descs[filter_mode]
+    
+    @property
+    def filter_mode_desc(self):
+        return self.filter_mode_descs[self.filter_mode]
 
     @property
     def test_result(self) -> pd.DataFrame:

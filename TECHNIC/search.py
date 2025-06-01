@@ -145,7 +145,8 @@ class ModelSearch:
         model_id: str,
         specs: List[Union[str, TSFM, Feature, Tuple[Any, ...]]],
         sample: str = 'in',
-        test_update_func: Optional[Callable[[ModelBase], dict]] = None
+        test_update_func: Optional[Callable[[ModelBase], dict]] = None,
+        outlier_idx: Optional[List[Any]] = None
     ) -> Union[CM, Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]]:
         """
         Build and assess a single spec combo via CM.build(), reload tests, and TestSet.filter_pass().
@@ -160,6 +161,11 @@ class ModelSearch:
             Which sample to fit and test; do not use 'both'.
         test_update_func : callable, optional
             Function to update/regenerate the testset for the fitted model.
+        outlier_idx : List[Any], optional
+            List of index labels (e.g. timestamps or keys) corresponding to outlier
+            records to remove from the in-sample data. If provided and `build_in`
+            is True, each label must exist within the in-sample period; otherwise,
+            a ValueError is raised.
 
         Returns
         -------
@@ -173,7 +179,7 @@ class ModelSearch:
 
         # Build the candidate model
         cm = CM(model_id=model_id, target=self.target, model_cls=self.model_cls)
-        cm.build(specs, sample=sample, data_manager=self.dm)
+        cm.build(specs, sample=sample, data_manager=self.dm, outlier_idx=outlier_idx)
         mdl = cm.model_in if sample == 'in' else cm.model_full
 
         # Reload testset, applying update if provided
@@ -189,7 +195,8 @@ class ModelSearch:
         self,
         model_id_prefix: str = 'cm',
         sample: str = 'in',
-        test_update_func: Optional[Callable[[ModelBase], dict]] = None
+        test_update_func: Optional[Callable[[ModelBase], dict]] = None,
+        outlier_idx: Optional[List[Any]] = None
     ) -> Tuple[List[CM], List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]]]:
         """
         Assess all built spec combos and separate passed and failed results,
@@ -203,6 +210,11 @@ class ModelSearch:
             Sample to use for all assessments (default 'in').
         test_update_func : callable, optional
             Function to update/regenerate the testset for each model.
+        outlier_idx : List[Any], optional
+            List of index labels (e.g. timestamps or keys) corresponding to outlier
+            records to remove from the in-sample data. If provided and `build_in`
+            is True, each label must exist within the in-sample period; otherwise,
+            a ValueError is raised.
 
         Returns
         -------
@@ -220,7 +232,7 @@ class ModelSearch:
         bar = tqdm(total=total, desc="Filtering Specs")
         for i, specs in enumerate(self.all_specs):
             model_id = f"{model_id_prefix}{i}"
-            result = self.assess_spec(model_id, specs, sample, test_update_func)
+            result = self.assess_spec(model_id, specs, sample, test_update_func, outlier_idx)
             if isinstance(result, CM):
                 passed_cms.append(result)
             else:
@@ -318,7 +330,8 @@ class ModelSearch:
         max_lag: int = 3,
         max_periods: int = 3,
         rank_weights: Tuple[float, float, float] = (1.0, 1.0, 1.0),
-        test_update_func: Optional[Callable[[ModelBase], dict]] = None
+        test_update_func: Optional[Callable[[ModelBase], dict]] = None,
+        outlier_idx: Optional[List[Any]] = None
     ) -> List[CM]:
         """
         Execute full search pipeline: build specs, filter, rank, and select top_n models.
@@ -370,7 +383,8 @@ class ModelSearch:
         # 4) Filter specs
         passed, failed = self.filter_specs(
             sample=sample,
-            test_update_func=test_update_func
+            test_update_func=test_update_func,
+            outlier_idx=outlier_idx
         )
         self.passed_cms = passed
         self.failed_info = failed
