@@ -39,6 +39,7 @@ class ModelSearch:
         self.all_specs: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
         self.passed_cms: List[CM] = []
         self.failed_info: List[Tuple[List[Any], List[str]]] = []
+        self.error_log: List[Tuple[List[Any], str, str]] = []
         self.df_scores: Optional[pd.DataFrame] = None
         self.top_cms: List[CM] = []
     
@@ -225,6 +226,8 @@ class ModelSearch:
         """
         passed_cms: List[CM] = []
         failed_info: List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]] = []
+        error_log: List[Tuple[List[Any], str, str]] = []
+
         total = len(self.all_specs)
         start_time = time.time()
  
@@ -232,11 +235,20 @@ class ModelSearch:
         bar = tqdm(total=total, desc="Filtering Specs")
         for i, specs in enumerate(self.all_specs):
             model_id = f"{model_id_prefix}{i}"
-            result = self.assess_spec(model_id, specs, sample, test_update_func, outlier_idx)
-            if isinstance(result, CM):
-                passed_cms.append(result)
-            else:
-                failed_info.append(result)
+            try:
+                result = self.assess_spec(
+                    model_id,
+                    specs,
+                    sample,
+                    test_update_func,
+                    outlier_idx=outlier_idx
+                )
+                if isinstance(result, CM):
+                    passed_cms.append(result)
+                else:
+                    failed_info.append(result)
+            except Exception as e:
+                error_log.append((specs, type(e).__name__, str(e)))
  
             # ETA update
             processed = bar.n + 1
@@ -252,7 +264,7 @@ class ModelSearch:
             bar.set_postfix(estimated_finish=eta)
             bar.update(1)
         bar.close()
-        return passed_cms, failed_info
+        return passed_cms, failed_info, error_log
 
     @staticmethod
     def rank_cms(
@@ -381,18 +393,19 @@ class ModelSearch:
             print()
 
         # 4) Filter specs
-        passed, failed = self.filter_specs(
+        passed, failed, errors = self.filter_specs(
             sample=sample,
             test_update_func=test_update_func,
             outlier_idx=outlier_idx
         )
         self.passed_cms = passed
         self.failed_info = failed
+        self.error_log = errors
         # Early exit if nothing passed
         if not self.passed_cms:
             print("\n⚠️  No candidate models passed the filter tests. Search terminated.\n")
             return
-        print(f"Passed {len(passed)} combos; Failed {len(failed)} combos.\n")
+        print(f"Passed {len(passed)} combos; Failed {len(failed)} combos; {len(errors)} errors.\n")
 
         # 5. Rank models
         df = ModelSearch.rank_cms(passed, sample, rank_weights)
@@ -419,3 +432,187 @@ class ModelSearch:
         for cm in self.top_cms:
             print(f"{cm.model_id}: {cm.formula}")
         # No return; results are stored in self
+    
+    def analyze_failures(self) -> None:
+        """
+        Analyze self.failed_info and print a summary of failed spec combos.
+
+        1. Print total number of failed spec combinations.
+        2. Count how many times each test appears across all failures,
+           then display a DataFrame of test names and counts (descending).
+        3. For the top 5 most frequent failed tests, identify which 3 spec
+           elements are most commonly present in combos that failed that test.
+           
+        Assumes self.failed_info is a list of tuples:
+            (specs: List[Union[str, TSFM, Feature, Tuple[Any, ...]]],
+             failed_tests: List[str])
+        """
+        import pandas as pd
+        from collections import Counter
+        
+        # 1) Total number of failed spec combinations
+        total_failed = len(self.failed_info)
+        print(f"\n=== Failed Spec Combinations Analysis ===")
+        print(f"Total failed spec combos: {total_failed}\n")
+        
+        if total_failed == 0:
+            print("No failures to analyze.")
+            return
+        
+        # 2) Count occurrences of each failed test
+        # ------------------------------------------
+        # Collect all failed test names into a single list
+        all_failed_tests = []
+        for combo, failed_tests in self.failed_info:
+            all_failed_tests.extend(failed_tests)
+        
+        # Count how many times each test appears
+        test_counter = Counter(all_failed_tests)
+        
+        # Create a DataFrame for clear display
+        df_test_counts = (
+            pd.DataFrame.from_records(
+                list(test_counter.items()),
+                columns=["Test Name", "Failure Count"]
+            )
+            .sort_values(by="Failure Count", ascending=False)
+            .reset_index(drop=True)
+        )
+        
+        print("1) Failure counts by test:")
+        print(df_test_counts.to_string(index=False))
+        print("\n")
+        
+        # 3) Analyze top 5 most frequent failed tests
+        # --------------------------------------------
+        top_tests = df_test_counts["Test Name"].head(5).tolist()
+        print("2) Top 5 most frequent failed tests and their common spec elements:\n")
+        
+        for test_name in top_tests:
+            # Gather specs for combos that failed this particular test
+            related_specs = [
+                combo
+                for combo, failed_tests in self.failed_info
+                if test_name in failed_tests
+            ]
+            # Flatten the list of spec combos into individual elements
+            element_counter = Counter()
+            for combo in related_specs:
+                for element in combo:
+                    # Convert each spec element to string for consistent counting
+                    element_counter[str(element)] += 1
+            
+            # Find the top 3 most common spec elements for this failure
+            top_elements = element_counter.most_common(3)
+            
+            # Print results in a structured way
+            print(f"  Test: {test_name}")
+            print(f"    Number of combos that failed this test: {len(related_specs)}")
+            print("    Top 3 spec elements contributing to this failure:")
+            for elem, count in top_elements:
+                print(f"      • {elem}  (appeared in {count} combos)")
+            print("")  # Blank line between tests
+
+    def analyze_errors(self) -> None:
+        """
+        Analyze self.error_log and print a summary of spec combinations that raised errors.
+
+        Assumes self.error_log is a list of tuples:
+            (specs: List[Union[str, TSFM, Feature, Tuple[Any, ...]]],
+             error_type: str,
+             error_message: str)
+
+        Steps:
+        1. Print total number of spec combos with errors.
+        2. Count how many times each error_type appears, then display a DataFrame
+           of error types and counts (descending).
+        3. For each error_type, list the top 10 most common error_messages with counts,
+           and for each (error_type, error_message) pair, identify the 3 most common
+           spec elements associated with those combos.
+        """
+        import pandas as pd
+        from collections import Counter, defaultdict
+
+        # 1) Total spec combos that had errors
+        total_errors = len(self.error_log)
+        print(f"\n=== Error Log Analysis ===")
+        print(f"Total spec combos with errors: {total_errors}\n")
+
+        if total_errors == 0:
+            print("No errors to analyze.")
+            return
+
+        # 2) Count occurrences of each error_type
+        # ----------------------------------------
+        error_types = [err_type for _, err_type, _ in self.error_log]
+        type_counter = Counter(error_types)
+
+        # Build DataFrame for error_type counts
+        df_type_counts = (
+            pd.DataFrame.from_records(
+                list(type_counter.items()),
+                columns=["Error Type", "Occurrence Count"]
+            )
+            .sort_values(by="Occurrence Count", ascending=False)
+            .reset_index(drop=True)
+        )
+
+        print("1) Error types and their occurrence counts:")
+        print(df_type_counts.to_string(index=False))
+        print("\n")
+
+        # 3) For each error_type, analyze top messages and associated spec elements
+        # ----------------------------------------------------------------------------
+        # Organize error entries by type
+        errors_by_type = defaultdict(list)
+        for specs, err_type, err_msg in self.error_log:
+            errors_by_type[err_type].append((specs, err_msg))
+
+        print("2) Detailed breakdown for each error type:\n")
+
+        # Iterate through each error_type in descending order of frequency
+        for err_type, count in df_type_counts.itertuples(index=False, name=None):
+            print(f"Error Type: {err_type} (Total occurrences: {count})")
+
+            # Collect all messages for this error_type
+            messages = [err_msg for _, err_msg in errors_by_type[err_type]]
+            msg_counter = Counter(messages)
+
+            # Prepare DataFrame of top 10 error messages
+            top_msgs = msg_counter.most_common(10)
+            df_msg_counts = (
+                pd.DataFrame.from_records(
+                    top_msgs,
+                    columns=["Error Message", "Count"]
+                )
+                .reset_index(drop=True)
+            )
+
+            print("  a) Top 10 error messages for this type:")
+            print(df_msg_counts.to_string(index=False))
+            print("")
+
+            # For each top error message, find 3 most common spec elements
+            for err_msg, msg_count in top_msgs:
+                # Gather spec lists where this err_type and err_msg co-occur
+                related_specs = [
+                    specs
+                    for specs, msg in errors_by_type[err_type]
+                    if msg == err_msg
+                ]
+
+                # Flatten and count individual spec elements
+                element_counter = Counter()
+                for combo in related_specs:
+                    for elem in combo:
+                        element_counter[str(elem)] += 1
+
+                top_elements = element_counter.most_common(3)
+
+                print(f"    Error Message: \"{err_msg}\" (Count: {msg_count})")
+                print(f"      Top 3 spec elements associated with this message:")
+                for elem, elem_count in top_elements:
+                    print(f"        • {elem}  (in {elem_count} combos)")
+                print("")
+
+            print("------------------------------------------------------------\n")
