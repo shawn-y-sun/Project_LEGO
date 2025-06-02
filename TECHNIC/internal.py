@@ -142,40 +142,6 @@ class InternalDataLoader:
             df.index = idx
 
         df.sort_index(inplace=True)
-        return self._add_period_dummies(df)
-
-    def _add_period_dummies(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Append quarter and month dummy variables based on DataFrame index.
-
-        Quarter dummies: Q1, Q2, Q3, Q4
-        Monthly dummies (if freq='M'): M1, M2, ..., M12
-
-        Existing dummy columns are dropped first to avoid duplication.
-        """
-        df = df.copy()
-        # Define dummy column names
-        q_cols = [f"Q{i}" for i in range(1, 5)]
-        m_cols = [f"M{i}" for i in range(1, 13)] if self.freq.upper() == 'M' else []
-
-        # Drop any existing dummy columns
-        drop_cols = [col for col in q_cols + m_cols if col in df.columns]
-        if drop_cols:
-            df = df.drop(columns=drop_cols)
-
-        # Quarter dummies
-        quarters = df.index.quarter
-        qd = pd.get_dummies(quarters, prefix='Q', prefix_sep='')
-        qd.index = df.index
-        df = pd.concat([df, qd], axis=1)
-
-        # Monthly dummies
-        if self.freq.upper() == 'M':
-            months = df.index.month
-            md = pd.get_dummies(months, prefix='M', prefix_sep='')
-            md.index = df.index
-            df = pd.concat([df, md], axis=1)
-
         return df
 
     @property
