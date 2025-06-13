@@ -3,7 +3,7 @@
 # Purpose: Candidate Model wrapper managing in-sample, out-of-sample,
 #          and full-sample fitting, handling outliers, and exposing reports
 # Dependencies: pandas, numpy, typing, .model.ModelBase, .feature.Feature,
-#               .feature.DumVar
+#               .feature.DumVar, .scenario.ScenManager
 # =============================================================================
 
 import warnings
@@ -16,6 +16,7 @@ from typing import Type, List, Dict, Any, Optional, Union, Tuple
 
 from .model import ModelBase
 from .feature import DumVar, Feature
+from .scenario import ScenManager
 
 
 class CM:
@@ -48,6 +49,10 @@ class CM:
         In-sample fitted model instance.
     model_full : Optional[ModelBase]
         Full-sample fitted model instance.
+    scen_manager_in : Optional[ScenManager]
+        Scenario manager for in-sample model.
+    scen_manager_full : Optional[ScenManager]
+        Scenario manager for full-sample model.
     """
 
     def __init__(
@@ -167,33 +172,25 @@ class CM:
         build_in = sample in {'in', 'both'}
         build_full = sample in {'full', 'both'}
 
-        # Determine in-sample start and cutoff indices
-        start_idx = dm.in_sample_start if dm.in_sample_start is not None else dm.internal_data.index[0]
-        cutoff = dm.in_sample_end
+        # Get the union of in-sample and out-of-sample indices
+        idx = dm._internal_loader.in_sample_idx.union(dm._internal_loader.out_sample_idx)
 
         # Prepare full DataFrame X_full and Series y_full
         X_full = dm.build_features(specs)
         y_full = dm.internal_data[self.target].copy()
-        idx = dm.internal_data.index
 
-        # Align to index and subset for the full period
-        X_full = X_full.reindex(idx).astype(float).loc[start_idx:]
-        y_full = y_full.reindex(idx).astype(float).loc[start_idx:]
+        # Align to index
+        X_full = X_full.reindex(idx).astype(float)
+        y_full = y_full.reindex(idx).astype(float)
 
         # Validate full-sample data
         self._validate_data(X_full, y_full)
 
-        # Split into in-sample and out-of-sample
-        if cutoff is not None:
-            X_in = X_full.loc[start_idx:cutoff].copy()
-            y_in = y_full.loc[start_idx:cutoff].copy()
-            X_out = X_full.loc[cutoff + pd.Timedelta(days=1):].copy()
-            y_out = y_full.loc[cutoff + pd.Timedelta(days=1):].copy()
-        else:
-            X_in = X_full.copy()
-            y_in = y_full.copy()
-            X_out = pd.DataFrame()
-            y_out = pd.Series(dtype=float)
+        # Split into in-sample and out-of-sample using DataLoader indices
+        X_in = X_full.loc[dm._internal_loader.in_sample_idx].copy()
+        y_in = y_full.loc[dm._internal_loader.in_sample_idx].copy()
+        X_out = X_full.loc[dm._internal_loader.out_sample_idx].copy()
+        y_out = y_full.loc[dm._internal_loader.out_sample_idx].copy()
 
         # If in-sample fit is requested, remove specified outliers
         if build_in and outlier_idx:
@@ -230,6 +227,17 @@ class CM:
                 y_out=y_out,
                 spec_map=self.spec_map
             ).fit()
+            
+            # Create ScenManager for in-sample model
+            self.scen_manager_in = ScenManager(
+                dm=dm,
+                model=self.model_in,
+                specs=specs,
+                P0=dm._internal_loader.in_sample_end,
+                target=self.target
+            )
+            # Attach ScenManager to model_in
+            self.model_in.scen_manager = self.scen_manager_in
 
         # Fit full-sample model (no model_id argument)
         if build_full:
@@ -240,6 +248,17 @@ class CM:
                 y_out=y_out,
                 spec_map=self.spec_map
             ).fit()
+            
+            # Create ScenManager for full-sample model
+            self.scen_manager_full = ScenManager(
+                dm=dm,
+                model=self.model_full,
+                specs=specs,
+                P0=dm._internal_loader.in_sample_end,
+                target=self.target
+            )
+            # Attach ScenManager to model_full
+            self.model_full.scen_manager = self.scen_manager_full
 
     @property
     def spec_map(self) -> Dict[str, List[Union[str, Tuple[str, ...]]]]:
