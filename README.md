@@ -1,8 +1,75 @@
 # Project LEGO
 
-**Project LEGO** is a modular Python package for building, evaluating, reporting, and exporting OLS-based candidate models via a standardized pipeline.
+<div align="center">
 
----
+![Project LEGO](https://img.shields.io/badge/Project-LEGO-blue)
+![Python](https://img.shields.io/badge/Python-3.7%2B-blue)
+![License](https://img.shields.io/badge/License-MIT-green)
+
+**A comprehensive Python framework for OLS-based financial modeling with advanced scenario analysis**
+
+</div>
+
+## 📋 Table of Contents
+- [Overview](#-overview)
+- [Features](#-features)
+- [Installation](#-installation)
+- [Quick Start](#-quick-start)
+- [Architecture](#-architecture)
+- [Core Components](#-core-components)
+- [Scenario Analysis](#-scenario-analysis)
+- [Usage Examples](#-usage-examples)
+- [Contributing](#-contributing)
+- [License](#-license)
+
+## 📖 Overview
+
+**Project LEGO** is a comprehensive Python framework designed for building, evaluating, and deploying OLS-based candidate models through a standardized pipeline. It specializes in financial modeling, particularly PPNR (Pre-Provision Net Revenue) analysis, with built-in support for advanced scenario analysis, model validation, and comprehensive reporting.
+
+The framework follows a modular "LEGO-like" architecture where components can be easily assembled, modified, and extended to suit specific modeling needs. Recent enhancements include sophisticated scenario management, enhanced data handling for both time series and panel data, and integrated plotting capabilities.
+
+## ✨ Features
+
+- **Advanced Data Management**
+  - Unified handling of internal data and macro-economic variables (MEVs)
+  - Support for both time series and panel data structures
+  - Flexible data loaders with configurable sampling periods
+  - Automated data interpolation and feature engineering
+  - Multi-source MEV integration with frequency handling
+
+- **Comprehensive Scenario Analysis**
+  - **ScenManager**: Dedicated scenario forecasting and analysis
+  - Multi-scenario MEV support with 3-layer dictionary structure
+  - Conditional and simple forecasting capabilities
+  - Integrated scenario plotting with customizable visualizations
+  - Forecast vs. actual comparison with period indicators
+
+- **Enhanced Model Building**
+  - Standardized OLS modeling pipeline with robust covariance handling
+  - Flexible feature transformation framework (TSFM)
+  - Support for conditional variables (CondVar) and lag operations
+  - Comprehensive model validation suite with filtering capabilities
+  - Automated outlier detection and robust standard error computation
+
+- **Robust Testing & Validation**
+  - Extensive statistical test suite (Normality, Stationarity, Autocorrelation, Heteroscedasticity)
+  - Performance metrics (R², F-tests, VIF, Cointegration)
+  - In-sample and out-of-sample analysis
+  - Scenario impact assessment with filtering modes
+  - Automated test result interpretation
+
+- **Professional Reporting & Visualization**
+  - Integrated scenario plotting with forecast and variable analysis
+  - Performance visualization with customizable styling
+  - Standardized model reporting with ReportSet aggregation
+  - Excel-based export templates with PPNR-specific formats
+  - Comprehensive segment-level reporting
+
+- **Model Search & Selection**
+  - Exhaustive model search capabilities
+  - Automated feature combination testing
+  - Performance-based model ranking
+  - Top-N model selection with configurable criteria
 
 ## 📦 Installation
 
@@ -20,271 +87,300 @@ venv\Scripts\activate      # Windows
 pip install -r requirements.txt
 ```
 
-> **Note:** Core dependencies: `pandas`, `numpy`, `statsmodels`, `matplotlib`, `openpyxl`
+### Prerequisites
+- Python 3.7 or higher
+- Core dependencies:
+  - `pandas`: Data manipulation and analysis
+  - `numpy`: Numerical computing
+  - `statsmodels`: Statistical modeling
+  - `matplotlib`: Data visualization
+  - `openpyxl`: Excel file handling
+  - `arch`: Time series analysis
 
----
-
-## 🚀 Quickstart
+## 🚀 Quick Start
 
 ```python
-from TECHNIC.data      import DataManager
-from TECHNIC.segment   import Segment
+from TECHNIC.data import DataManager
+from TECHNIC.segment import Segment
 from TECHNIC.transform import TSFM
-from TECHNIC.model     import OLS
-from TECHNIC.test      import PPNR_OLS_TestSet
-from TECHNIC.template  import PPNR_OLS_ExportTemplate
+from TECHNIC.condition import CondVar
+from TECHNIC.model import OLS
+from TECHNIC.scenario import ScenManager
 
-# 1. Prepare DataManager with internal + MEV sources
+# 1. Initialize DataManager with enhanced data sources
 dm = DataManager(
     internal_df=your_internal_df,
     model_mev_source={'model_rates.xlsx': 'BaseRates'},
     scen_mevs_source={
         'scenario_rates.xlsx': {
-            'base':  'BaseRates',
-            'adv':   'AdverseRates',
-            'sev':   'SevereRates'
+            'CCAR2024': {
+                'Base': 'BaseRates',
+                'Adverse': 'AdverseRates', 
+                'Severe': 'SevereRates'
+            }
         }
     },
     in_sample_end='2023-12-31',
     scen_in_sample_end='2022-12-31'
 )
 
-# 2. Use DataManager helper methods
-# • build_search_vars → dict of transformed DataFrames per var
-var_dfs = dm.build_search_vars(['GDP','CPI'])
-# • apply_to_all → apply a two-arg fn (internal, mev_df) across all MEVs
-def spread(internal, mev):
-    return (internal['Price'] - mev['NGDP']).rename('Price_minus_NGDP')
-dm.apply_to_all(spread)
+# 2. Advanced Feature Engineering
+var_dfs = dm.build_search_vars(['GDP', 'CPI', 'UNEMPLOYMENT'])
 
-# • apply_to_mevs → same two-arg fn but returns full DataFrame
-def multi_feats(mev, internal):
-    df = mev.copy()
-    df['GDP-Price']     = df['GDP']    - internal['Price']
-    df['Unemp-Price']   = df['Unemp']  - internal['Price']
-    return df
-dm.apply_to_mevs(multi_feats)
+# Create conditional variables
+cond_var = CondVar(
+    name='GDP_conditional',
+    main_series=dm.mev_data['GDP'],
+    cond_var=[dm.internal_data['target']],
+    condition=lambda x: x > 0,
+    if_true=lambda main, cond: main * 1.2,
+    if_false=lambda main, cond: main * 0.8
+)
 
-# • apply_to_internal → apply single-arg fn to internal_data
-def add_macro(internal):
-    internal['Real_GDP'] = internal['GDP'] / (1 + internal['Inflation'])
-dm.apply_to_internal(add_macro)
-
-# 3. Create a Segment, build and compare CMs
+# 3. Model Building with Scenario Analysis
 seg = Segment(
     segment_id='SegmentA',
-    target='y',
+    target='target_variable',
     data_manager=dm,
-    model_cls=OLS,
-    testset_cls=PPNR_OLS_TestSet
+    model_cls=OLS
 )
 
 seg.build_cm(
     cm_id='Model1',
     specs=[
-        'x1',
-        TSFM('x2', transform_fn=lambda s: s.pct_change(), max_lag=1),
+        'base_variable',
+        TSFM('GDP', transform_fn='GR', lag=1),
+        TSFM('CPI', transform_fn='DIFF', lag=2),
+        cond_var
     ],
     sample='both'
 )
 
-# • show_report: aggregate in/out perf, params, tests
+# 4. Comprehensive Reporting with Scenario Analysis
 seg.show_report(
     cm_ids=['Model1'],
     report_sample='in',
     show_out=True,
     show_params=True,
     show_tests=True,
-    perf_kwargs={'digits': 3}
+    show_scens=True,  # Enable scenario analysis
+    scen_kwargs={'figsize': (8, 4), 'title_prefix': 'CCAR2024: '}
 )
 
-# • explore_vars: visualize each var vs target (line or scatter)
-seg.explore_vars(['x1','x2_pct_change_L1'], plot_type='line')
+# 5. Direct Scenario Analysis
+cm = seg.cms['Model1']
+scen_mgr = cm.scen_manager_in
 
-# 4. Export all CMs in the segment to Excel
-tmpl = PPNR_OLS_ExportTemplate(
-    template_files=['templates/PPNR_OLS_Template.xlsx'],
-    cms=seg.cms
+# Plot all scenario forecasts and variables
+scen_mgr.plot_all(
+    figsize=(8, 4),
+    title_prefix="Stress Test: ",
+    save_path="outputs/scenarios/"
 )
-tmpl.export({
-    'templates/PPNR_OLS_Template.xlsx': 'outputs/SegmentA_Report.xlsx'
-})
+
+# Access forecast data
+forecast_dfs = scen_mgr.forecast_df
+for scen_set, df in forecast_dfs.items():
+    print(f"Scenario Set: {scen_set}")
+    print(df.head())
 ```
 
----
+## 🏗 Architecture
 
-## 📂 Package Structure
+The package follows a modular architecture with enhanced scenario analysis capabilities:
 
 ```
 Project_LEGO/
-├─ TECHNIC/                # Core Python package modules
+├─ TECHNIC/                # Core Python modules
 │  ├─ __init__.py          # Package initializer
-│  ├─ cm.py                # Candidate Model orchestration (build → fit → report)
-│  ├─ data.py              # DataManager: load, interpolate, and engineer features
-│  ├─ internal.py          # InternalDataLoader: handles raw internal data
-│  ├─ mev.py               # MEVLoader: loads model & scenario MEV tables
-│  ├─ transform.py         # TSFM: feature transformation manager
-│  ├─ conditional.py       # CondVar: conditional variable generator
-│  ├─ test.py              # TestSetBase & specific test implementations
-│  ├─ model.py             # ModelBase & OLS model subclass
-│  ├─ plot.py              # Plotting utilities (performance, diagnostics)
-│  ├─ report.py            # ModelReportBase & OLSReport
-│  ├─ segment.py           # Segment: manage multiple CMs & exploration
-│  ├─ writer.py            # Writer utilities for Excel output
-│  └─ template.py          # Export templates (e.g. PPNR_OLS_ExportTemplate)
-├─ support/                # Static support files for DataManager
+│  ├─ cm.py                # Candidate Model orchestration with scenario integration
+│  ├─ data.py              # DataManager: enhanced data loading and feature engineering
+│  ├─ internal.py          # InternalDataLoader with panel/time series support
+│  ├─ mev.py               # MEVLoader with multi-source and scenario MEV handling
+│  ├─ scenario.py          # ScenManager: comprehensive scenario analysis
+│  ├─ transform.py         # TSFM: advanced feature transformations
+│  ├─ condition.py         # CondVar: conditional variable framework
+│  ├─ feature.py           # Feature engineering utilities
+│  ├─ test.py              # Enhanced testing framework with filtering
+│  ├─ model.py             # ModelBase & OLS with robust covariance
+│  ├─ plot.py              # Advanced plotting utilities
+│  ├─ report.py            # Comprehensive reporting with scenario support
+│  ├─ segment.py           # Segment management with search capabilities
+│  ├─ search.py            # Model search and selection framework
+│  ├─ helper.py            # Utility functions and helpers
+│  ├─ writer.py            # Excel writer utilities
+│  └─ template.py          # Export templates
+├─ support/                # Static support files
 │  ├─ mev_type.xlsx        # MEV code → type mapping
-│  └─ type_tsfm.yaml       # Type → transform specification
-├─ templates/              # Excel template files for exports
-├─ requirements.txt        # Python dependencies
-└─ README.md               # This README document
+│  └─ type_tsfm.yaml       # Type → TSFM mapping
+├─ templates/              # Excel export templates
+├─ requirements.txt        # Dependencies
+└─ README.md              # Documentation
 ```
 
----
+## 🔧 Core Components
 
-## 🔍 Module Highlights
+### DataManager
+- **Purpose**: Central data management with enhanced MEV and scenario support
+- **Key Features**:
+  - Multi-source data integration (internal, model MEVs, scenario MEVs)
+  - Support for both time series and panel data structures
+  - Flexible sampling period configuration
+  - Advanced feature building with conditional variables
+- **Key Methods**:
+  - `build_features`: Create feature matrices for modeling
+  - `build_search_vars`: Generate transformed variable sets for exploration
+  - `apply_to_all`: Apply functions across all data sources
+  - `apply_to_mevs`: MEV-specific transformations
 
-### `mev.py` (MEVLoader)
+### ScenManager
+- **Purpose**: Comprehensive scenario analysis and forecasting
+- **Key Features**:
+  - Multi-scenario forecasting with conditional and simple modes
+  - Integrated plotting for forecasts and variable analysis
+  - Period-based data organization with P0 reference points
+  - Support for both time series and panel data scenarios
+- **Key Methods**:
+  - `plot_forecasts`: Visualize scenario forecasts vs. fitted values
+  - `plot_scenario_variables`: Plot individual variables across scenarios
+  - `plot_all`: Comprehensive scenario visualization
+- **Properties**:
+  - `forecast_df`: Organized forecast data with period indicators
+  - `y_scens`: Nested scenario forecast results
 
-* **Inputs:**
+### Enhanced Model Framework
+- **ModelBase**: Abstract base with scenario manager integration
+- **OLS**: Advanced OLS implementation with:
+  - Automatic robust covariance detection (HC1, HAC)
+  - Comprehensive diagnostic testing
+  - Integrated scenario analysis capabilities
+  - Performance and parameter measurement
 
-  * `model_mev_source: Dict[str, str]`
-  * `scen_mevs_source: Dict[str, Dict[str, str]]`
-  * Optional `load_and_preprocess` function (default provided)
-* **`.load()`** populates:
+### Advanced Testing Framework
+- **Test Categories**:
+  - **Fit Tests**: R², Adjusted R², Error measures
+  - **Significance Tests**: P-value, F-test, VIF analysis
+  - **Residual Tests**: Normality, Stationarity, Autocorrelation, Heteroscedasticity
+  - **Cointegration Tests**: Y-X cointegration analysis
+- **Features**:
+  - Configurable filtering modes (strict, moderate, lenient)
+  - Automated test result interpretation
+  - Integration with model building pipeline
 
-  * `.model_mev` (DataFrame)
-  * `.model_map` (code → name)
-  * `.scen_mevs` (nested dict `{workbook_key: DataFrame}`)
-  * `.scen_maps` (nested dict `{workbook_key: {code → name}}`)
-* **`.apply_to_all(fn)`** applies a function to every MEV DataFrame.
+### Comprehensive Reporting System
+- **ReportSet**: Aggregate reporting across multiple models
+- **Features**:
+  - Performance comparison tables
+  - Parameter significance analysis
+  - Diagnostic test summaries
+  - Integrated scenario analysis
+  - Excel export capabilities
+- **Visualization**:
+  - Performance plots with actual vs. fitted/predicted
+  - Scenario forecast visualization
+  - Variable analysis across scenarios
 
-### `data.py` (DataManager)
+## 🎯 Scenario Analysis
 
-* **Constructor inputs** aligned with `MEVLoader`:
+The framework provides comprehensive scenario analysis capabilities through the `ScenManager` class:
 
-  * `model_mev_source` / `scen_mevs_source`
-* **Properties:**
+### Scenario Data Structure
+```python
+# 3-layer scenario MEV structure
+scen_mevs = {
+    'CCAR2024': {
+        'Base': base_scenario_df,
+        'Adverse': adverse_scenario_df,
+        'Severe': severe_scenario_df
+    },
+    'ICAAP2024': {
+        'Baseline': baseline_df,
+        'Stress': stress_df
+    }
+}
+```
 
-  * `.internal_in`, `.internal_out`
-  * `.model_in`, `.model_out`
-  * `.scen_mevs` (trimmed by `scen_in_sample_end`)
-* **`build_indep_vars(specs)`** supports raw strings, `TSFM`, and `CondVar` instances.
+### Scenario Forecasting
+```python
+# Access scenario manager from fitted model
+scen_mgr = model.scen_manager
 
-### `transform.py` (TSFM)
+# Get organized forecast data
+forecast_data = scen_mgr.forecast_df
 
-* **`TSFM(feature, transform_fn, max_lag, exp_sign)`**
-* **`apply_transform()`** returns a named `pd.Series` with `.name = <feature>_<fn_name>_L<lag>`.
+# Plot comprehensive scenario analysis
+figures = scen_mgr.plot_all(
+    figsize=(8, 4),
+    title_prefix="Stress Test: "
+)
+```
 
-### `conditional.py` (CondVar)
+### Scenario Integration
+- **Automatic Integration**: Scenario managers are automatically created during model building
+- **CM Integration**: Accessible through `cm.scen_manager_in` and `cm.scen_manager_full`
+- **Reporting Integration**: Scenario plots can be included in standard reports
+- **Segment Integration**: Scenario analysis available at the segment level
 
-* **`CondVar(main_var, cond_var, cond_fn, cond_fn_kwargs)`**
-* **`apply()`** returns a Series named `<main>_<cond_fn_name>`.
+## 📊 Usage Examples
 
-### `test.py` 
+### Basic Model Building
+```python
+# Simple model with transformations
+seg.build_cm(
+    cm_id='BasicModel',
+    specs=['var1', TSFM('var2', transform_fn='LOG')],
+    sample='both'
+)
+```
 
-* **`NormalityTest`**, **`StationarityTest`**: run multiple metrics per test, return nested dicts
-* **`TestSetBase`**: flattens multiple tests, `.test_results` and `.all_passed()`
-* **`PPNR_OLS_TestSet`**: defaults to α=0.05.
+### Advanced Feature Engineering
+```python
+# Complex feature specifications
+specs = [
+    'base_var',
+    TSFM('economic_indicator', transform_fn='GR', lag=1),
+    CondVar(
+        name='conditional_feature',
+        main_series=data['main'],
+        cond_var=[data['condition']],
+        condition=lambda x: x > threshold,
+        if_true=lambda m, c: m * 1.5,
+        if_false=lambda m, c: m * 0.5
+    )
+]
+```
 
-### `model.py` (ModelBase & OLS)
+### Model Search and Selection
+```python
+# Exhaustive model search
+top_models = seg.search_cms(
+    desired_pool=['GDP', 'CPI', 'UNEMPLOYMENT'],
+    forced_in=['base_variable'],
+    top_n=5,
+    max_var_num=4,
+    rank_weights=(1, 1, 1)
+)
+```
 
-* **`ModelBase`**
+### Comprehensive Reporting
+```python
+# Full reporting with scenario analysis
+seg.show_report(
+    show_out=True,
+    show_params=True, 
+    show_tests=True,
+    show_scens=True,
+    scen_kwargs={'save_path': 'outputs/'}
+)
+```
 
-  * Core attrs: `X, y, X_out, y_out, testset_cls, report_cls`
-  * `@property report` → instantiates report\_cls
-  * `@property tests`  → builds `TestSetBase` on residuals
-* **`OLS`**: `.fit()`, `.predict()`, `.y_fitted_in`, plus measure properties.
-
-### `cm.py` (CM)
-
-* **`.build(sample='in'|'full'|'both')`** → fits models with `testset_cls` & `report_cls`
-* **Properties:** `report_in`, `report_full`, `tests_in`, `tests_full`
-* **`show_report()`** delegates to in-sample and full-sample reports.
-
-### `report.py` (ModelReportBase & OLSReport)
-
-* **`show_perf_tbl()`**
-* **`show_test_tbl()`**: general flattening of arbitrary test metrics
-* **Plot methods** via injected functions.
-
-### `template.py` (ExportTemplateBase)
-
-* **`PPNR_OLS_ExportTemplate`**: maps CM outputs to Excel via `Val` and `ValueWriter`
-
----
-
-## 🏗️ New Utility Methods
-
-### DataManager (`data.py`)
-
-* **`build_search_vars(specs, mev_type_map=…, type_tsfm_map=…) → Dict[str, DataFrame]`**
-  Builds a DataFrame per variable (raw + transformed features), warning on any unknown types.
-
-* **`apply_to_all(fn)`**
-  Applies a two-arg function `fn(internal_df, mev_df)` to **all** MEV tables (model + scenarios).
-
-  * If `fn` returns a `Series`/`DataFrame`, merges it into each MEV table.
-  * If `fn` returns `None`, assumes `fn` mutated `mev_df` in place.
-
-* **`apply_to_mevs(fn)`**
-  Similar to `apply_to_all`, but expects `fn(mev_df, internal_df)` and merges the returned DataFrame into each MEV table only.
-
-* **`apply_to_internal(fn)`**
-  Runs `fn(internal_df)` on the internal dataset.
-
-  * If `fn` returns a `Series`/`DataFrame`, merges back into `internal_data`.
-  * If `None`, assumes in-place mutation.
-
-* **Support files**
-
-  * `support/mev_type.xlsx` → loaded on import into `MEV_TYPE_MAP`, must exist or raises.
-  * `support/type_tsfm.yaml` → loaded on import into `TYPE_TSFM_MAP`, must exist or raises.
-
----
-
-### Transformations (`transform.py`)
-
-* Generalized transforms:
-
-  * **`DF(series, periods=1)`** – difference over `periods`.
-  * **`GR(series, periods=1)`** – growth‐rate over `periods`.
-  * **Alias**: `DF2 = partial(DF, periods=2)`, `DF3`, `GR2`, `GR3`.
-* **TSFM** name logic inspects `periods` or `window` args (from `partial`), appending suffix (e.g. `PDI_GR2`).
-
----
-
-### Segment Exploration (`segment.py`)
-
-* **`explore_vars(vars_list, plot_type='line')`**
-
-  * Builds feature‐DataFrames for each variable via `build_search_vars`.
-  * **Line plots**: dual‐axis time‐series (`target` left, feature right), no axis labels, legend included.
-  * **Scatter plots**: feature vs target, blue dots, no legend, no axis labels.
-  * Grid layout: 3 subplots per row; subplot title = feature name; figure title dynamic (e.g. “Time Series: x1 vs y”).
-
----
-
-### Reporting Across Models (`report.py` & `segment.py`)
-
-* **`ReportSet.show_report(...)`**
-  Aggregates over multiple `ReportBase` objects to:
-
-  1. Show in‐sample performance table
-  2. Optionally show out‐of‐sample table
-  3. Plot combined performance
-  4. Optionally show per‐model parameter tables
-  5. Optionally show per‐model test results
-
-* **`Segment.show_report(...)`** delegates to `ReportSet`, letting you compare any subset of CMs, pick `'in'` or `'full'` sample, and toggle parameters/tests.
-
----
+For detailed usage examples and workflows, please refer to the Jupyter notebooks in the repository:
+- `LEGO_Demo.ipynb`: Comprehensive framework demonstration
+- `LEGO_ModuleTest.ipynb`: Individual module testing and validation
 
 ## 🤝 Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on development, testing, and pull requests.
-
----
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## 📄 License
 

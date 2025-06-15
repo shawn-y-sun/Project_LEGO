@@ -1,83 +1,138 @@
-# TECHNIC/transform.py
+# =============================================================================
+# module: transform.py
+# Purpose: Feature transformations as subclasses of Feature
+# Dependencies: pandas, typing, .feature.Feature, importlib, functools
+# =============================================================================
 
 import pandas as pd
 import functools
-from typing import Callable, Union
+import importlib
+from typing import Callable, Union, Optional, Dict, Any
+from .feature import Feature
 
-class TSFM:
+class TSFM(Feature):
     """
-    Time-series Feature (Transformation) Manager.
+    Transformation feature subclass of Feature.
 
-    Applies a user-supplied transform function to a pandas Series, then
-    shifts the transformed series by `max_lag` periods.
-    
-    Parameters:
-    - feature: Union[str, pd.Series]
-      Name of the feature (if str) or the actual pandas Series to transform.
-    - transform_fn: Callable[[pd.Series], pd.Series]
-      A function to apply to the series.
-    - max_lag: int
-      Number of periods to lag the transformed series (default=2).
-    - exp_sign: int
-      Expected sign of the transformation (1 for positive, -1 for negative, 0 for none).
+    Applies a specified function (callable or name string) to an input variable series,
+    with optional lag and exponent sign adjustments.
+
+    Parameters
+    ----------
+    var : str or pandas.Series
+        Name or Series of the variable to transform.
+    transform_fn : str or Callable[[pandas.Series], pandas.Series]
+        Function name (string) to look up in this module or a callable function.
+    lag : int, default 0
+        Number of periods to lag the series before transformation.
+    exp_sign : int, default 0
+        Exponent sign adjustment: 1 for absolute, -1 for negated absolute, 0 for none.
+    alias : str, optional
+        Custom name for the output feature.
     """
-
     def __init__(
         self,
-        feature: Union[str, pd.Series],
-        transform_fn: Callable[[pd.Series], pd.Series],
-        max_lag: int = 0,
-        exp_sign: int = 0
+        var: Union[str, pd.Series],
+        transform_fn: Union[str, Callable[[pd.Series], pd.Series]],
+        lag: int = 0,
+        exp_sign: int = 0,
+        alias: Optional[str] = None
     ):
-        # Store feature and derive name
-        if isinstance(feature, pd.Series):
-            self.feature = feature
-            self.feature_name = feature.name or "feature"
-        elif isinstance(feature, str):
-            self.feature = None
-            self.feature_name = feature
+        super().__init__(var=var, alias=alias)
+        # Resolve transform function if given by name
+        if isinstance(transform_fn, str):
+            module = importlib.import_module(__name__)
+            if hasattr(module, transform_fn):
+                self.transform_fn = getattr(module, transform_fn)
+            else:
+                raise ValueError(f"Unknown transform function '{transform_fn}' in {__name__}.")
         else:
-            raise TypeError("`feature` must be a column name string or a pandas Series")
-
-        self.transform_fn = transform_fn
-        self.max_lag = max_lag
+            self.transform_fn = transform_fn
+        self.lag = lag
         self.exp_sign = exp_sign
-
-    def apply(self) -> pd.Series:
-        """
-        Apply the transform function and shift by max_lag.
-        The returned Series is named by the `name` property.
-        """
-        if self.feature is None:
-            raise ValueError(
-                "No feature series provided. Provide a pandas Series to use apply_transform()."
-            )
-        transformed = self.transform_fn(self.feature)
-        result = transformed.shift(self.max_lag) if self.max_lag > 0 else transformed
-        result.name = self.name
-        return result
 
     @property
     def name(self) -> str:
         """
-        Construct the feature name as FeatureName_FunctionName[PeriodOrWindow][_Llag].
-        """
-        # Determine base function name and any period/window suffix
-        if isinstance(self.transform_fn, functools.partial):
-            base_fn = self.transform_fn.func.__name__
-            keywords = getattr(self.transform_fn, 'keywords', {}) or {}
-            if 'periods' in keywords and keywords['periods'] > 1:
-                fn_name = f"{base_fn}{keywords['periods']}"
-            elif 'window' in keywords and keywords['window'] > 1:
-                fn_name = f"{base_fn}{keywords['window']}"
-            else:
-                fn_name = base_fn
-        else:
-            fn_name = getattr(self.transform_fn, "__name__", "transform")
-        # Add shift lag part
-        lag_part = f"_L{self.max_lag}" if self.max_lag > 0 else ""
-        return f"{self.feature_name}_{fn_name}{lag_part}"
+        Generate the output feature name.
 
+        Uses alias if provided; otherwise combines:
+          • var
+          • function name (with a period‐suffix if periods>1)
+          • lag indicator (L# if lag>0)
+
+        Examples:
+          x_DF2        ← DF with periods=2, no lag
+          x_GR3_L1     ← GR with periods=3 and lag=1
+        """
+        # 1) Handle functools.partial with a 'periods' keyword
+        if isinstance(self.transform_fn, functools.partial):
+            func = self.transform_fn.func
+            base = func.__name__
+            period = self.transform_fn.keywords.get('periods', None)
+            if isinstance(period, int) and period > 1:
+                fn_name = f"{base}{period}"
+            else:
+                fn_name = base
+        else:
+            # 2) Direct callables or alias functions
+            fn_name = getattr(self.transform_fn, "__name__", "transform")
+
+        parts = [fn_name]
+        if self.lag > 0:
+            parts.append(f"L{self.lag}")
+
+        return "_".join([self.var] + parts)
+    def lookup_map(self) -> Dict[str, Any]:
+        """
+        Map the attribute 'var_series' to the variable name for lookup().
+        """
+        return {"var_series": self.var}
+
+    def apply(self, *dfs: pd.DataFrame) -> pd.Series:
+        """
+        Resolve input series, apply lag, transform, and exponent adjustments.
+
+        Parameters
+        ----------
+        *dfs : pandas.DataFrame
+            DataFrame sources for variable lookup.
+
+        Returns
+        -------
+        pandas.Series
+            Transformed series named by self.name.
+
+        Raises
+        ------
+        KeyError
+            If the variable is not found in provided DataFrames.
+        """
+        # Resolve the input series via lookup()
+        self.lookup(*dfs)
+        series = self.var_series
+
+        # Apply lag if requested
+        series = series.shift(self.lag)
+
+        # Apply the transformation function
+        result = self.transform_fn(series)
+
+        # Apply exponent sign adjustments
+        if self.exp_sign == 1:
+            result = result.abs()
+        elif self.exp_sign == -1:
+            result = -result.abs()
+
+        # Set the result name and return
+        result.name = self.name
+        # record column name
+        self.output_names = [self.name]
+        return result
+
+    def __repr__(self) -> str:
+        """Use the `name` property as the representation, prefixed with 'TSFM:'."""
+        return f"TSFM:{self.name}"
 
 
 # Core transform functions
@@ -99,18 +154,18 @@ def GR(series: pd.Series, periods: int = 1) -> pd.Series:
 
 def ABSGR(series: pd.Series, periods: int = 1) -> pd.Series:
     """Absolute growth rate over lag periods."""
-    return (series / series.shift(lag) - 1).abs()
+    return (series / series.shift(periods) - 1).abs()
 
 # Rolling window transforms
 
-def ROLLAVG(series: pd.Series, window: int = 4) -> pd.Series:
-    """Rolling average over specified window."""
-    return series.rolling(window).mean()
+def ROLLAVG(series: pd.Series, periods: int = 4) -> pd.Series:
+    """Rolling average over specified periods."""
+    return series.rolling(periods).mean()
 
 
-def DIV_ROLLAVG(series: pd.Series, window: int = 4) -> pd.Series:
+def DIV_ROLLAVG(series: pd.Series, periods: int = 4) -> pd.Series:
     """Difference from rolling average: series - rolling average."""
-    return series - ROLLAVG(series, window)
+    return series - ROLLAVG(series, periods)
 
 # Alias functions for common lags
 
