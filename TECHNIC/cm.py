@@ -50,9 +50,9 @@ class CM:
     model_full : Optional[ModelBase]
         Full-sample fitted model instance.
     scen_manager_in : Optional[ScenManager]
-        Scenario manager for in-sample model.
+        Scenario manager for in-sample model (created during build()).
     scen_manager_full : Optional[ScenManager]
-        Scenario manager for full-sample model.
+        Scenario manager for full-sample model (created during build()).
     """
 
     def __init__(
@@ -88,6 +88,8 @@ class CM:
         self.model_in: Optional[ModelBase] = None
         self.model_full: Optional[ModelBase] = None
         self.outlier_idx: List[str] = []
+        self.scen_manager_in: Optional[ScenManager] = None
+        self.scen_manager_full: Optional[ScenManager] = None
 
     @staticmethod
     def _validate_data(X: pd.DataFrame, y: pd.Series) -> None:
@@ -173,7 +175,7 @@ class CM:
         build_full = sample in {'full', 'both'}
 
         # Get the union of in-sample and out-of-sample indices
-        idx = dm._internal_loader.in_sample_idx.union(dm._internal_loader.out_sample_idx)
+        idx = dm.in_sample_idx.union(dm.out_sample_idx)
 
         # Prepare full DataFrame X_full and Series y_full
         X_full = dm.build_features(specs)
@@ -187,10 +189,10 @@ class CM:
         self._validate_data(X_full, y_full)
 
         # Split into in-sample and out-of-sample using DataLoader indices
-        X_in = X_full.loc[dm._internal_loader.in_sample_idx].copy()
-        y_in = y_full.loc[dm._internal_loader.in_sample_idx].copy()
-        X_out = X_full.loc[dm._internal_loader.out_sample_idx].copy()
-        y_out = y_full.loc[dm._internal_loader.out_sample_idx].copy()
+        X_in = X_full.loc[dm.in_sample_idx].copy()
+        y_in = y_full.loc[dm.in_sample_idx].copy()
+        X_out = X_full.loc[dm.out_sample_idx].copy()
+        y_out = y_full.loc[dm.out_sample_idx].copy()
 
         # If in-sample fit is requested, remove specified outliers
         if build_in and outlier_idx:
@@ -233,7 +235,6 @@ class CM:
                 dm=dm,
                 model=self.model_in,
                 specs=specs,
-                P0=dm._internal_loader.in_sample_end,
                 target=self.target
             )
             # Attach ScenManager to model_in
@@ -254,7 +255,6 @@ class CM:
                 dm=dm,
                 model=self.model_full,
                 specs=specs,
-                P0=dm._internal_loader.in_sample_end,
                 target=self.target
             )
             # Attach ScenManager to model_full
@@ -439,11 +439,13 @@ class CM:
         show_full: bool = False,
         show_out: bool = True,
         show_tests: bool = False,
+        show_scens: bool = False,
         perf_kwargs: Optional[Dict[str, Any]] = None,
-        test_kwargs: Optional[Dict[str, Any]] = None
+        test_kwargs: Optional[Dict[str, Any]] = None,
+        scen_kwargs: Optional[Dict[str, Any]] = None
     ) -> None:
         """
-        Display the in-sample report (and optionally full-sample report).
+        Display the in-sample report (and optionally full-sample report) with scenario plots.
 
         Parameters
         ----------
@@ -453,10 +455,14 @@ class CM:
             If True, include out-of-sample performance in in-sample report.
         show_tests : bool, default False
             If True, include diagnostic test results.
+        show_scens : bool, default False
+            If True, display scenario forecast and variable plots.
         perf_kwargs : dict, optional
             Keyword arguments passed to performance plotting methods.
         test_kwargs : dict, optional
             Keyword arguments passed to test-result display methods.
+        scen_kwargs : dict, optional
+            Keyword arguments passed to scenario plotting methods.
 
         Raises
         ------
@@ -465,6 +471,7 @@ class CM:
         """
         perf_kwargs = perf_kwargs or {}
         test_kwargs = test_kwargs or {}
+        scen_kwargs = scen_kwargs or {}
 
         # In-sample report
         if self.report_in is None:
@@ -486,3 +493,28 @@ class CM:
                 perf_kwargs=perf_kwargs,
                 test_kwargs=test_kwargs
             )
+
+        # Scenario plots
+        if show_scens:
+            # Plot scenarios for in-sample model
+            if hasattr(self, 'scen_manager_in') and self.scen_manager_in is not None:
+                print("\n=== In-Sample Model Scenario Analysis ===")
+                try:
+                    self.scen_manager_in.plot_all(**scen_kwargs)
+                    print("In-sample scenario plots generated successfully.")
+                except Exception as e:
+                    print(f"Error generating in-sample scenario plots: {e}")
+            
+            # Plot scenarios for full-sample model if requested
+            if show_full and hasattr(self, 'scen_manager_full') and self.scen_manager_full is not None:
+                print("\n=== Full-Sample Model Scenario Analysis ===")
+                try:
+                    self.scen_manager_full.plot_all(**scen_kwargs)
+                    print("Full-sample scenario plots generated successfully.")
+                except Exception as e:
+                    print(f"Error generating full-sample scenario plots: {e}")
+            
+            # If no scenario managers are available, inform the user
+            if not (hasattr(self, 'scen_manager_in') and self.scen_manager_in is not None):
+                if not show_full or not (hasattr(self, 'scen_manager_full') and self.scen_manager_full is not None):
+                    print("\nNo scenario managers available. Scenario data may not be loaded in DataManager.")

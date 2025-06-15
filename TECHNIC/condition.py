@@ -39,10 +39,10 @@ class CondVar(Feature):
         super().__init__(var=main_var, alias=alias)
         # Initialize list of conditional variables (names or Series)
         if isinstance(cond_var, (str, pd.Series)):
-            self.cond_vars = [cond_var]
+            self.cond_var = [cond_var]
         elif (isinstance(cond_var, list) and
               all(isinstance(cv, (str, pd.Series)) for cv in cond_var)):
-            self.cond_vars = cond_var
+            self.cond_var = cond_var
         else:
             raise TypeError("`cond_var` must be a column name, Series, or list thereof")
         self.cond_fn = cond_fn
@@ -92,7 +92,7 @@ class CondVar(Feature):
 
         # Resolve each condition series
         cond_series_list: List[pd.Series] = []
-        for cv in self.cond_vars:
+        for cv in self.cond_var:
             if isinstance(cv, pd.Series):
                 cond_series_list.append(cv)
             elif isinstance(cv, str):

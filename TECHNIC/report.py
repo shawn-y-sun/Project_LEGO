@@ -131,9 +131,11 @@ class ReportSet:
         show_out: bool = True,
         show_params: bool = False,
         show_tests: bool = False,
+        show_scens: bool = False,
         perf_kwargs: dict = None,
         params_kwargs: dict = None,
-        test_kwargs: dict = None
+        test_kwargs: dict = None,
+        scen_kwargs: dict = None
     ) -> None:
         """
         Sequentially display:
@@ -142,10 +144,12 @@ class ReportSet:
           3) Performance plot
           4) Parameter tables per model (if show_params)
           5) Testing tables per model (if show_tests)
+          6) Scenario plots per model (if show_scens)
         """
         perf_kwargs   = perf_kwargs or {}
         params_kwargs = params_kwargs or {}
         test_kwargs   = test_kwargs or {}
+        scen_kwargs   = scen_kwargs or {}
 
         # 1) In-sample performance
         print("=== In-Sample Performance ===")
@@ -175,6 +179,20 @@ class ReportSet:
             for model_id, report in self._reports.items():
                 print(f"\n=== Model: {model_id} — Testing Metrics ===\n")
                 report.show_test_tbl(**test_kwargs)
+
+        # 6) Optional per-model scenario plots
+        if show_scens:
+            for model_id, report in self._reports.items():
+                if hasattr(report.model, 'scen_manager') and report.model.scen_manager is not None:
+                    print(f"\n=== Model: {model_id} — Scenario Analysis ===")
+                    try:
+                        report.model.scen_manager.plot_all(**scen_kwargs)
+                        print(f"Scenario plots for {model_id} generated successfully.")
+                    except Exception as e:
+                        print(f"Error generating scenario plots for {model_id}: {e}")
+                else:
+                    print(f"\n=== Model: {model_id} — No Scenario Manager Available ===")
+                    print("Scenario data may not be loaded or model not built through CM.")
 
 
 class OLS_ModelReport(ModelReportBase):

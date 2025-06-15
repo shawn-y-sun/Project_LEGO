@@ -582,7 +582,8 @@ class DataManager:
         (str) or Feature instances (TSFM, CondVar, DummyVar, etc.).
 
         This method combines features from both internal and MEV data sources,
-        applying any specified transformations in the process.
+        applying any specified transformations in the process. It handles both time series
+        and panel data formats intelligently.
 
         Parameters
         ----------
@@ -599,43 +600,41 @@ class DataManager:
         Returns
         -------
         DataFrame
-            Combined features indexed by date. The columns will be:
-            - Raw variables: Same name as input
-            - Transformed features: Names defined by Feature objects
+            Combined features without entity and date columns, ready for model fitting.
+            For time series data: Features indexed by date.
+            For panel data: Features in the same order as the original data.
 
         Examples
         --------
-        >>> # Simple raw variables
+        >>> # Time Series Data Example
         >>> features = dm.build_features(['GDP', 'UNRATE', 'CPI'])
         >>> 
-        >>> # Mix of raw and transformed features
-        >>> from .transform import TSFM, diff, pct_change
+        >>> # Panel Data Example
         >>> specs = [
-        ...     'GDP',                     # Raw GDP
-        ...     TSFM('GDP', diff),        # GDP change
-        ...     TSFM('UNRATE', pct_change, lag=1),  # Lagged unemployment change
-        ...     ('CPI', 'HOUSING')        # Group of raw features
+        ...     'GDP',                     # MEV feature
+        ...     'balance',                 # Internal feature
+        ...     TSFM('GDP', diff),        # Transformed MEV
+        ...     ('CPI', 'HOUSING')        # Group of MEV features
         ... ]
-        >>> features = dm.build_features(specs)
-        >>> 
-        >>> # Using conditional features
-        >>> from .condition import CondVar
-        >>> specs = [
-        ...     CondVar('GDP', lambda x: x > 0),  # Positive GDP indicator
-        ...     'UNRATE'
-        ... ]
-        >>> features = dm.build_features(specs)
+        >>> features = dm.build_features(specs)  # Returns only the specified features
 
         Notes
         -----
         - Features are built in the order specified
+        - For panel data, MEV features are joined based on date alignment
         - All dates are normalized to midnight UTC
         - Missing values in raw variables are preserved
         - Transform features may introduce additional NaN values
         - The method flattens nested lists/tuples in specs
+        - Entity and date columns are used internally for alignment but removed from final output
         """
         data_int = internal_df if internal_df is not None else self.internal_data
         data_mev = mev_df if mev_df is not None else self.model_mev
+
+        # Determine if we're working with panel data
+        is_panel = isinstance(self._internal_loader, PanelLoader)
+        date_col = self._internal_loader.date_col if is_panel else None
+        entity_col = self._internal_loader.entity_col if is_panel else None
 
         # Flatten nested spec lists and tuples
         def _flatten(items):
@@ -647,26 +646,115 @@ class DataManager:
                 else:
                     yield it
         flat_specs = list(_flatten(specs))
-        pieces = []
+        
+        # Initialize lists to collect features
+        internal_pieces = []
+        mev_pieces = []
+        feature_pieces = []
         
         for spec in flat_specs:
             if isinstance(spec, Feature):
-                # Apply feature transform
-                pieces.append(spec.apply(data_int, data_mev))
+                # For Features, we need to handle the result differently based on data type
+                feature_result = spec.apply(data_int, data_mev)
+                
+                if is_panel:
+                    # For panel data, we need to ensure we have the entity and date columns
+                    if isinstance(feature_result, pd.Series):
+                        # Convert Series to DataFrame
+                        feature_result = feature_result.to_frame()
+                    
+                    if isinstance(feature_result, pd.DataFrame):
+                        if date_col not in feature_result.columns:
+                            # For panel data, we need to preserve the original entity-date structure
+                            # Create a mapping DataFrame with entity and date columns
+                            date_mapping = data_int[[entity_col, date_col]].copy()
+                            # Add the feature result columns using the original index alignment
+                            for col in feature_result.columns:
+                                date_mapping[col] = feature_result[col].values
+                            feature_result = date_mapping
+                    feature_pieces.append(feature_result)
+                else:
+                    # For time series, just collect the result
+                    feature_pieces.append(feature_result)
+                    
             elif isinstance(spec, str):
-                # Raw variable
+                # Raw variable - collect in appropriate list
                 if spec in data_int.columns:
-                    pieces.append(data_int[spec])
+                    if is_panel:
+                        # For panel data, we need the entity/date cols temporarily for alignment
+                        temp_df = data_int[[entity_col, date_col, spec]].copy()
+                        internal_pieces.append(temp_df)
+                    else:
+                        internal_pieces.append(data_int[spec])
                 elif spec in data_mev.columns:
-                    pieces.append(data_mev[spec])
+                    if is_panel:
+                        # For panel data, we'll need to merge MEV features later
+                        mev_pieces.append(spec)
+                    else:
+                        mev_pieces.append(data_mev[spec])
                 else:
                     raise KeyError(f"Feature '{spec}' not found in data sources.")
             else:
                 raise TypeError(f"Invalid spec type after flatten(): {type(spec)}")
 
-        X = pd.concat(pieces, axis=1)
-        X.index = X.index.normalize()
-        return X
+        # Combine features based on data type
+        if is_panel:
+            # For panel data, first combine internal features
+            if internal_pieces:
+                # Merge all internal pieces on entity and date columns
+                result = pd.concat(internal_pieces, axis=1).drop_duplicates([entity_col, date_col])
+            else:
+                # Create empty DataFrame with entity and date columns
+                result = data_int[[entity_col, date_col]].copy()
+
+            # Add MEV features if any exist
+            if mev_pieces:
+                # Prepare MEV data - normalize index to midnight
+                mev_subset = data_mev[mev_pieces].copy()
+                mev_subset.index = mev_subset.index.normalize()
+                
+                # Convert date column to datetime and normalize
+                result[date_col] = pd.to_datetime(result[date_col]).dt.normalize()
+                
+                # Merge MEV features based on date alignment
+                result = result.merge(
+                    mev_subset,
+                    left_on=date_col,
+                    right_index=True,
+                    how='left'
+                )
+            
+            # Add feature pieces if any exist
+            if feature_pieces:
+                # Merge each feature piece with the result
+                for piece in feature_pieces:
+                    # Drop any duplicate entity/date columns that might have been added
+                    cols_to_use = [col for col in piece.columns 
+                                 if col not in [entity_col, date_col]]
+                    if cols_to_use:  # Only merge if we have features to add
+                        result = result.merge(
+                            piece[[entity_col, date_col] + cols_to_use],
+                            on=[entity_col, date_col],
+                            how='left'
+                        )
+            
+            # Remove entity and date columns from final result
+            result = result.drop(columns=[entity_col, date_col])
+        else:
+            # For time series data, combine all pieces
+            pieces = []
+            if internal_pieces:
+                pieces.extend(internal_pieces)
+            if mev_pieces:
+                pieces.extend(mev_pieces)
+            if feature_pieces:
+                pieces.extend(feature_pieces)
+            
+            # Concatenate all features
+            result = pd.concat(pieces, axis=1)
+            result.index = result.index.normalize()
+
+        return result
 
     def build_tsfm_specs(
         self,
@@ -1035,3 +1123,89 @@ class DataManager:
         >>> print(mev_info['GDP_Q'])  # {'type': 'level', 'description': 'GDP (Interpolated from quarterly)'}
         """
         return self._mev_loader.mev_map
+
+    @property
+    def in_sample_end(self) -> Optional[pd.Timestamp]:
+        """
+        Get the in-sample end date from the internal loader.
+
+        Returns
+        -------
+        Optional[pd.Timestamp]
+            The end date of the in-sample period, or None if not set.
+        """
+        if isinstance(self._internal_loader, TimeSeriesLoader):
+            return self._internal_loader.in_sample_end
+        return None
+
+    @property
+    def full_sample_end(self) -> Optional[pd.Timestamp]:
+        """
+        Get the full sample end date from the internal loader.
+
+        Returns
+        -------
+        Optional[pd.Timestamp]
+            The end date of the full sample period, or None if not set.
+        """
+        return self._internal_loader.full_sample_end
+
+    @property
+    def scen_p0(self) -> Optional[pd.Timestamp]:
+        """
+        Get the scenario jumpoff date from the internal loader.
+
+        Returns
+        -------
+        Optional[pd.Timestamp]
+            The scenario jumpoff date, or None if not set.
+        """
+        return self._internal_loader.scen_p0
+
+    @property
+    def in_sample_idx(self) -> pd.Index:
+        """
+        Get the in-sample index from the internal loader.
+
+        Returns
+        -------
+        pd.Index
+            Index of in-sample observations.
+        """
+        return self._internal_loader.in_sample_idx
+
+    @property
+    def out_sample_idx(self) -> pd.Index:
+        """
+        Get the out-of-sample index from the internal loader.
+
+        Returns
+        -------
+        pd.Index
+            Index of out-of-sample observations.
+        """
+        return self._internal_loader.out_sample_idx
+
+    @property
+    def scen_in_sample_idx(self) -> Optional[pd.Index]:
+        """
+        Get the scenario in-sample index from the internal loader.
+
+        Returns
+        -------
+        Optional[pd.Index]
+            Index of scenario in-sample observations, or None if not available.
+        """
+        return self._internal_loader.scen_in_sample_idx
+
+    @property
+    def scen_out_sample_idx(self) -> Optional[pd.Index]:
+        """
+        Get the scenario out-of-sample index from the internal loader.
+
+        Returns
+        -------
+        Optional[pd.Index]
+            Index of scenario out-of-sample observations, or None if not available.
+        """
+        return self._internal_loader.scen_out_sample_idx

@@ -91,9 +91,11 @@ class Segment:
         show_out: bool = True,
         show_params: bool = False,
         show_tests: bool = False,
+        show_scens: bool = False,
         perf_kwargs: Optional[Dict[str, Any]] = None,
         params_kwargs: Optional[Dict[str, Any]] = None,
-        test_kwargs: Optional[Dict[str, Any]] = None
+        test_kwargs: Optional[Dict[str, Any]] = None,
+        scen_kwargs: Optional[Dict[str, Any]] = None
     ) -> None:
         """
         Display consolidated reports for one or multiple CMs using ReportSet.
@@ -103,13 +105,16 @@ class Segment:
         :param show_out: Whether to include out-of-sample results.
         :param show_params: Whether to include parameter tables.
         :param show_tests: Whether to include diagnostic test results.
+        :param show_scens: Whether to include scenario forecast and variable plots.
         :param perf_kwargs: Additional kwargs for performance display.
         :param params_kwargs: Additional kwargs for parameter tables.
         :param test_kwargs: Additional kwargs for test display.
+        :param scen_kwargs: Additional kwargs for scenario plotting.
         """
         perf_kwargs = perf_kwargs or {}
         params_kwargs = params_kwargs or {}
         test_kwargs = test_kwargs or {}
+        scen_kwargs = scen_kwargs or {}
         cm_ids = cm_ids or list(self.cms.keys())
 
         # Print all selected CM IDs and their representations
@@ -138,9 +143,11 @@ class Segment:
             show_out=show_out,
             show_params=show_params,
             show_tests=show_tests,
+            show_scens=show_scens,
             perf_kwargs=perf_kwargs,
             params_kwargs=params_kwargs,
-            test_kwargs=test_kwargs
+            test_kwargs=test_kwargs,
+            scen_kwargs=scen_kwargs
         )
     
     def explore_vars(

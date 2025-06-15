@@ -345,23 +345,37 @@ class MEVLoader:
 
     def load_scens(
         self,
-        source: str,
-        scens: Dict[str, str],
+        source: Union[str, Dict[str, Dict[str, Union[pd.DataFrame, pd.Series]]]],
+        scens: Optional[Dict[str, str]] = None,
         set_name: Optional[str] = None,
         freq: Optional[str] = None
     ) -> None:
         """
-        Load scenario MEVs from an Excel source. Creates or updates a scenario
-        set containing multiple sub-scenarios.
+        Load scenario MEVs from either an Excel source or a dictionary structure.
+        Creates or updates a scenario set containing multiple sub-scenarios.
+        
+        The method supports two loading modes:
+        1. From Excel file:
+           - source: path to Excel workbook
+           - scens: mapping of scenario names to sheet names
+           - set_name: optional name for the scenario set
+           
+        2. From dictionary (3-layer structure):
+           - source: dictionary with structure {set_name: {scen_name: DataFrame}}
+           - scens and set_name parameters are ignored
         
         Parameters
         ----------
-        source : str
-            Path to Excel workbook containing scenario data
-        scens : dict
+        source : str or dict
+            Either:
+            - Path to Excel workbook containing scenario data, or
+            - Dictionary with structure {set_name: {scen_name: DataFrame}}
+        scens : dict, optional
+            Required only when loading from Excel.
             Mapping of scenario names to sheet names
-            Example: {"Base": "BaseSheet", "Adv": "AdverseSheet", "Sev": "SevereSheet"}
+            Example: {"Base": "BaseSheet", "Adv": "AdverseSheet"}
         set_name : str, optional
+            Used only when loading from Excel.
             Name of the scenario set. If None, uses the source filename without extension.
             Example: If source is 'EWST2024.xlsx', set_name defaults to 'EWST2024'
         freq : str, optional
@@ -371,48 +385,94 @@ class MEVLoader:
         Examples
         --------
         >>> loader = MEVLoader()
-        >>> # Load EWST2024 scenarios
+        >>> # 1. Load from Excel file
         >>> loader.load_scens(
         ...     "EWST2024.xlsx",
-        ...     scens={"Base": "Base", "Adv": "Adverse", "Sev": "Severe"}
+        ...     scens={"Base": "Base", "Adv": "Adverse"}
         ... )
-        >>> # Results in structure like:
-        >>> # self._scen_mev_qtr = {
-        >>> #     'EWST2024': {
-        >>> #         'Base': df_base,
-        >>> #         'Adv': df_adv,
-        >>> #         'Sev': df_sev
-        >>> #     }
-        >>> # }
+        >>> 
+        >>> # 2. Load from dictionary
+        >>> loader.load_scens({
+        ...     "EWST2024": {
+        ...         "Base": df_base,
+        ...         "Adv": df_adverse
+        ...     }
+        ... })
         """
-        # Determine scenario set name if not provided
-        if set_name is None:
-            set_name = Path(source).stem
-            
-        # Initialize containers for this scenario set if not exist
-        if set_name not in self._scen_mev_qtr:
-            self._scen_mev_qtr[set_name] = {}
-        if set_name not in self._scen_mev_mth:
-            self._scen_mev_mth[set_name] = {}
-            
-        # Load each sub-scenario
-        for scen_name, sheet in scens.items():
-            data = self._load_from_excel(source, sheet, freq)
-            
-            # Store in appropriate scenario container based on frequency
-            if data.index.inferred_freq.startswith('Q'):
-                self._scen_mev_qtr[set_name][scen_name] = data
-            elif data.index.inferred_freq.startswith('M'):
-                self._scen_mev_mth[set_name][scen_name] = data
-            else:
-                raise ValueError(
-                    f"Unsupported data frequency: {data.index.inferred_freq}. "
-                    "Only monthly (M) and quarterly (Q) frequencies are supported."
-                )
+        if isinstance(source, str):
+            # Loading from Excel file
+            if scens is None:
+                raise ValueError("'scens' parameter required when loading from Excel file")
                 
-            # Update MEV codes and validate
-            self._mev_codes.update(data.columns)
-            
+            # Determine scenario set name if not provided
+            if set_name is None:
+                set_name = Path(source).stem
+                
+            # Initialize containers for this scenario set if not exist
+            if set_name not in self._scen_mev_qtr:
+                self._scen_mev_qtr[set_name] = {}
+            if set_name not in self._scen_mev_mth:
+                self._scen_mev_mth[set_name] = {}
+                
+            # Load each sub-scenario from Excel sheets
+            for scen_name, sheet in scens.items():
+                data = self._load_from_excel(source, sheet, freq)
+                
+                # Store in appropriate scenario container based on frequency
+                if data.index.inferred_freq.startswith('Q'):
+                    self._scen_mev_qtr[set_name][scen_name] = data
+                elif data.index.inferred_freq.startswith('M'):
+                    self._scen_mev_mth[set_name][scen_name] = data
+                else:
+                    raise ValueError(
+                        f"Unsupported data frequency: {data.index.inferred_freq}. "
+                        "Only monthly (M) and quarterly (Q) frequencies are supported."
+                    )
+                    
+                # Update MEV codes and validate
+                self._mev_codes.update(data.columns)
+                
+        else:
+            # Loading from dictionary structure
+            for curr_set_name, scenarios in source.items():
+                # Initialize containers for this scenario set if not exist
+                if curr_set_name not in self._scen_mev_qtr:
+                    self._scen_mev_qtr[curr_set_name] = {}
+                if curr_set_name not in self._scen_mev_mth:
+                    self._scen_mev_mth[curr_set_name] = {}
+                    
+                # Process each scenario
+                for scen_name, data in scenarios.items():
+                    # Convert Series to DataFrame if necessary
+                    if isinstance(data, pd.Series):
+                        data = data.to_frame()
+                        
+                    # Validate and store based on frequency
+                    if not isinstance(data.index, pd.DatetimeIndex):
+                        raise ValueError(
+                            f"Data for scenario '{scen_name}' must have datetime index"
+                        )
+                        
+                    inferred_freq = pd.infer_freq(data.index)
+                    if inferred_freq is None:
+                        raise ValueError(
+                            f"Could not infer frequency from data for scenario '{scen_name}'"
+                        )
+                        
+                    # Store in appropriate container based on frequency
+                    if inferred_freq.startswith('Q'):
+                        self._scen_mev_qtr[curr_set_name][scen_name] = data
+                    elif inferred_freq.startswith('M'):
+                        self._scen_mev_mth[curr_set_name][scen_name] = data
+                    else:
+                        raise ValueError(
+                            f"Unsupported data frequency: {inferred_freq}. "
+                            "Only monthly (M) and quarterly (Q) frequencies are supported."
+                        )
+                        
+                    # Update MEV codes and validate
+                    self._mev_codes.update(data.columns)
+                    
         self._validate_mev_codes()
 
     def _load_from_excel(

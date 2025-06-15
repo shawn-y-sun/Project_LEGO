@@ -37,6 +37,12 @@ class ModelBase(ABC):
         Class for aggregating ModelTestBase instances into a TestSet.
     report_cls : type, optional
         Class for generating model reports.
+        
+    Attributes
+    ----------
+    scen_manager : Any, optional
+        Scenario manager instance (typically set by CM during build).
+        Defaults to None.
     """
     def __init__(
         self,
@@ -69,6 +75,8 @@ class ModelBase(ABC):
         self.is_fitted = False
         # Cache for out-of-sample predictions
         self._y_pred_out: Optional[pd.Series] = None
+        # Scenario manager (set by CM during build)
+        self.scen_manager: Optional[Any] = None
 
     @abstractmethod
     def fit(self) -> 'ModelBase':
