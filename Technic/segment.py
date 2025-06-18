@@ -260,7 +260,7 @@ class Segment:
         self,
         desired_pool: List[Union[str, Any]],
         forced_in: Optional[List[Union[str, Any]]] = None,
-        top_n: int = 10,
+        top_n: int = 5,
         sample: str = 'in',
         max_var_num: int = 5,
         max_lag: int = 3,
