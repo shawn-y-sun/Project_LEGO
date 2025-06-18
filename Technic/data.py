@@ -111,9 +111,9 @@ class DataManager:
 
     Notes
     -----
-    - The DataManager maintains caches for interpolated MEV data to improve performance
-    - All data modifications through apply_* methods are made to the original data in loaders
-    - The class provides dynamic access to loader data, ensuring you always have the latest data
+    - The DataManager maintains caches for all data to improve performance and isolation
+    - All data modifications through apply_* methods are made to cached data, not loaders
+    - The class provides dynamic access to cached data, ensuring consistency
     - Sample splits are managed by the internal_loader and accessed through properties
     - Use refresh() to update cached data after loader modifications or to replace loaders
 
@@ -135,6 +135,12 @@ class DataManager:
         # Cache for interpolated MEV data
         self._mev_cache: Dict[str, pd.DataFrame] = {}
         self._scen_cache: Dict[str, Dict[str, pd.DataFrame]] = {}
+        
+        # Cache for data copies that can be modified
+        self._internal_data_cache: Optional[pd.DataFrame] = None
+        self._scen_internal_data_cache: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None
+        self._model_mev_cache: Optional[pd.DataFrame] = None
+        self._scen_mevs_cache: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None
         
         # Check if both monthly and quarterly MEVs exist
         if not (self._mev_loader.model_mev_mth.empty or self._mev_loader.model_mev_qtr.empty):
@@ -200,16 +206,20 @@ class DataManager:
         # Clear all caches to force reloading
         self._mev_cache.clear()
         self._scen_cache.clear()
+        self._internal_data_cache = None
+        self._scen_internal_data_cache = None
+        self._model_mev_cache = None
+        self._scen_mevs_cache = None
 
     @property
     def internal_data(self) -> pd.DataFrame:
         """
-        Get the latest internal data from the internal loader.
+        Get the cached internal data, creating a copy from the loader if needed.
 
         Returns
         -------
         pd.DataFrame
-            The most recent internal data. Any modifications made through
+            Cached internal data. Any modifications made through
             apply_to_internal() will be reflected in this data.
 
         Example
@@ -218,28 +228,37 @@ class DataManager:
         >>> print(f"Available variables: {internal.columns.tolist()}")
         >>> print(f"Date range: {internal.index.min()} to {internal.index.max()}")
         """
-        return self._internal_loader.internal_data
+        if self._internal_data_cache is None:
+            self._internal_data_cache = self._internal_loader.internal_data.copy()
+        return self._internal_data_cache
 
     @property
-    def scen_internal_data(self) -> Dict[str, pd.DataFrame]:
+    def scen_internal_data(self) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
-        Get the latest scenario internal data from the internal loader.
+        Get the cached scenario internal data, creating copies from the loader if needed.
 
         Returns
         -------
-        Dict[str, pd.DataFrame]
-            Dictionary mapping scenario names to their corresponding internal data.
-            Each DataFrame contains the scenario-specific internal data.
+        Dict[str, Dict[str, pd.DataFrame]]
+            Dictionary mapping scenario set names to scenario dictionaries.
+            Each scenario DataFrame contains the scenario-specific internal data.
 
         Example
         -------
         >>> scenarios = dm.scen_internal_data
         >>> # Access base scenario data
-        >>> base_data = scenarios['Base']
-        >>> print(f"Base scenario variables: {base_data.columns.tolist()}")
-        >>> print(f"Base scenario range: {base_data.index.min()} to {base_data.index.max()}")
+        >>> if 'EWST2024' in scenarios and 'Base' in scenarios['EWST2024']:
+        ...     base_data = scenarios['EWST2024']['Base']
+        ...     print(f"Base scenario variables: {base_data.columns.tolist()}")
         """
-        return self._internal_loader.scen_internal_data
+        if self._scen_internal_data_cache is None:
+            # Create deep copies of scenario internal data
+            self._scen_internal_data_cache = {}
+            for set_name, scen_dict in self._internal_loader.scen_internal_data.items():
+                self._scen_internal_data_cache[set_name] = {}
+                for scen_name, df in scen_dict.items():
+                    self._scen_internal_data_cache[set_name][scen_name] = df.copy()
+        return self._scen_internal_data_cache
 
     def _combine_mevs(self, qtr_data: pd.DataFrame, mth_data: pd.DataFrame) -> pd.DataFrame:
         """
@@ -391,8 +410,8 @@ class DataManager:
     @property
     def model_mev(self) -> pd.DataFrame:
         """
-        Get the latest model MEV data, combining quarterly and monthly data appropriately.
-        Uses caching to avoid recomputing unless data has changed.
+        Get the cached model MEV data, combining quarterly and monthly data appropriately.
+        Creates a copy from the loader if needed and caches it for future modifications.
 
         The process depends on internal data frequency:
         
@@ -409,7 +428,7 @@ class DataManager:
         Returns
         -------
         pd.DataFrame
-            Combined MEV data matching internal data frequency.
+            Cached combined MEV data matching internal data frequency.
             For monthly data: Includes both interpolated quarterly and raw monthly data.
             For quarterly data: Includes both raw quarterly and averaged monthly data.
 
@@ -421,14 +440,11 @@ class DataManager:
         >>> monthly_vars = [col for col in mev.columns if col.endswith('_M')]
         >>> print("Monthly-derived variables:", monthly_vars)
         """
-        # Get current data from loader
-        current_qtr = self._mev_loader.model_mev_qtr
-        current_mth = self._mev_loader.model_mev_mth
-        
-        # Create cache key from both quarterly and monthly data
-        cache_key = hash(str(current_qtr) + str(current_mth))
-        
-        if cache_key not in self._mev_cache:
+        if self._model_mev_cache is None:
+            # Get current data from loader
+            current_qtr = self._mev_loader.model_mev_qtr
+            current_mth = self._mev_loader.model_mev_mth
+            
             # Combine the data based on frequency
             df = self._combine_mevs(current_qtr, current_mth)
             
@@ -436,15 +452,15 @@ class DataManager:
             df['M'] = df.index.month
             df['Q'] = df.index.quarter
             
-            self._mev_cache[cache_key] = df
+            self._model_mev_cache = df
         
-        return self._mev_cache[cache_key]
+        return self._model_mev_cache
 
     @property
     def scen_mevs(self) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
-        Get the latest scenario MEV data, combining quarterly and monthly data appropriately.
-        Uses caching to avoid recomputing unless data has changed.
+        Get the cached scenario MEV data, combining quarterly and monthly data appropriately.
+        Creates copies from the loader if needed and caches them for future modifications.
 
         The method maintains a three-level structure:
         {scenario_set: {scenario_name: DataFrame}}
@@ -466,7 +482,7 @@ class DataManager:
         Returns
         -------
         Dict[str, Dict[str, pd.DataFrame]]
-            Nested dictionary of combined scenario data.
+            Nested dictionary of cached combined scenario data.
             Outer key: scenario set name (e.g., 'EWST2024')
             Inner key: scenario name (e.g., 'Base', 'Adverse')
             Value: DataFrame with combined MEV data matching internal data frequency
@@ -475,25 +491,19 @@ class DataManager:
         -------
         >>> scenarios = dm.scen_mevs
         >>> # Access base scenario from EWST2024
-        >>> base_ewst = scenarios['EWST2024']['Base']
-        >>> print(f"EWST Base scenario range: {base_ewst.index.min()} to {base_ewst.index.max()}")
+        >>> if 'EWST2024' in scenarios and 'Base' in scenarios['EWST2024']:
+        ...     base_ewst = scenarios['EWST2024']['Base']
+        ...     print(f"EWST Base scenario range: {base_ewst.index.min()} to {base_ewst.index.max()}")
         >>> 
         >>> # Compare GDP across scenarios
-        >>> for scen_name, scen_df in scenarios['EWST2024'].items():
+        >>> for scen_name, scen_df in scenarios.get('EWST2024', {}).items():
         ...     print(f"{scen_name} GDP mean: {scen_df['GDP'].mean():.2f}")
-        >>> 
-        >>> # Check if we have both quarterly and monthly versions
-        >>> monthly_vars = [col for col in base_ewst.columns if col.endswith('_M')]
-        >>> print("Monthly-derived variables:", monthly_vars)
         """
-        # Get current data from loader
-        current_qtr = self._mev_loader.scen_mev_qtr
-        current_mth = self._mev_loader.scen_mev_mth
-        
-        # Create cache key from both quarterly and monthly data
-        cache_key = hash(str(current_qtr) + str(current_mth))
-        
-        if cache_key not in self._scen_cache:
+        if self._scen_mevs_cache is None:
+            # Get current data from loader
+            current_qtr = self._mev_loader.scen_mev_qtr
+            current_mth = self._mev_loader.scen_mev_mth
+            
             # Process each scenario set and scenario
             processed = {}
             
@@ -524,9 +534,9 @@ class DataManager:
                     
                     processed[scen_set][scen_name] = combined_df
             
-            self._scen_cache[cache_key] = processed
+            self._scen_mevs_cache = processed
             
-        return self._scen_cache[cache_key]
+        return self._scen_mevs_cache
 
      # Modeling in‑sample/out‑of‑sample splits
     @property
@@ -992,14 +1002,11 @@ class DataManager:
         ]
     ) -> None:
         """
-        Apply a feature engineering function to all MEV tables (model and scenarios).
+        Apply a feature engineering function to all cached MEV tables (model and scenarios).
 
         This method allows you to add derived features to all MEV tables at once.
         The function is applied to both the model MEVs and all scenario MEVs.
-        Changes are made in-place to the original data in the MEVLoader.
-
-        The method automatically determines whether to apply changes to monthly or quarterly
-        MEV data based on the internal data frequency.
+        Changes are made to the cached data in the DataManager, not the original loaders.
 
         Parameters
         ----------
@@ -1030,9 +1037,8 @@ class DataManager:
         Notes
         -----
         - The function must return a DataFrame (modified or new)
-        - Changes are applied to monthly MEVs if internal data is monthly frequency
-        - Changes are applied to quarterly MEVs if internal data is quarterly frequency
-        - The MEV cache is cleared after applying changes
+        - Changes are applied to cached MEV data in DataManager
+        - Original loaders remain unchanged
         - The function has access to internal data for reference calculations
         """
         internal_df = self.internal_data
@@ -1044,33 +1050,15 @@ class DataManager:
             for col in result.columns:
                 mev_df[col] = result[col].reindex(mev_df.index)
 
-        # Determine internal data frequency
-        internal_freq = pd.infer_freq(self.internal_data.index)
-        is_monthly = internal_freq and internal_freq.startswith('M')
+        # Apply to cached model MEV data
+        model_mev_df = self.model_mev  # This ensures cache is created
+        _apply_mev(model_mev_df)
 
-        if is_monthly:
-            # Apply to monthly MEV data
-            if not self._mev_loader._model_mev_mth.empty:
-                _apply_mev(self._mev_loader._model_mev_mth)
-            
-            # Apply to monthly scenario MEVs
-            if self._mev_loader._scen_mev_mth:
-                for wb_key, scen_map in self._mev_loader._scen_mev_mth.items():
-                    for scen_name, df in scen_map.items():
-                        _apply_mev(df)
-        else:
-            # Apply to quarterly MEV data
-            if not self._mev_loader._model_mev_qtr.empty:
-                _apply_mev(self._mev_loader._model_mev_qtr)
-            
-            # Apply to quarterly scenario MEVs
-            for wb_key, scen_map in self._mev_loader._scen_mev_qtr.items():
-                for scen_name, df in scen_map.items():
-                    _apply_mev(df)
-                
-        # Clear caches since data has changed
-        self._mev_cache.clear()
-        self._scen_cache.clear()
+        # Apply to cached scenario MEV data
+        scen_mevs_dict = self.scen_mevs  # This ensures cache is created
+        for scen_set, scen_dict in scen_mevs_dict.items():
+            for scen_name, scen_df in scen_dict.items():
+                _apply_mev(scen_df)
     
     def apply_to_internal(
         self,
@@ -1080,10 +1068,11 @@ class DataManager:
         ]
     ) -> None:
         """
-        Apply a feature engineering function to internal data.
+        Apply a feature engineering function to cached internal data.
 
         This method allows you to add derived features to the internal data.
         Changes can be made either in-place or by returning new data to merge.
+        Changes are made to the cached data in the DataManager, not the original loader.
 
         Parameters
         ----------
@@ -1121,9 +1110,9 @@ class DataManager:
         - The function can modify data in-place and/or return new features
         - Returned Series must have a name
         - All new columns are aligned to the internal data index
-        - Changes are made directly to the loader's internal_data
+        - Changes are made to cached data in DataManager, not the original loader
         """
-        internal_df = self._internal_loader.internal_data
+        internal_df = self.internal_data  # This ensures cache is created
 
         ret = fn(internal_df)
         if ret is None:
