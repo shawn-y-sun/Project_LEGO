@@ -498,19 +498,27 @@ class CM:
         if show_scens:
             # Plot scenarios for in-sample model
             if hasattr(self, 'scen_manager_in') and self.scen_manager_in is not None:
-                print("\n=== In-Sample Model Scenario Analysis ===")
+                print(f"\n=== Model: {self.model_id} — Scenario Analysis ===")
                 try:
-                    self.scen_manager_in.plot_all(**scen_kwargs)
-                    print("In-sample scenario plots generated successfully.")
+                    figures = self.scen_manager_in.plot_all(**scen_kwargs)
+                    # Display each figure immediately after creation
+                    for scen_set, plot_dict in figures.items():
+                        print(f"Scenario plots for {scen_set} generated successfully.")
+                        for plot_type, fig in plot_dict.items():
+                            plt.show()
                 except Exception as e:
                     print(f"Error generating in-sample scenario plots: {e}")
             
             # Plot scenarios for full-sample model if requested
             if show_full and hasattr(self, 'scen_manager_full') and self.scen_manager_full is not None:
-                print("\n=== Full-Sample Model Scenario Analysis ===")
+                print(f"\n=== Model: {self.model_id} — Full-Sample Scenario Analysis ===")
                 try:
-                    self.scen_manager_full.plot_all(**scen_kwargs)
-                    print("Full-sample scenario plots generated successfully.")
+                    figures = self.scen_manager_full.plot_all(**scen_kwargs)
+                    # Display each figure immediately after creation
+                    for scen_set, plot_dict in figures.items():
+                        print(f"Full-sample scenario plots for {scen_set} generated successfully.")
+                        for plot_type, fig in plot_dict.items():
+                            plt.show()
                 except Exception as e:
                     print(f"Error generating full-sample scenario plots: {e}")
             

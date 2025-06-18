@@ -177,7 +177,7 @@ class ScenManager:
                     else:
                         X_filtered = X_full.copy()
                     
-                X_scens[scen_set][scen_name] = X_filtered
+                X_scens[scen_set][scen_name] = X_filtered.astype(float)
                 
         return X_scens
 

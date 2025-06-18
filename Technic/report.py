@@ -186,8 +186,12 @@ class ReportSet:
                 if hasattr(report.model, 'scen_manager') and report.model.scen_manager is not None:
                     print(f"\n=== Model: {model_id} — Scenario Analysis ===")
                     try:
-                        report.model.scen_manager.plot_all(**scen_kwargs)
-                        print(f"Scenario plots for {model_id} generated successfully.")
+                        figures = report.model.scen_manager.plot_all(**scen_kwargs)
+                        # Display each figure immediately after creation
+                        for scen_set, plot_dict in figures.items():
+                            print(f"Scenario plots for {scen_set} generated successfully.")
+                            for plot_type, fig in plot_dict.items():
+                                plt.show()
                     except Exception as e:
                         print(f"Error generating scenario plots for {model_id}: {e}")
                 else:
