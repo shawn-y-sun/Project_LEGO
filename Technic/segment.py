@@ -475,7 +475,9 @@ class Segment:
         rank_weights: Tuple[float, float, float] = (1, 1, 1),
         test_update_func: Optional[Callable] = None,
         outlier_idx: Optional[List[Any]] = None,
-        add_in: bool = False
+        add_in: bool = True,
+        override: bool = False,
+        re_rank: bool = True
     ) -> List[CM]:
         """
         Run an exhaustive search to find the best performing model specifications.
@@ -510,8 +512,15 @@ class Segment:
             Optional function to update each CM's test set.
         outlier_idx : Optional[List[Any]], default None
             List of index labels corresponding to outliers to exclude.
-        add_in : bool, default False
+        add_in : bool, default True
             If True, add the resulting top CMs to self.cms.
+        override : bool, default False
+            If True, clear existing cms before adding new ones. Only applies
+            when add_in=True.
+        re_rank : bool, default True
+            If True and add_in=True and override=False, rank new top_cms
+            along with pre-existing cms and update model_ids based on ranking.
+            If False, simply append new cms with collision-resolved IDs.
 
         Returns
         -------
@@ -525,7 +534,19 @@ class Segment:
         ...     desired_pool=["gdp", "inflation", "unemployment"]
         ... )
         >>> 
-        >>> # Advanced search with transformations
+        >>> # Search and override existing models
+        >>> top_models = segment.search_cms(
+        ...     desired_pool=["new_var1", "new_var2"],
+        ...     override=True  # clears existing models first
+        ... )
+        >>> 
+        >>> # Search and add without re-ranking
+        >>> top_models = segment.search_cms(
+        ...     desired_pool=["additional_var"],
+        ...     re_rank=False  # just append with unique IDs
+        ... )
+        >>> 
+        >>> # Advanced search with re-ranking
         >>> top_models = segment.search_cms(
         ...     desired_pool=[
         ...         {"var": "gdp", "transform": ["diff", "pct_change"]},
@@ -535,14 +556,8 @@ class Segment:
         ...     forced_in=["gdp_lag1"],
         ...     top_n=10,
         ...     max_var_num=3,
-        ...     rank_weights=(0.5, 1.0, 1.5)  # emphasize OOS performance
-        ... )
-        >>> 
-        >>> # Search with outlier handling
-        >>> top_models = segment.search_cms(
-        ...     desired_pool=["var1", "var2", "var3"],
-        ...     outlier_idx=["2020-03", "2020-04"],  # exclude COVID-19 months
-        ...     add_in=True  # add results to segment.cms
+        ...     rank_weights=(0.5, 1.0, 1.5),  # emphasize OOS performance
+        ...     re_rank=True  # re-rank with existing models
         ... )
         """
         # 1) Reuse existing searcher if present, else create & store one
@@ -569,16 +584,52 @@ class Segment:
 
         # 4) Optionally add them to this segment's cms
         if add_in:
-            for cm in self.top_cms:
-                # Resolve any model_id collisions by appending _2, _3, etc.
-                base_id = cm.model_id
-                new_id = base_id
-                # If there's a collision, find the next available suffix
-                if new_id in self.cms:
-                    suffix = 2
-                    while f"{base_id}_{suffix}" in self.cms:
-                        suffix += 1
-                    new_id = f"{base_id}_{suffix}"
-                # Assign the unique ID back to the CM and register it
-                cm.model_id = new_id
-                self.cms[new_id] = cm
+            if override:
+                # Clear existing cms and add new ones with simple IDs
+                self.cms.clear()
+                for i, cm in enumerate(self.top_cms):
+                    cm.model_id = f"cm{i+1}"
+                    self.cms[cm.model_id] = cm
+            else:
+                # Add to existing cms
+                if re_rank and self.cms:
+                    # Combine new top_cms with existing cms for re-ranking
+                    all_cms = list(self.cms.values()) + self.top_cms
+                    
+                    # Re-rank all models together
+                    df_ranked = self.searcher.rank_cms(all_cms, sample, rank_weights)
+                    
+                    # Clear and rebuild cms with new ranking-based IDs
+                    self.cms.clear()
+                    ordered_ids = df_ranked['model_id'].tolist()
+                    
+                    # Find the corresponding CM for each ranked ID and assign new sequential IDs
+                    for i, old_id in enumerate(ordered_ids):
+                        # Find the CM with this old_id
+                        cm = next(cm for cm in all_cms if cm.model_id == old_id)
+                        new_id = f"cm{i+1}"
+                        cm.model_id = new_id
+                        self.cms[new_id] = cm
+                    
+                    print(f"\n=== Re-ranked All Models ===")
+                    print(f"Total models after re-ranking: {len(self.cms)}")
+                    print("New ranking order:")
+                    for i, (old_id, new_id) in enumerate(zip(ordered_ids, [f"cm{j+1}" for j in range(len(ordered_ids))])):
+                        print(f"  {new_id}: (was {old_id})")
+                else:
+                    # Simply add new cms with collision-resolved IDs (original behavior)
+                    for cm in self.top_cms:
+                        # Resolve any model_id collisions by appending _2, _3, etc.
+                        base_id = cm.model_id
+                        new_id = base_id
+                        # If there's a collision, find the next available suffix
+                        if new_id in self.cms:
+                            suffix = 2
+                            while f"{base_id}_{suffix}" in self.cms:
+                                suffix += 1
+                            new_id = f"{base_id}_{suffix}"
+                        # Assign the unique ID back to the CM and register it
+                        cm.model_id = new_id
+                        self.cms[new_id] = cm
+
+        return self.top_cms
