@@ -161,8 +161,23 @@ class ScenManager:
                             f"Variable '{missing_var}' not found in scenario '{scen_name}' internal data (set: '{scen_set}'). "
                             "Please ensure all required internal variables are available in the scenario data."
                         ) from e
+                
+                # Filter to P0 onwards only
+                if isinstance(self.dm._internal_loader, PanelLoader):
+                    # For panel data, filter based on date column
+                    date_col = self.dm._internal_loader.date_col
+                    if date_col in X_full.columns:
+                        X_filtered = X_full[X_full[date_col] >= self.P0].copy()
+                    else:
+                        X_filtered = X_full.copy()
+                else:  # TimeSeriesLoader
+                    # For time series, filter based on DatetimeIndex
+                    if isinstance(X_full.index, pd.DatetimeIndex):
+                        X_filtered = X_full[X_full.index >= self.P0].copy()
+                    else:
+                        X_filtered = X_full.copy()
                     
-                X_scens[scen_set][scen_name] = X_full
+                X_scens[scen_set][scen_name] = X_filtered
                 
         return X_scens
 
