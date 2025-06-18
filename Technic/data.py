@@ -637,9 +637,6 @@ class DataManager:
         - Transform features may introduce additional NaN values
         - The method flattens nested lists/tuples in specs
         - Entity and date columns are used internally for alignment but removed from final output
-        - For Feature objects (TSFM, CondVar, etc.), MEV data is prioritized over internal data
-          when the same variable exists in both sources. This ensures scenario-specific MEV data
-          is used in scenario analysis instead of model internal data.
         """
         data_int = internal_df if internal_df is not None else self.internal_data
         data_mev = mev_df if mev_df is not None else self.model_mev
@@ -668,9 +665,7 @@ class DataManager:
         for spec in flat_specs:
             if isinstance(spec, Feature):
                 # For Features, we need to handle the result differently based on data type
-                # Pass MEV data first to prioritize scenario-specific MEV data over internal data
-                # when the same variable exists in both sources
-                feature_result = spec.apply(data_mev, data_int)
+                feature_result = spec.apply(data_int, data_mev)
                 
                 if is_panel:
                     # For panel data, we need to ensure we have the entity and date columns
