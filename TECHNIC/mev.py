@@ -43,7 +43,7 @@ def _process_quarterly_excel(workbook: str, sheet: Optional[str] = None) -> pd.D
     df_mev = df_mev.loc[:, df_mev.columns.notna()].iloc[2:]
 
     df_mev.columns = df_mev.iloc[0]
-    df_mev = df_mev.iloc[1:, :]
+    df_mev = df_mev.iloc[1:, 1:]
 
     # Reformat index to timestamps at period end
     df_mev.index = [i.replace(':', 'Q') for i in df_mev.index]
@@ -70,7 +70,8 @@ def _process_monthly_excel(workbook: str, sheet: Optional[str] = None) -> pd.Dat
         Processed DataFrame with datetime index
     """
     df = pd.read_excel(workbook, sheet_name=sheet)
-    df.set_index(df.columns[0], inplace=True)
+    df = df.set_index('Unnamed: 1').iloc[10:, 1:]
+    df.index.name = None
     df.index = pd.to_datetime(df.index).normalize()
     return df
 

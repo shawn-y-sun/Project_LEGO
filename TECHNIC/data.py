@@ -936,6 +936,11 @@ class DataManager:
         This method performs cubic interpolation on quarterly data to estimate
         monthly values. If the input is not quarterly, it returns the original data.
 
+        For quarterly data with quarter-end dates (Mar, Jun, Sep, Dec), the values
+        are treated as quarterly averages and the index is shifted back by one month
+        (to Feb, May, Aug, Nov) before interpolation to properly represent the
+        quarterly periods.
+
         Parameters
         ----------
         df : pd.DataFrame
@@ -953,12 +958,23 @@ class DataManager:
         - Preserves the original column names and types
         - Normalizes all dates to midnight UTC
         - For quarterly data, creates a monthly date range from min to max date
+        - Quarter-end dates are shifted back by one month to represent quarterly averages
         """
         df2 = df.copy()
         df2.index = pd.to_datetime(df2.index).normalize()
         freq_mev = pd.infer_freq(df2.index)
+        
         # Only interpolate Q -> M
         if freq_mev and freq_mev.startswith('Q'):
+            # Check if dates are quarter-end (March, June, September, December)
+            quarter_end_months = {3, 6, 9, 12}
+            is_quarter_end = all(date.month in quarter_end_months for date in df2.index)
+            
+            if is_quarter_end:
+                # Shift index back by one month to represent quarterly averages
+                # Mar -> Feb, Jun -> May, Sep -> Aug, Dec -> Nov
+                df2.index = df2.index - pd.DateOffset(months=1)
+            
             start = df2.index.min()
             end = df2.index.max()
             target_idx = pd.date_range(start=start, end=end, freq='M')
@@ -981,6 +997,9 @@ class DataManager:
         This method allows you to add derived features to all MEV tables at once.
         The function is applied to both the model MEVs and all scenario MEVs.
         Changes are made in-place to the original data in the MEVLoader.
+
+        The method automatically determines whether to apply changes to monthly or quarterly
+        MEV data based on the internal data frequency.
 
         Parameters
         ----------
@@ -1011,7 +1030,8 @@ class DataManager:
         Notes
         -----
         - The function must return a DataFrame (modified or new)
-        - Changes are applied to both model_mev_qtr and scen_mev_qtr
+        - Changes are applied to monthly MEVs if internal data is monthly frequency
+        - Changes are applied to quarterly MEVs if internal data is quarterly frequency
         - The MEV cache is cleared after applying changes
         - The function has access to internal data for reference calculations
         """
@@ -1024,13 +1044,29 @@ class DataManager:
             for col in result.columns:
                 mev_df[col] = result[col].reindex(mev_df.index)
 
-        # Apply to main MEV in loader
-        _apply_mev(self._mev_loader.model_mev_qtr)
+        # Determine internal data frequency
+        internal_freq = pd.infer_freq(self.internal_data.index)
+        is_monthly = internal_freq and internal_freq.startswith('M')
 
-        # Apply to each scenario in loader
-        for wb_key, scen_map in self._mev_loader.scen_mev_qtr.items():
-            for scen_name, df in scen_map.items():
-                _apply_mev(df)
+        if is_monthly:
+            # Apply to monthly MEV data
+            if not self._mev_loader._model_mev_mth.empty:
+                _apply_mev(self._mev_loader._model_mev_mth)
+            
+            # Apply to monthly scenario MEVs
+            if self._mev_loader._scen_mev_mth:
+                for wb_key, scen_map in self._mev_loader._scen_mev_mth.items():
+                    for scen_name, df in scen_map.items():
+                        _apply_mev(df)
+        else:
+            # Apply to quarterly MEV data
+            if not self._mev_loader._model_mev_qtr.empty:
+                _apply_mev(self._mev_loader._model_mev_qtr)
+            
+            # Apply to quarterly scenario MEVs
+            for wb_key, scen_map in self._mev_loader._scen_mev_qtr.items():
+                for scen_name, df in scen_map.items():
+                    _apply_mev(df)
                 
         # Clear caches since data has changed
         self._mev_cache.clear()
@@ -1105,24 +1141,38 @@ class DataManager:
     @property
     def mev_map(self) -> Dict[str, Dict[str, str]]:
         """
-        Get the latest MEV type mapping from the MEV loader.
-        This includes both original MEVs and any derived MEVs (e.g., with '_Q' suffix).
+        Get the MEV type mapping for codes that exist in the model_mev data.
+        This includes both original MEVs and any derived MEVs (e.g., with '_Q' suffix),
+        but only for codes that are actually present in the model_mev DataFrame.
 
         Returns
         -------
         Dict[str, Dict[str, str]]
             Dictionary mapping MEV codes to their type and description information.
-            Includes both original and derived MEVs.
+            Only includes MEV codes that exist in model_mev columns.
 
         Example
         -------
         >>> mev_info = dm.mev_map
-        >>> # Original MEV info
+        >>> # Only shows info for MEVs that exist in model_mev
         >>> print(mev_info['GDP'])  # {'type': 'level', 'description': 'Gross Domestic Product'}
-        >>> # Derived quarterly MEV info
-        >>> print(mev_info['GDP_Q'])  # {'type': 'level', 'description': 'GDP (Interpolated from quarterly)'}
+        >>> # If GDP_Q exists in model_mev, it will be included
+        >>> if 'GDP_Q' in dm.model_mev.columns:
+        ...     print(mev_info['GDP_Q'])  # {'type': 'level', 'description': 'GDP (Interpolated from quarterly)'}
         """
-        return self._mev_loader.mev_map
+        # Get all MEV codes from the loader's map
+        full_mev_map = self._mev_loader.mev_map
+        
+        # Get available MEV columns from model_mev
+        available_mev_codes = set(self.model_mev.columns)
+        
+        # Filter the map to only include codes that exist in model_mev
+        filtered_map = {
+            code: info for code, info in full_mev_map.items()
+            if code in available_mev_codes
+        }
+        
+        return filtered_map
 
     @property
     def in_sample_end(self) -> Optional[pd.Timestamp]:
