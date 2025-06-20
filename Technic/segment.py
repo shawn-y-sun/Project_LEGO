@@ -599,20 +599,25 @@ class Segment:
                     # Keep track of newly searched CM objects for final position tracking
                     newly_searched_cms = set(self.top_cms)
                     
+                    # Temporarily assign unique IDs to handle duplicates during ranking
+                    original_ids = {}
+                    for i, cm in enumerate(all_cms):
+                        original_ids[f"temp_{i}"] = cm
+                        cm.model_id = f"temp_{i}"
+                    
                     # Re-rank all models together
                     df_ranked = self.searcher.rank_cms(all_cms, sample, rank_weights)
                     
                     # Clear and rebuild cms with new ranking-based IDs
                     self.cms.clear()
-                    ordered_ids = df_ranked['model_id'].tolist()
+                    ordered_temp_ids = df_ranked['model_id'].tolist()
                     
                     # Assign new sequential IDs and track newly searched models' final positions
                     newly_searched_final_positions = []
                     
-                    # Find the corresponding CM for each ranked ID and assign new sequential IDs
-                    for i, old_id in enumerate(ordered_ids):
-                        # Find the CM with this old_id
-                        cm = next(cm for cm in all_cms if cm.model_id == old_id)
+                    # Assign final IDs based on ranking order
+                    for i, temp_id in enumerate(ordered_temp_ids):
+                        cm = original_ids[temp_id]
                         new_id = f"cm{i+1}"
                         cm.model_id = new_id
                         self.cms[new_id] = cm
