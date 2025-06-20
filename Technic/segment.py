@@ -596,8 +596,8 @@ class Segment:
                     # Combine new top_cms with existing cms for re-ranking
                     all_cms = list(self.cms.values()) + self.top_cms
                     
-                    # Keep track of newly searched CM IDs for printing
-                    newly_searched_ids = {cm.model_id for cm in self.top_cms}
+                    # Keep track of newly searched CM objects (not IDs) for printing
+                    newly_searched_cms = set(self.top_cms)
                     
                     # Re-rank all models together
                     df_ranked = self.searcher.rank_cms(all_cms, sample, rank_weights)
@@ -613,13 +613,14 @@ class Segment:
                     for i, old_id in enumerate(ordered_ids):
                         # Find the CM with this old_id
                         cm = next(cm for cm in all_cms if cm.model_id == old_id)
+                        old_model_id = cm.model_id  # Store the old ID before changing it
                         new_id = f"cm{i+1}"
                         cm.model_id = new_id
                         self.cms[new_id] = cm
                         
-                        # Track if this was a newly searched CM
-                        if old_id in newly_searched_ids:
-                            newly_added_info.append((old_id, new_id))
+                        # Track if this was a newly searched CM (using object identity, not ID)
+                        if cm in newly_searched_cms:
+                            newly_added_info.append((old_model_id, new_id))
                     
                     print(f"\n=== Re-ranked All Models ===")
                     print(f"Total models after re-ranking: {len(self.cms)}")
