@@ -596,12 +596,18 @@ class Segment:
                     # Combine new top_cms with existing cms for re-ranking
                     all_cms = list(self.cms.values()) + self.top_cms
                     
+                    # Keep track of newly searched CM IDs for printing
+                    newly_searched_ids = {cm.model_id for cm in self.top_cms}
+                    
                     # Re-rank all models together
                     df_ranked = self.searcher.rank_cms(all_cms, sample, rank_weights)
                     
                     # Clear and rebuild cms with new ranking-based IDs
                     self.cms.clear()
                     ordered_ids = df_ranked['model_id'].tolist()
+                    
+                    # Track which newly searched CMs got which new IDs
+                    newly_added_info = []
                     
                     # Find the corresponding CM for each ranked ID and assign new sequential IDs
                     for i, old_id in enumerate(ordered_ids):
@@ -610,11 +616,15 @@ class Segment:
                         new_id = f"cm{i+1}"
                         cm.model_id = new_id
                         self.cms[new_id] = cm
+                        
+                        # Track if this was a newly searched CM
+                        if old_id in newly_searched_ids:
+                            newly_added_info.append((old_id, new_id))
                     
                     print(f"\n=== Re-ranked All Models ===")
                     print(f"Total models after re-ranking: {len(self.cms)}")
-                    print("New ranking order:")
-                    for i, (old_id, new_id) in enumerate(zip(ordered_ids, [f"cm{j+1}" for j in range(len(ordered_ids))])):
+                    print(f"Newly added models from search:")
+                    for old_id, new_id in newly_added_info:
                         print(f"  {new_id}: (was {old_id})")
                 else:
                     # Simply add new cms with collision-resolved IDs (original behavior)
