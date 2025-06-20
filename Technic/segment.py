@@ -596,7 +596,7 @@ class Segment:
                     # Combine new top_cms with existing cms for re-ranking
                     all_cms = list(self.cms.values()) + self.top_cms
                     
-                    # Keep track of newly searched CM objects (not IDs) for printing
+                    # Keep track of newly searched CM objects for final position tracking
                     newly_searched_cms = set(self.top_cms)
                     
                     # Re-rank all models together
@@ -606,27 +606,24 @@ class Segment:
                     self.cms.clear()
                     ordered_ids = df_ranked['model_id'].tolist()
                     
-                    # Track which newly searched CMs got which new IDs
-                    newly_added_info = []
+                    # Assign new sequential IDs and track newly searched models' final positions
+                    newly_searched_final_positions = []
                     
                     # Find the corresponding CM for each ranked ID and assign new sequential IDs
                     for i, old_id in enumerate(ordered_ids):
                         # Find the CM with this old_id
                         cm = next(cm for cm in all_cms if cm.model_id == old_id)
-                        old_model_id = cm.model_id  # Store the old ID before changing it
                         new_id = f"cm{i+1}"
                         cm.model_id = new_id
                         self.cms[new_id] = cm
                         
-                        # Track if this was a newly searched CM (using object identity, not ID)
+                        # Track final position if this was a newly searched CM
                         if cm in newly_searched_cms:
-                            newly_added_info.append((old_model_id, new_id))
+                            newly_searched_final_positions.append(new_id)
                     
                     print(f"\n=== Re-ranked All Models ===")
                     print(f"Total models after re-ranking: {len(self.cms)}")
-                    print(f"Newly added models from search:")
-                    for old_id, new_id in newly_added_info:
-                        print(f"  {new_id}: (was {old_id})")
+                    print(f"Newly searched models ranked at: {', '.join(newly_searched_final_positions)}")
                 else:
                     # Simply add new cms with collision-resolved IDs (original behavior)
                     for cm in self.top_cms:
