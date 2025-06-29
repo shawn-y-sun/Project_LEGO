@@ -24,6 +24,7 @@ from .internal import *
 from .mev import *
 from .data import *
 from .model import *
+from .model_test import *
 from .feature import *
 from .transform import *
 from .cm import *

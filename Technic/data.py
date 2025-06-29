@@ -770,7 +770,7 @@ class DataManager:
         self,
         specs: List[Union[str, TSFM]],
         max_lag: int = 0,
-        max_periods: int = 1
+        max_periods: Union[int, List[int]] = 1
     ) -> Dict[str, List[Union[str, TSFM]]]:
         """
         Generate TSFM specification lists for each variable based on their type.
@@ -788,9 +788,15 @@ class DataManager:
         max_lag : int, default=0
             Generate transform entries for lags 0 through max_lag.
             Must be non-negative.
-        max_periods : int, default=1
-            For transforms that accept a 'periods' parameter, generate entries
-            for periods 1 through max_periods. Must be positive.
+        max_periods : Union[int, List[int]], default=1
+            For transforms that accept a 'periods' parameter:
+            - If int: generate entries for periods 1 through max_periods
+            - If List[int]: generate entries for the specific periods provided
+            Must be positive (if int) or contain only positive values (if list).
+            
+            Special handling for monthly data: When internal data has monthly frequency
+            and max_periods > 3, automatically creates periods [1, 2, 3, 6, 9, 12, ...]
+            (multiples of 3 beyond period 3) instead of [1, 2, 3, 4, 5, 6, ...].
 
         Returns
         -------
@@ -811,7 +817,7 @@ class DataManager:
         >>> #     'UNRATE': [TSFM(UNRATE, diff)]
         >>> # }
         >>> 
-        >>> # With lags and multiple periods
+        >>> # With lags and multiple periods (int)
         >>> specs = dm.build_tsfm_specs(
         ...     specs=['GDP', 'UNRATE'],
         ...     max_lag=2,
@@ -823,6 +829,26 @@ class DataManager:
         >>> #     TSFM(GDP, diff, periods=1), TSFM(GDP, diff, periods=2),
         >>> #     TSFM(GDP, log, lag=1), TSFM(GDP, log, lag=2)
         >>> # ]
+        >>> 
+        >>> # With specific periods (list) - useful for monthly data
+        >>> specs = dm.build_tsfm_specs(
+        ...     specs=['GDP', 'UNRATE'],
+        ...     max_lag=1,
+        ...     max_periods=[1, 2, 3, 6, 9, 12]
+        ... )
+        >>> # Result includes transforms with specific periods like:
+        >>> # GDP: [
+        >>> #     TSFM(GDP, log),
+        >>> #     TSFM(GDP, diff, periods=1), TSFM(GDP, diff, periods=2),
+        >>> #     TSFM(GDP, diff, periods=3), TSFM(GDP, diff, periods=6),
+        >>> #     TSFM(GDP, diff, periods=9), TSFM(GDP, diff, periods=12),
+        >>> #     (plus lagged versions)
+        >>> # ]
+        >>> 
+        >>> # Monthly data automatic behavior (max_periods > 3)
+        >>> # For monthly internal data with max_periods=13:
+        >>> specs = dm.build_tsfm_specs(['GDP'], max_periods=13)
+        >>> # Automatically creates periods [1, 2, 3, 6, 9, 12] instead of [1...13]
 
         Notes
         -----
@@ -833,8 +859,35 @@ class DataManager:
         """
         if max_lag < 0:
             raise ValueError("max_lag must be >= 0")
-        if max_periods < 1:
-            raise ValueError("max_periods must be >= 1")
+        
+        # Validate max_periods
+        if isinstance(max_periods, int):
+            if max_periods < 1:
+                raise ValueError("max_periods must be >= 1")
+        elif isinstance(max_periods, list):
+            if not max_periods:
+                raise ValueError("max_periods list cannot be empty")
+            if any(p < 1 for p in max_periods):
+                raise ValueError("all values in max_periods list must be >= 1")
+        else:
+            raise TypeError("max_periods must be int or List[int]")
+
+        # Apply special period logic for monthly data
+        # When internal_data is monthly, periods > 3 should only include multiples of 3
+        effective_max_periods = max_periods
+        if hasattr(self, 'internal_data') and hasattr(self.internal_data, 'index'):
+            try:
+                freq = pd.infer_freq(self.internal_data.index)
+                if freq and freq.startswith('M'):  # Monthly frequency (M, MS, etc.)
+                    if isinstance(max_periods, int) and max_periods > 3:
+                        # Create periods list: (1, 2, 3, 6, 9, 12, ...) up to max_periods
+                        periods_list = [1, 2, 3]
+                        for p in range(6, max_periods + 1, 3):  # multiples of 3 starting from 6
+                            periods_list.append(p)
+                        effective_max_periods = periods_list
+            except (AttributeError, TypeError):
+                # If frequency detection fails, use original max_periods
+                pass
 
         vt_map = self._mev_loader.mev_map
         tf_map = self._mev_loader.tsfm_map
@@ -843,7 +896,7 @@ class DataManager:
     
         for spec in specs:
             if isinstance(spec, TSFM):
-                specs_map[spec.feature_name] = [spec]
+                specs_map[spec.var] = [spec]
 
             elif isinstance(spec, str):
                 var_name = spec
@@ -861,7 +914,13 @@ class DataManager:
                         if not callable(fn):
                             continue
                         sig = inspect.signature(fn)
-                        pvals = list(range(1, max_periods+1)) if 'periods' in sig.parameters else [None]
+                        if 'periods' in sig.parameters:
+                            if isinstance(effective_max_periods, int):
+                                pvals = list(range(1, effective_max_periods + 1))
+                            else:  # List[int]
+                                pvals = effective_max_periods
+                        else:
+                            pvals = [None]
                         for p in pvals:
                             base_fn = functools.partial(fn, periods=p) if p else fn
                             for lag in range(max_lag+1):
@@ -880,7 +939,7 @@ class DataManager:
         self,
         specs: List[Union[str, TSFM]],
         max_lag: int = 0,
-        max_periods: int = 1
+        max_periods: Union[int, List[int]] = 1
     ) -> Dict[str, pd.DataFrame]:
         """
         Build a DataFrame for each variable by generating transform specifications
@@ -896,9 +955,11 @@ class DataManager:
             See build_tsfm_specs() for details.
         max_lag : int, default=0
             Maximum lag to include in transforms. Must be non-negative.
-        max_periods : int, default=1
+        max_periods : Union[int, List[int]], default=1
             Maximum periods for transforms that accept this parameter.
-            Must be positive.
+            Must be positive (if int) or contain only positive values (if list).
+            For monthly data with max_periods > 3, automatically uses 
+            [1, 2, 3, 6, 9, 12, ...] instead of [1, 2, 3, 4, 5, 6, ...].
 
         Returns
         -------
@@ -1248,3 +1309,76 @@ class DataManager:
             Index of scenario out-of-sample observations, or None if not available.
         """
         return self._internal_loader.scen_out_sample_idx
+
+    def update_mev_map(self, updates: Dict[str, Dict[str, Optional[str]]]) -> None:
+        """
+        Update the MEV mapping with new or modified MEV codes.
+        
+        This method provides a convenient way to update MEV mappings directly through
+        the DataManager interface. It delegates to the underlying MEVLoader's
+        update_mev_map method and clears cached MEV data to ensure consistency.
+        
+        For new MEV codes, it's highly recommended to specify both 'type' and 'category'.
+        Description is optional if you can remember what the MEV code means.
+        
+        Parameters
+        ----------
+        updates : dict
+            Dictionary where keys are MEV codes and values are dictionaries
+            containing the attributes to update. Supported attributes are:
+            - 'type': MEV type (e.g., 'level', 'rate')
+            - 'description': Human-readable description
+            - 'category': MEV category (e.g., 'GDP', 'Job Market', 'Inflation')
+            
+            For existing MEV codes, only the specified attributes will be updated;
+            unspecified attributes will remain unchanged.
+            
+            For new MEV codes, unspecified attributes will be set to None.
+            
+        Examples
+        --------
+        >>> # Add new MEV codes
+        >>> dm.update_mev_map({
+        ...     'NEWGDP': {
+        ...         'type': 'level',
+        ...         'description': 'New GDP Measure',
+        ...         'category': 'GDP'
+        ...     },
+        ...     'CUSTOM_RATE': {
+        ...         'type': 'rate',
+        ...         'category': 'Custom Metrics'
+        ...         # description will be None
+        ...     }
+        ... })
+        >>> 
+        >>> # Update existing MEV code (only specified attributes)
+        >>> dm.update_mev_map({
+        ...     'GDP': {
+        ...         'category': 'Economic Growth'  # Only update category
+        ...         # type and description remain unchanged
+        ...     }
+        ... })
+        >>> 
+        >>> # Verify updates
+        >>> print(dm.mev_map['NEWGDP'])
+        >>> print(dm.mev_map['GDP'])
+        
+        Notes
+        -----
+        - Changes are made to the MEVLoader's in-memory MEV map
+        - To persist changes, you would need to update the Excel file manually
+        - For new MEV codes, 'type' and 'category' are highly recommended
+        - Valid attributes: 'type', 'description', 'category'
+        - Cached MEV data is cleared after updating to ensure consistency
+        
+        See Also
+        --------
+        MEVLoader.update_mev_map : The underlying method that performs the update
+        """
+        # Delegate to the MEVLoader's update_mev_map method
+        self._mev_loader.update_mev_map(updates)
+        
+        # Clear cached MEV data to ensure consistency with updated mapping
+        # This forces reloading of MEV data with the updated mapping
+        self._model_mev_cache = None
+        self._scen_mevs_cache = None

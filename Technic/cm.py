@@ -263,17 +263,20 @@ class CM:
     @property
     def spec_map(self) -> Dict[str, List[Union[str, Tuple[str, ...]]]]:
         """
-        Categorize self.specs into 'common' and 'group' driver lists.
+        Categorize self.specs into driver lists for different test purposes.
 
         Returns
         -------
         Dict[str, List[Union[str, Tuple[str, ...]]]]
-            - 'common': flat list of column-name strings
-            - 'group': list of tuples, each containing column-name strings
-                       for a grouped driver set
+            - 'CoefTest': variable names for individual coefficient tests
+            - 'GroupTest': tuples of variable names for group F-tests (only full monthly/quarterly dummies)
+            - 'StationarityTest': variable names applicable for stationarity tests
+            - 'SignCheck': Feature instances with exp_sign attribute
         """
-        common_drivers: List[str] = []
-        group_drivers: List[Tuple[str, ...]] = []
+        coef_test_vars: List[str] = []
+        group_test_vars: List[Tuple[str, ...]] = []
+        stationarity_test_vars: List[str] = []
+        sign_check_features: List[Feature] = []
 
         def _flatten(items):
             """Recursively flatten nested lists but leave tuples intact."""
@@ -283,6 +286,41 @@ class CM:
                 else:
                     yield item
 
+        def _is_full_monthly_quarterly_dummy(dumvar: DumVar) -> bool:
+            """Check if DumVar represents full monthly (M:2-12) or quarterly (Q:2-4) dummies."""
+            if not isinstance(dumvar, DumVar):
+                return False
+            
+            # Check for monthly dummies covering M:2 to M:12 (11 dummies)
+            if dumvar.var.startswith('M') and ':' in dumvar.name:
+                dummy_names = [name for name in dumvar.output_names if ':' in name]
+                months = set()
+                for name in dummy_names:
+                    try:
+                        month_num = int(name.split(':')[1])
+                        months.add(month_num)
+                    except (ValueError, IndexError):
+                        continue
+                # Check if covers months 2-12 (reference month 1 dropped)
+                if months == set(range(2, 13)):
+                    return True
+            
+            # Check for quarterly dummies covering Q:2 to Q:4 (3 dummies)
+            if dumvar.var.startswith('Q') and ':' in dumvar.name:
+                dummy_names = [name for name in dumvar.output_names if ':' in name]
+                quarters = set()
+                for name in dummy_names:
+                    try:
+                        quarter_num = int(name.split(':')[1])
+                        quarters.add(quarter_num)
+                    except (ValueError, IndexError):
+                        continue
+                # Check if covers quarters 2-4 (reference quarter 1 dropped)
+                if quarters == set(range(2, 5)):
+                    return True
+            
+            return False
+        
         for spec in _flatten(self.specs):
             # 1) Tuple of specs → one tuple of their output names
             if isinstance(spec, tuple):
@@ -293,22 +331,50 @@ class CM:
                         s.output_names if isinstance(s, Feature) else [str(s)]
                     )
                 )
-                group_drivers.append(names)
+                # Tuples go to CoefTest only (no overlap with GroupTest)
+                coef_test_vars.extend(names)
+                # Individual variables go to stationarity test if not dummies
+                for name in names:
+                    if not ':' in name:  # Not a dummy variable
+                        stationarity_test_vars.append(name)
 
             # 2) DumVar instance → one tuple of its dummy-column names
             elif isinstance(spec, DumVar):
-                group_drivers.append(tuple(spec.output_names))
+                names = tuple(spec.output_names)
+                
+                # Check if this is a full monthly/quarterly dummy group
+                if _is_full_monthly_quarterly_dummy(spec):
+                    # Full monthly/quarterly dummies go to GroupTest only
+                    group_test_vars.append(names)
+                else:
+                    # Other dummy groups go to CoefTest only
+                    coef_test_vars.extend(names)
 
-            # 3) Everything else → common driver(s)
+            # 3) Everything else → individual features
             else:
                 if isinstance(spec, Feature):
-                    common_drivers.extend(spec.output_names)
+                    # Add to coef_test_vars
+                    coef_test_vars.extend(spec.output_names)
+                    
+                    # Check for stationarity test eligibility (non-dummy variables)
+                    for name in spec.output_names:
+                        if not ':' in name:  # Not a dummy variable
+                            stationarity_test_vars.append(name)
+                    
+                    # Check for SignCheck eligibility (Features with exp_sign attribute)
+                    if hasattr(spec, 'exp_sign'):
+                        sign_check_features.append(spec)
+                        
                 else:
-                    common_drivers.append(str(spec))
+                    # String specifications
+                    coef_test_vars.append(str(spec))
+                    stationarity_test_vars.append(str(spec))
 
         return {
-            'common': common_drivers,
-            'group': group_drivers
+            'CoefTest': coef_test_vars,
+            'GroupTest': group_test_vars,
+            'StationarityTest': stationarity_test_vars,
+            'SignCheck': sign_check_features
         }
 
     def __repr__(self) -> str:

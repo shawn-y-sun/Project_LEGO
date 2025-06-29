@@ -467,11 +467,12 @@ class Segment:
         self,
         desired_pool: List[Union[str, Any]],
         forced_in: Optional[List[Union[str, Any]]] = None,
-        top_n: int = 5,
+        top_n: int = 10,
         sample: str = 'in',
         max_var_num: int = 5,
         max_lag: int = 3,
         max_periods: int = 3,
+        category_limit: int = 1,
         rank_weights: Tuple[float, float, float] = (1, 1, 1),
         test_update_func: Optional[Callable] = None,
         outlier_idx: Optional[List[Any]] = None,
@@ -494,7 +495,7 @@ class Segment:
         forced_in : Optional[List[Union[str, Any]]], default None
             Variables or specifications that must be included in every model.
             If provided, these are treated as one group.
-        top_n : int, default 5
+        top_n : int, default 10
             Number of top performing models to retain.
         sample : str, default 'in'
             Which sample to use for model building:
@@ -506,6 +507,13 @@ class Segment:
             Maximum lag to consider in transformation specifications.
         max_periods : int, default 3
             Maximum number of periods to consider in transformations.
+            Note: Can be set to 12 for monthly target variables, or 4 for quarterly 
+            target variables if user wants to expand the coverage of this exhaustive 
+            search for more model options. For monthly data, periods > 3 will 
+            automatically include only multiples of 3 (e.g., 6, 9, 12).
+        category_limit : int, default 1
+            Maximum number of variables from each MEV category per combo.
+            Only applies to top-level strings and TSFM instances in desired_pool.
         rank_weights : Tuple[float, float, float], default (1, 1, 1)
             Weights for (Fit Measures, IS Error, OOS Error) when ranking models.
         test_update_func : Optional[Callable], default None
@@ -556,6 +564,7 @@ class Segment:
         ...     forced_in=["gdp_lag1"],
         ...     top_n=10,
         ...     max_var_num=3,
+        ...     category_limit=2,  # Allow up to 2 variables per category
         ...     rank_weights=(0.5, 1.0, 1.5),  # emphasize OOS performance
         ...     re_rank=True  # re-rank with existing models
         ... )
@@ -574,6 +583,7 @@ class Segment:
             max_var_num=max_var_num,
             max_lag=max_lag,
             max_periods=max_periods,
+            category_limit=category_limit,
             rank_weights=rank_weights,
             test_update_func=test_update_func,
             outlier_idx=outlier_idx

@@ -292,20 +292,20 @@ class R2Test(ModelTestBase):
     r2 : float
         Model’s coefficient of determination.
     thresholds : Dict[str, float], optional
-        Minimum R² by filter_mode; defaults to {'strict': 0.8, 'moderate': 0.6}.
+        Minimum R² by filter_mode; defaults to {'strict': 0.6, 'moderate': 0.3}.
     alias : Optional[str]
         Display name for this test.
     filter_mode : str
         'strict' or 'moderate'.
     """
-    category = 'fit'
+    category = 'performance'
 
     def __init__(
         self,
         r2: float,
-        thresholds: Optional[Dict[str, float]] = {'strict': 0.6, 'moderate': 0.4},
+        thresholds: Optional[Dict[str, float]] = {'strict': 0.6, 'moderate': 0.3},
         alias: Optional[str] = None,
-        filter_mode: str = 'strict',
+        filter_mode: str = 'moderate',
         filter_on: bool = True
     ):
         super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
@@ -548,10 +548,10 @@ def _cvm_test_fn(series: pd.Series):
 # Dictionary of normality diagnostic tests
 normality_test_dict: Dict[str, Callable] = {
    'JB': lambda s: jarque_bera(s)[0:2],
-   'SW': lambda s: shapiro(s)[0:2],
-   'KS': lambda s: kstest(s, 'norm', args=(s.mean(), s.std(ddof=1)))[0:2],
    'CM': _cvm_test_fn,
-   'AD': lambda s: normal_ad(s)
+#    'SW': lambda s: shapiro(s)[0:2],
+#    'KS': lambda s: kstest(s, 'norm', args=(s.mean(), s.std(ddof=1)))[0:2],
+#    'AD': lambda s: normal_ad(s)
 }
 
 class NormalityTest(ModelTestBase):
@@ -567,7 +567,7 @@ class NormalityTest(ModelTestBase):
         series: pd.Series,
         alpha: Union[float, Dict[str, float]] = 0.05,
         alias: Optional[str] = None,
-        filter_mode: str = 'strict',
+        filter_mode: str = 'moderate',
         filter_on: bool = True
     ):
         super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
@@ -591,7 +591,7 @@ class NormalityTest(ModelTestBase):
         │ Test │ Statistic│ P-value │ Passed │
         ├──────┼──────────┼─────────┼────────┤
         │ JB   │   …      │   …     │  True  │
-        │ SW   │   …      │   …     │  True  │
+        │ CM   │   …      │   …     │  True  │
         └──────┴──────────┴─────────┴────────┘
         """
         rows = []
@@ -664,10 +664,20 @@ def _rur_test_fn(series: pd.Series):
 stationarity_test_dict: Dict[str, Callable] = {
     'ADF': _adf_test_fn,
     'PP': _pp_test_fn,
-    'KPSS': _kpss_test_fn,
-    'ZA': _za_test_fn,
-    'DFGLS': _dfgls_test_fn,
-    'RUR': _rur_test_fn
+    # 'KPSS': _kpss_test_fn,
+    # 'ZA': _za_test_fn,
+    # 'DFGLS': _dfgls_test_fn,
+    # 'RUR': _rur_test_fn
+}
+
+# Thresholds and directions for stationarity tests: (alpha, direction)
+stationarity_test_threshold: Dict[str, Tuple[float, str]] = {
+    'ADF': (0.05, '<'),
+    'PP': (0.05, '<'),
+    'KPSS': (0.05, '>'),
+    'ZA': (0.05, '<'),
+    'DFGLS': (0.05, '<'),
+    'RUR': (0.05, '>' )
 }
 
 class StationarityTest(ModelTestBase):
@@ -678,33 +688,33 @@ class StationarityTest(ModelTestBase):
     ----------
     series : Optional[pd.Series]
         Time series to test for stationarity.
-    test_dict : Dict[str, callable]
-        Mapping of test names to functions; default is {'adf': adfuller}..
+    test_dict : Dict[str, callable], optional
+        Mapping of test names to functions; defaults to stationarity_test_dict.
+    test_threshold : Dict[str, Tuple[float, str]], optional
+        Test thresholds and directions; defaults to stationarity_test_threshold.
+    alias : str, optional
+        Display name for this test (defaults to class name).
+    filter_mode : {'strict','moderate'}, default 'moderate'
+        - 'strict':   all stationarity tests must pass
+        - 'moderate': at least half of stationarity tests must pass
+    filter_on : bool, default True
+        Whether this test is active in filtering.
     """
     category = 'assumption'
-
-    # Thresholds and directions: (alpha, direction)
-    threshold_defs = {
-        'ADF': (0.05, '<'),
-        'PP': (0.05, '<'),
-        'KPSS': (0.05, '>'),
-        'ZA': (0.05, '<'),
-        'DFGLS': (0.05, '<'),
-        'RUR': (0.05, '>' )
-    }
 
     def __init__(
         self,
         series: Union[np.ndarray, pd.Series, list],
         alias: Optional[str] = None,
-        filter_mode: str = 'strict',
+        filter_mode: str = 'moderate',
         test_dict: Optional[Dict[str, Callable]] = None,
+        test_threshold: Optional[Dict[str, Tuple[float, str]]] = None,
         filter_on: bool = True
     ):
         super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
         self.series = pd.Series(series)
         self.test_dict = test_dict if test_dict is not None else stationarity_test_dict
-        self.thresholds = self.threshold_defs
+        self.thresholds = test_threshold if test_threshold is not None else stationarity_test_threshold
         self.filter_mode_descs = {
             'strict':   'All stationarity tests must pass.',
             'moderate': 'At least half of stationarity tests must pass.'
@@ -805,7 +815,7 @@ class StationarityTest(ModelTestBase):
 # PvalueTest class
 # ----------------------------------------------------------------------------
 
-class PvalueTest(ModelTestBase):
+class CoefTest(ModelTestBase):
     """
     Concrete test for checking coefficient significance of model parameters.
 
@@ -868,7 +878,7 @@ class PvalueTest(ModelTestBase):
 # F-Test for Group Significance 
 # ----------------------------------------------------------------------------
 
-class FTest(ModelTestBase):
+class GroupTest(ModelTestBase):
     """
     Joint F-test for significance of a group of regression coefficients.
 
@@ -881,7 +891,7 @@ class FTest(ModelTestBase):
     alpha : float, optional
         Significance level for p-value (default=0.05 strict).
     alias : str, optional
-        Display name for this test (defaults to 'FTest').
+        Display name for this test (defaults to 'GroupTest').
     filter_mode : {'strict','moderate'}, default 'moderate'
         'strict'   → p-value < alpha;
         'moderate' → p-value < 2*alpha.
@@ -905,8 +915,8 @@ class FTest(ModelTestBase):
     @property
     def filter_mode_descs(self):
         return {
-            'strict':   f"F-test p < {self.alpha} for group {vars}.",
-            'moderate': f"F-test p < {self.alpha*2} for group {vars}."
+            'strict':   f"F-test p < {self.alpha} for group {self.vars}.",
+            'moderate': f"F-test p < {self.alpha*2} for group {self.vars}."
         }
     
     @property
@@ -941,6 +951,131 @@ class FTest(ModelTestBase):
 
 
 # ----------------------------------------------------------------------------
+# SignCheck class
+# ----------------------------------------------------------------------------
+
+class SignCheck(ModelTestBase):
+    """
+    Test whether model coefficients have the expected signs based on TSFM exp_sign values.
+
+    Parameters
+    ----------
+    tsfm_list : List[TSFM]
+        List of TSFM transformation instances with exp_sign attributes.
+    coefficients : pd.Series
+        Series of model coefficients with variable names as index.
+    alias : str, optional
+        Display name for this test (defaults to class name).
+    filter_mode : {'strict','moderate'}, default 'moderate'
+        Currently no difference between modes (may change in future).
+
+    Example
+    -------
+    >>> from Technic.transform import TSFM
+    >>> # Create some TSFM instances with expected signs
+    >>> tsfms = [
+    ...     TSFM('x1', 'DF', exp_sign=1),   # expect positive
+    ...     TSFM('x2', 'GR', exp_sign=-1),  # expect negative
+    ... ]
+    >>> # Model coefficients (e.g., from fitted regression)
+    >>> coeffs = pd.Series({'x1_DF': 0.5, 'x2_GR': -0.3})
+    >>> 
+    >>> # Create and run sign check
+    >>> sign_test = SignCheck(tsfms, coeffs)
+    >>> print(sign_test.test_result)
+    """
+    category = 'performance'
+
+    def __init__(
+        self,
+        tsfm_list: List,  # List[TSFM] but avoiding import issues
+        coefficients: pd.Series,
+        alias: Optional[str] = None,
+        filter_mode: str = 'moderate',
+        filter_on: bool = True
+    ):
+        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        self.tsfm_list = tsfm_list
+        self.coefficients = coefficients
+        self.filter_mode_descs = {
+            'strict':   'All coefficients must have expected signs.',
+            'moderate': 'All coefficients must have expected signs.'
+        }
+    
+    @property
+    def filter_mode_desc(self):
+        return self.filter_mode_descs[self.filter_mode]
+
+    @property
+    def test_result(self) -> pd.DataFrame:
+        """
+        Check coefficient signs against expected signs from TSFM instances.
+
+        Returns
+        -------
+        pd.DataFrame
+            Index: TSFM names (where exp_sign != 0)
+            Columns:
+              - 'Expected': '+' for positive, '-' for negative expected sign
+              - 'Coefficient': actual coefficient value
+              - 'Passed': True if sign matches expectation, False otherwise
+        """
+        records = []
+        
+        for tsfm in self.tsfm_list:
+            # Skip TSFM instances where exp_sign is 0 (no expectation)
+            if tsfm.exp_sign == 0:
+                continue
+                
+            tsfm_name = tsfm.name
+            
+            # Check if coefficient exists for this TSFM
+            if tsfm_name not in self.coefficients.index:
+                # If coefficient not found, mark as failed
+                expected_sign = '+' if tsfm.exp_sign > 0 else '-'
+                records.append({
+                    'Expected': expected_sign,
+                    'Coefficient': np.nan,
+                    'Passed': False
+                })
+                continue
+            
+            coeff_value = self.coefficients[tsfm_name]
+            expected_sign = '+' if tsfm.exp_sign > 0 else '-'
+            
+            # Check if signs match
+            if tsfm.exp_sign > 0:
+                # Expect positive coefficient
+                passed = coeff_value > 0
+            else:
+                # Expect negative coefficient  
+                passed = coeff_value < 0
+            
+            records.append({
+                'Expected': expected_sign,
+                'Coefficient': coeff_value,
+                'Passed': passed
+            })
+        
+        # Create DataFrame with TSFM names as index
+        tsfm_names = [tsfm.name for tsfm in self.tsfm_list if tsfm.exp_sign != 0]
+        df = pd.DataFrame(records, index=tsfm_names)
+        df.index.name = 'Variable'
+        
+        return df
+
+    @property
+    def test_filter(self) -> bool:
+        """
+        Return True if all variables with expected signs have coefficients 
+        with matching signs.
+        """
+        if self.test_result.empty:
+            return True  # No expectations to check
+        return self.test_result['Passed'].all()
+
+
+# ----------------------------------------------------------------------------
 # VIF Test for Multicollinearity
 # ----------------------------------------------------------------------------
 
@@ -958,11 +1093,13 @@ class VIFTest(ModelTestBase):
         - 'strict': threshold = 5
         - 'moderate': threshold = 10
     """
+    category = 'assumption'
+
     def __init__(
         self,
         exog: Union[np.ndarray, pd.DataFrame, list],
         alias: Optional[str] = None,
-        filter_mode: str = 'strict',
+        filter_mode: str = 'moderate',
         filter_on: bool = True
     ):
         super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
@@ -1013,47 +1150,59 @@ class VIFTest(ModelTestBase):
 
 class CointTest(ModelTestBase):
     """
-    Test for cointegration of y with X via Engle–Granger using p-values.
+    Test for cointegration by checking if X variables are non-stationary and residuals are stationary.
 
     Parameters
     ----------
-    y : array-like
-        Dependent series (e.g., pd.Series).
-    X : array-like
-        Explanatory variables (2D array or DataFrame).
+    X_vars : pd.DataFrame
+        DataFrame containing all X variables that are applicable to stationarity testing.
+    resids : pd.Series
+        Residual series from the fitted model.
+    test_dict : Dict[str, Callable], optional
+        Mapping of test names to functions; defaults to stationarity_test_dict.
+    test_threshold : Dict[str, Tuple[float, str]], optional
+        Test thresholds and directions; defaults to stationarity_test_threshold.
     alias : str, optional
-        Label for this test. If None, uses self.name.
-    filter_mode : {'strict', 'moderate'}, default 'strict'
-        - 'strict':   require p-value < 0.05
-        - 'moderate': require p-value < 0.10
+        Display name for this test (defaults to class name).
+    filter_mode : {'strict','moderate'}, default 'moderate'
+        - 'strict': all tests must pass for residuals and NOT pass for X variables
+        - 'moderate': at least half of tests must pass for residuals and NOT pass for each X variable
+    filter_on : bool, default True
+        Whether this test is active in filtering.
 
-    Attributes
-    ----------
-    alpha : float
-        Significance level for pass criteria (0.05 or 0.10).
-    filter_mode_descs : dict
-        Descriptions of the pass criteria for each mode.
+    Example
+    -------
+    >>> import pandas as pd
+    >>> # X variables (should be non-stationary)
+    >>> X_data = pd.DataFrame({'x1': [1, 2, 3, 4, 5], 'x2': [2, 4, 6, 8, 10]})
+    >>> # Model residuals (should be stationary)
+    >>> resids = pd.Series([0.1, -0.2, 0.1, -0.1, 0.0])
+    >>> 
+    >>> # Create cointegration test
+    >>> coint_test = CointTest(X_data, resids)
+    >>> print(coint_test.test_result)
     """
     category = 'assumption'
 
-    filter_mode_descs = {
-        'strict':   'Require Engle–Granger p-value < 0.05',
-        'moderate': 'Require Engle–Granger p-value < 0.10'
-    }
-
     def __init__(
         self,
-        y: Union[np.ndarray, pd.Series, list],
-        X: Union[np.ndarray, pd.DataFrame, list],
+        X_vars: pd.DataFrame,
+        resids: pd.Series,
+        test_dict: Optional[Dict[str, Callable]] = None,
+        test_threshold: Optional[Dict[str, Tuple[float, str]]] = None,
         alias: Optional[str] = None,
-        filter_mode: str = 'strict'
+        filter_mode: str = 'moderate',
+        filter_on: bool = True
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode)
-        # Align y and X, drop missing
-        self.y = pd.Series(y).dropna()
-        self.X = pd.DataFrame(X, index=self.y.index).dropna(axis=1, how='any')
-        # Set alpha based on mode
-        self.alpha = 0.05 if filter_mode == 'strict' else 0.10
+        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        self.X_vars = X_vars
+        self.resids = resids
+        self.test_dict = test_dict if test_dict is not None else stationarity_test_dict
+        self.thresholds = test_threshold if test_threshold is not None else stationarity_test_threshold
+        self.filter_mode_descs = {
+            'strict':   'All X variables must be non-stationary and residuals must be stationary.',
+            'moderate': 'At least half of tests must show X variables are non-stationary and residuals are stationary.'
+        }
     
     @property
     def filter_mode_desc(self):
@@ -1062,30 +1211,155 @@ class CointTest(ModelTestBase):
     @property
     def test_result(self) -> pd.DataFrame:
         """
-        Run Engle-Granger and report statistic, p-value, and pass/fail.
-        """
-        try:
-            result = engle_granger(
-                self.y.values,
-                self.X.values,
-                trend='c', lags=None, max_lags=None, method='bic'
-            )
-            stat = float(result.stat)
-            pval = float(result.pvalue)
-            passed = pval < self.alpha
-        except Exception:
-            stat, pval, passed = np.nan, np.nan, False
+        Test stationarity of X variables and residuals.
 
-        df = pd.DataFrame([{
-            'Statistic': stat,
-            'P-value':   pval,
-            'Passed':     passed
-        }], index=[self.name])
+        Returns
+        -------
+        pd.DataFrame
+            Index: Variable names (X variables + 'Residuals')
+            Columns:
+              - 'Type': 'X Variable' or 'Residuals'
+              - 'Expected': 'Non-stationary' for X, 'Stationary' for residuals
+              - Individual test columns (e.g., 'ADF', 'PP'): True if test passed expectation
+              - 'Result': 'Non-stationary'/'Stationary' based on filter_mode aggregation
+              - 'Passed': True if meets expectation, False otherwise
+        """
+        records = []
+        test_names = list(self.test_dict.keys())
+        
+        # Test each X variable (expect non-stationary)
+        for col in self.X_vars.columns:
+            series = self.X_vars[col].dropna()
+            if len(series) < 10:  # Skip series that are too short
+                continue
+                
+            record = {
+                'Type': 'X Variable',
+                'Expected': 'Non-stationary'
+            }
+            
+            # Individual test results
+            test_results = {}
+            for test_name, test_func in self.test_dict.items():
+                if test_name not in self.thresholds:
+                    test_results[test_name] = False
+                    continue
+                    
+                try:
+                    stat, pvalue = test_func(series)
+                    alpha, direction = self.thresholds[test_name]
+                    
+                    # For stationarity tests: 
+                    # - Tests like ADF/PP have null hypothesis of unit root (non-stationary)
+                    #   So p > alpha means non-stationary (null not rejected)
+                    # - Tests like KPSS have null hypothesis of stationarity
+                    #   So p > alpha means stationary (null not rejected)
+                    
+                    if direction == '<':
+                        # Null: non-stationary, reject null if p < alpha (stationary)
+                        test_indicates_stationary = pvalue < alpha
+                    else:
+                        # Null: stationary, reject null if p < alpha (non-stationary)
+                        test_indicates_stationary = pvalue > alpha
+                    
+                    # For X variables, we expect non-stationary, so pass if test indicates non-stationary
+                    test_results[test_name] = not test_indicates_stationary
+                    
+                except Exception:
+                    test_results[test_name] = False
+                    continue
+            
+            # Add individual test results to record
+            for test_name in test_names:
+                record[test_name] = test_results.get(test_name, False)
+            
+            # Determine overall result based on filter_mode
+            passed_count = sum(test_results.values())
+            total_count = len([v for v in test_results.values() if v is not None])
+            
+            if self.filter_mode == 'strict':
+                is_nonstationary = passed_count == total_count and total_count > 0
+            else:  # moderate
+                is_nonstationary = passed_count > (total_count / 2) if total_count > 0 else False
+                
+            result_str = 'Non-stationary' if is_nonstationary else 'Stationary'
+            expected_result = True if is_nonstationary else False  # Expect non-stationary for X
+            
+            record['Result'] = result_str
+            record['Passed'] = expected_result
+            records.append(record)
+        
+        # Test residuals (expect stationary)
+        resid_series = self.resids.dropna()
+        if len(resid_series) >= 10:
+            record = {
+                'Type': 'Residuals',
+                'Expected': 'Stationary'
+            }
+            
+            # Individual test results
+            test_results = {}
+            for test_name, test_func in self.test_dict.items():
+                if test_name not in self.thresholds:
+                    test_results[test_name] = False
+                    continue
+                    
+                try:
+                    stat, pvalue = test_func(resid_series)
+                    alpha, direction = self.thresholds[test_name]
+                    
+                    if direction == '<':
+                        # Null: non-stationary, reject null if p < alpha (stationary)
+                        test_indicates_stationary = pvalue < alpha
+                    else:
+                        # Null: stationary, reject null if p < alpha (non-stationary)
+                        test_indicates_stationary = pvalue > alpha
+                    
+                    # For residuals, we expect stationary, so pass if test indicates stationary
+                    test_results[test_name] = test_indicates_stationary
+                    
+                except Exception:
+                    test_results[test_name] = False
+                    continue
+            
+            # Add individual test results to record
+            for test_name in test_names:
+                record[test_name] = test_results.get(test_name, False)
+            
+            # Determine overall result based on filter_mode
+            passed_count = sum(test_results.values())
+            total_count = len([v for v in test_results.values() if v is not None])
+            
+            if self.filter_mode == 'strict':
+                is_stationary = passed_count == total_count and total_count > 0
+            else:  # moderate
+                is_stationary = passed_count > (total_count / 2) if total_count > 0 else False
+                
+            result_str = 'Stationary' if is_stationary else 'Non-stationary'
+            expected_result = True if is_stationary else False  # Expect stationary for residuals
+            
+            record['Result'] = result_str
+            record['Passed'] = expected_result
+            records.append(record)
+        
+        # Create index
+        var_names = list(self.X_vars.columns) + ['Residuals']
+        df = pd.DataFrame(records, index=var_names[:len(records)])
+        df.index.name = 'Variable'
+        
         return df
 
     @property
     def test_filter(self) -> bool:
         """
-        Indicates whether the cointegration test passed based on alpha.
+        Return True if all X variables are non-stationary AND residuals are stationary.
+        
+        The filter_mode logic is already incorporated in the test_result calculation,
+        so we just need to check if all variables passed their expectations.
         """
-        return bool(self.test_result['Passed'].iloc[0])
+        results = self.test_result
+        if results.empty:
+            return False
+            
+        # All variables must pass their expectations (logic already handled in test_result)
+        return results['Passed'].all()
