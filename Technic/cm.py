@@ -291,30 +291,35 @@ class CM:
             if not isinstance(dumvar, DumVar):
                 return False
             
-            # Check for monthly dummies covering M:2 to M:12 (11 dummies)
-            if dumvar.var.startswith('M') and ':' in dumvar.name:
-                dummy_names = [name for name in dumvar.output_names if ':' in name]
+            # Extract numbers from output_names that have the pattern var:number
+            dummy_names = [name for name in dumvar.output_names if ':' in name]
+            if not dummy_names:
+                return False
+                
+            # Check for monthly dummies: var should be 'M' and output should cover M:2 to M:12
+            if dumvar.var == 'M':
                 months = set()
                 for name in dummy_names:
-                    try:
-                        month_num = int(name.split(':')[1])
-                        months.add(month_num)
-                    except (ValueError, IndexError):
-                        continue
+                    if name.startswith('M:'):
+                        try:
+                            month_num = int(name.split(':')[1])
+                            months.add(month_num)
+                        except (ValueError, IndexError):
+                            continue
                 # Check if covers months 2-12 (reference month 1 dropped)
                 if months == set(range(2, 13)):
                     return True
             
-            # Check for quarterly dummies covering Q:2 to Q:4 (3 dummies)
-            if dumvar.var.startswith('Q') and ':' in dumvar.name:
-                dummy_names = [name for name in dumvar.output_names if ':' in name]
+            # Check for quarterly dummies: var should be 'Q' and output should cover Q:2 to Q:4
+            elif dumvar.var == 'Q':
                 quarters = set()
                 for name in dummy_names:
-                    try:
-                        quarter_num = int(name.split(':')[1])
-                        quarters.add(quarter_num)
-                    except (ValueError, IndexError):
-                        continue
+                    if name.startswith('Q:'):
+                        try:
+                            quarter_num = int(name.split(':')[1])
+                            quarters.add(quarter_num)
+                        except (ValueError, IndexError):
+                            continue
                 # Check if covers quarters 2-4 (reference quarter 1 dropped)
                 if quarters == set(range(2, 5)):
                     return True
