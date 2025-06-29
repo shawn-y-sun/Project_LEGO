@@ -1316,7 +1316,8 @@ class DataManager:
         
         This method provides a convenient way to update MEV mappings directly through
         the DataManager interface. It delegates to the underlying MEVLoader's
-        update_mev_map method and clears cached MEV data to ensure consistency.
+        update_mev_map method while preserving any cached MEV data that was modified
+        through apply_to_mevs().
         
         For new MEV codes, it's highly recommended to specify both 'type' and 'category'.
         Description is optional if you can remember what the MEV code means.
@@ -1337,19 +1338,24 @@ class DataManager:
             
         Examples
         --------
-        >>> # Add new MEV codes
+        >>> # Typical workflow: add new MEV columns then update mapping
+        >>> def add_custom_mev(mev_df, internal_df):
+        ...     mev_df['CUSTOM_GDP'] = mev_df['GDP'] * 1.1  # Custom GDP calculation
+        ...     return mev_df
+        >>> dm.apply_to_mevs(add_custom_mev)
+        >>> 
+        >>> # Now update the mapping for the new MEV
         >>> dm.update_mev_map({
-        ...     'NEWGDP': {
+        ...     'CUSTOM_GDP': {
         ...         'type': 'level',
-        ...         'description': 'New GDP Measure',
+        ...         'description': 'Custom GDP Measure',
         ...         'category': 'GDP'
-        ...     },
-        ...     'CUSTOM_RATE': {
-        ...         'type': 'rate',
-        ...         'category': 'Custom Metrics'
-        ...         # description will be None
         ...     }
         ... })
+        >>> 
+        >>> # Both the new column and mapping are preserved
+        >>> print('CUSTOM_GDP' in dm.model_mev.columns)  # True
+        >>> print(dm.mev_map['CUSTOM_GDP'])  # Shows the mapping info
         >>> 
         >>> # Update existing MEV code (only specified attributes)
         >>> dm.update_mev_map({
@@ -1358,27 +1364,20 @@ class DataManager:
         ...         # type and description remain unchanged
         ...     }
         ... })
-        >>> 
-        >>> # Verify updates
-        >>> print(dm.mev_map['NEWGDP'])
-        >>> print(dm.mev_map['GDP'])
         
         Notes
         -----
         - Changes are made to the MEVLoader's in-memory MEV map
-        - To persist changes, you would need to update the Excel file manually
+        - Cached MEV data is preserved, including any columns added via apply_to_mevs()
+        - To persist mapping changes, you would need to update the Excel file manually
         - For new MEV codes, 'type' and 'category' are highly recommended
         - Valid attributes: 'type', 'description', 'category'
-        - Cached MEV data is cleared after updating to ensure consistency
         
         See Also
         --------
         MEVLoader.update_mev_map : The underlying method that performs the update
+        apply_to_mevs : Method for adding new MEV columns
         """
         # Delegate to the MEVLoader's update_mev_map method
+        # This updates the mapping without affecting cached data
         self._mev_loader.update_mev_map(updates)
-        
-        # Clear cached MEV data to ensure consistency with updated mapping
-        # This forces reloading of MEV data with the updated mapping
-        self._model_mev_cache = None
-        self._scen_mevs_cache = None
