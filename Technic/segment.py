@@ -473,6 +473,7 @@ class Segment:
         max_lag: int = 3,
         max_periods: int = 3,
         category_limit: int = 1,
+        exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1, 1, 1),
         test_update_func: Optional[Callable] = None,
         outlier_idx: Optional[List[Any]] = None,
@@ -514,6 +515,9 @@ class Segment:
         category_limit : int, default 1
             Maximum number of variables from each MEV category per combo.
             Only applies to top-level strings and TSFM instances in desired_pool.
+        exp_sign_map : Optional[Dict[str, int]], default=None
+            Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
+            Passed to ModelSearch.run_search().
         rank_weights : Tuple[float, float, float], default (1, 1, 1)
             Weights for (Fit Measures, IS Error, OOS Error) when ranking models.
         test_update_func : Optional[Callable], default None
@@ -586,7 +590,8 @@ class Segment:
             category_limit=category_limit,
             rank_weights=rank_weights,
             test_update_func=test_update_func,
-            outlier_idx=outlier_idx
+            outlier_idx=outlier_idx,
+            exp_sign_map=exp_sign_map
         )
 
         # 3) Collect the top_n results from the searcher

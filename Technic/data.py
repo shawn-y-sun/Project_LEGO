@@ -770,7 +770,8 @@ class DataManager:
         self,
         specs: List[Union[str, TSFM]],
         max_lag: int = 0,
-        max_periods: Union[int, List[int]] = 1
+        max_periods: Union[int, List[int]] = 1,
+        exp_sign_map: Optional[Dict[str, int]] = None
     ) -> Dict[str, List[Union[str, TSFM]]]:
         """
         Generate TSFM specification lists for each variable based on their type.
@@ -797,6 +798,12 @@ class DataManager:
             Special handling for monthly data: When internal data has monthly frequency
             and max_periods > 3, automatically creates periods [1, 2, 3, 6, 9, 12, ...]
             (multiples of 3 beyond period 3) instead of [1, 2, 3, 4, 5, 6, ...].
+        exp_sign_map : Optional[Dict[str, int]], default=None
+            Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
+            - Keys: MEV variable names (str)
+            - Values: Expected signs (int): 1 for positive, -1 for negative, 0 for no expectation
+            If provided, TSFM instances created from matching variable names will use 
+            the specified exp_sign value. Variables not in the map default to exp_sign=0.
 
         Returns
         -------
@@ -924,7 +931,11 @@ class DataManager:
                         for p in pvals:
                             base_fn = functools.partial(fn, periods=p) if p else fn
                             for lag in range(max_lag+1):
-                                tsfms.append(TSFM(spec, base_fn, lag))
+                                # Get expected sign from map if provided
+                                exp_sign = 0
+                                if exp_sign_map and spec in exp_sign_map:
+                                    exp_sign = exp_sign_map[spec]
+                                tsfms.append(TSFM(spec, base_fn, lag, exp_sign=exp_sign))
                     specs_map[var_name] = tsfms
             else:
                 raise ValueError(f"Invalid spec: {spec!r}")
@@ -939,7 +950,8 @@ class DataManager:
         self,
         specs: List[Union[str, TSFM]],
         max_lag: int = 0,
-        max_periods: Union[int, List[int]] = 1
+        max_periods: Union[int, List[int]] = 1,
+        exp_sign_map: Optional[Dict[str, int]] = None
     ) -> Dict[str, pd.DataFrame]:
         """
         Build a DataFrame for each variable by generating transform specifications
@@ -960,6 +972,9 @@ class DataManager:
             Must be positive (if int) or contain only positive values (if list).
             For monthly data with max_periods > 3, automatically uses 
             [1, 2, 3, 6, 9, 12, ...] instead of [1, 2, 3, 4, 5, 6, ...].
+        exp_sign_map : Optional[Dict[str, int]], default=None
+            Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
+            See build_tsfm_specs() for details.
 
         Returns
         -------
@@ -992,7 +1007,8 @@ class DataManager:
         tsfm_specs = self.build_tsfm_specs(
             specs,
             max_lag=max_lag,
-            max_periods=max_periods
+            max_periods=max_periods,
+            exp_sign_map=exp_sign_map
         )
         var_df_map: Dict[str, pd.DataFrame] = {}
         for var, tsfms in tsfm_specs.items():

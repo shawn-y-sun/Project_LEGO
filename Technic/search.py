@@ -1,4 +1,4 @@
-from typing import List, Union, Tuple, Type, Any, Optional, Callable
+from typing import List, Union, Tuple, Type, Any, Optional, Callable, Dict
 import itertools
 import time
 import datetime
@@ -8,10 +8,51 @@ import pandas as pd
 from tqdm import tqdm
 
 from .data import DataManager
-from .feature import Feature
+from .feature import Feature, DumVar
 from .transform import TSFM
 from .model import ModelBase
 from .cm import CM
+
+
+def _sort_specs_with_dummies_first(spec_list: List[Any]) -> List[Any]:
+    """
+    Sort spec list so quarterly and monthly dummy variables come first.
+    
+    Priority order:
+    1. DumVar('Q') - Quarterly dummies first
+    2. DumVar('M') - Monthly dummies second  
+    3. Everything else - maintain relative order
+    
+    Parameters
+    ----------
+    spec_list : List[Any]
+        List of specification items to sort
+        
+    Returns
+    -------
+    List[Any]
+        Sorted list with dummy variables first
+    """
+    def get_dummy_priority(spec):
+        """Get priority for sorting. Lower numbers come first."""
+        try:
+            # Check if this is a DumVar instance
+            if isinstance(spec, DumVar):
+                # Check the variable name to determine type
+                var_name = str(spec.var).upper()
+                if var_name == 'Q':
+                    return 0  # Quarterly first
+                elif var_name == 'M':
+                    return 1  # Monthly second
+                else:
+                    return 2  # Other dummy variables
+            else:
+                return 3  # Non-dummy features
+        except:
+            return 3  # Safe fallback for any errors
+    
+    # Sort by priority, keeping relative order for items with same priority
+    return sorted(spec_list, key=lambda x: (get_dummy_priority(x), str(x)))
 
 
 class ModelSearch:
@@ -51,7 +92,8 @@ class ModelSearch:
         max_var_num: int,
         max_lag: int = 3,
         max_periods: int = 3,
-        category_limit: int = 1
+        category_limit: int = 1,
+        exp_sign_map: Optional[Dict[str, int]] = None
     ) -> List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]]:
         """
         Build all valid feature-spec combos:
@@ -80,6 +122,9 @@ class ModelSearch:
             Max variables from each MEV category per combo. Only applies to 
             top-level strings and TSFM instances in desired_pool; other Feature 
             instances or items in nested structures are not subject to this constraint.
+        exp_sign_map : Optional[Dict[str, int]], default=None
+            Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
+            Passed to DataManager.build_tsfm_specs() for string expansion.
 
         Returns
         -------
@@ -208,7 +253,8 @@ class ModelSearch:
                 pass
         
         tsfm_map = self.dm.build_tsfm_specs(
-            list(top_strings), max_lag=max_lag, max_periods=effective_max_periods
+            list(top_strings), max_lag=max_lag, max_periods=effective_max_periods,
+            exp_sign_map=exp_sign_map
         )
 
         expanded: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
@@ -221,7 +267,9 @@ class ModelSearch:
                     variant_lists.append([spec])
             # Cartesian product over variant lists
             for prod in itertools.product(*variant_lists):
-                expanded.append(list(prod))
+                # Sort each spec list so quarterly and monthly dummies come first
+                sorted_prod = _sort_specs_with_dummies_first(list(prod))
+                expanded.append(sorted_prod)
 
         self.all_specs = expanded
         return expanded
@@ -427,6 +475,7 @@ class ModelSearch:
         max_lag: int = 3,
         max_periods: int = 3,
         category_limit: int = 1,
+        exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
         outlier_idx: Optional[List[Any]] = None
@@ -460,6 +509,9 @@ class ModelSearch:
             Maximum number of periods to consider in transformations.
         category_limit : int, default 1
             Maximum number of variables from each MEV category per combo.
+        exp_sign_map : Optional[Dict[str, int]], default=None
+            Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
+            Passed to build_spec_combos() and ultimately to DataManager.build_tsfm_specs().
         rank_weights : tuple, default (1.0, 1.0, 1.0)
             Weights for (Fit Measures, IS Error, OOS Error) when ranking models.
         test_update_func : callable, optional
@@ -484,13 +536,14 @@ class ModelSearch:
               f"Max lag         : {max_lag}\n"
               f"Max periods     : {max_periods}\n"
               f"Category limit  : {category_limit}\n"
+              f"Exp sign map    : {exp_sign_map}\n"
               f"Top N           : {top_n}\n"
               f"Rank weights    : {rank_weights}\n"
-              f"Test update func: {test_update_func}")
+              f"Test update func: {test_update_func}\n")
         print("==================================\n")
 
         # 2. Build specs
-        combos = self.build_spec_combos(forced, desired_pool, max_var_num, max_lag, max_periods, category_limit)
+        combos = self.build_spec_combos(forced, desired_pool, max_var_num, max_lag, max_periods, category_limit, exp_sign_map)
         print(f"Built {len(combos)} spec combinations.\n")
 
         # 3. Example test info
