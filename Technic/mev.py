@@ -14,7 +14,7 @@ from typing import Dict, Any, Tuple, Optional, Union, List, Set
 # Determine support directory relative to this module file using pathlib
 _BASE_DIR = Path(__file__).resolve().parent
 _SUPPORT_DIR = _BASE_DIR / 'support'
-_DEFAULT_MEV_TYPE_PATH = _SUPPORT_DIR / 'mev_type.xlsx'
+_DEFAULT_MEV_MAP_PATH = _SUPPORT_DIR / 'mev_map.xlsx'
 _DEFAULT_TSFM_PATH = _SUPPORT_DIR / 'type_tsfm.yaml'
 
 def _process_quarterly_excel(workbook: str, sheet: Optional[str] = None) -> pd.DataFrame:
@@ -43,7 +43,7 @@ def _process_quarterly_excel(workbook: str, sheet: Optional[str] = None) -> pd.D
     df_mev = df_mev.loc[:, df_mev.columns.notna()].iloc[2:]
 
     df_mev.columns = df_mev.iloc[0]
-    df_mev = df_mev.iloc[1:, :]
+    df_mev = df_mev.iloc[1:, 1:]
 
     # Reformat index to timestamps at period end
     df_mev.index = [i.replace(':', 'Q') for i in df_mev.index]
@@ -70,7 +70,8 @@ def _process_monthly_excel(workbook: str, sheet: Optional[str] = None) -> pd.Dat
         Processed DataFrame with datetime index
     """
     df = pd.read_excel(workbook, sheet_name=sheet)
-    df.set_index(df.columns[0], inplace=True)
+    df = df.set_index('Unnamed: 1').iloc[10:, 1:]
+    df.index.name = None
     df.index = pd.to_datetime(df.index).normalize()
     return df
 
@@ -88,11 +89,11 @@ class MEVLoader:
     Parameters
     ----------
     mev_map : dict, optional
-        Direct mapping of MEV codes to type/description dicts.
-        If provided, overrides mev_type_path.
+        Direct mapping of MEV codes to type/description/category dicts.
+        If provided, overrides mev_map_path.
         Example: {
-            'GDP': {'type': 'level', 'description': 'Gross Domestic Product'},
-            'UNRATE': {'type': 'rate', 'description': 'Unemployment Rate'}
+            'GDP': {'type': 'level', 'description': 'Gross Domestic Product', 'category': 'GDP'},
+            'UNRATE': {'type': 'rate', 'description': 'Unemployment Rate', 'category': 'Job Market'}
         }
     tsfm_map : dict, optional
         Direct mapping of types to transform lists.
@@ -101,10 +102,10 @@ class MEVLoader:
             'level': ['log', 'diff'],
             'rate': ['diff']
         }
-    mev_type_path : str or Path, optional
-        Path to Excel file containing MEV type mappings.
-        Must have columns: mev_code, type, description.
-        If None, uses default from support/mev_type.xlsx.
+    mev_map_path : str or Path, optional
+        Path to Excel file containing MEV mappings.
+        Must have columns: mev_code, type, description, and optionally category.
+        If None, uses default from support/mev_map.xlsx.
     tsfm_path : str or Path, optional
         Path to YAML file containing transform mappings.
         Must have a 'transforms' key mapping types to transform lists.
@@ -187,6 +188,19 @@ class MEVLoader:
     >>> mev_info = loader.get_mev_info("GDP")
     >>> mev_type = mev_info["type"]
     >>> mev_desc = mev_info["description"]
+    >>> mev_category = mev_info["category"]
+    >>> 
+    >>> # Update MEV mapping
+    >>> loader.update_mev_map({
+    ...     'CUSTOM_GDP': {
+    ...         'type': 'level',
+    ...         'description': 'Custom GDP Measure',
+    ...         'category': 'GDP'
+    ...     },
+    ...     'GDP': {
+    ...         'category': 'Economic Growth'  # Update existing MEV
+    ...     }
+    ... })
     
     Notes
     -----
@@ -204,13 +218,13 @@ class MEVLoader:
     """
     def __init__(
         self,
-        mev_map: Optional[Dict[str, Dict[str, str]]] = None,
+        mev_map: Optional[Dict[str, Dict[str, Optional[str]]]] = None,
         tsfm_map: Optional[Dict[str, List[str]]] = None,
-        mev_type_path: Optional[Union[str, Path]] = None,
+        mev_map_path: Optional[Union[str, Path]] = None,
         tsfm_path: Optional[Union[str, Path]] = None
     ):
         # Load or set mapping tables first
-        self._mev_map = self._load_mev_map(mev_type_path) if mev_map is None else mev_map
+        self._mev_map = self._load_mev_map(mev_map_path) if mev_map is None else mev_map
         self._tsfm_map = self._load_tsfm_map(tsfm_path) if tsfm_map is None else tsfm_map
         
         # Initialize empty data containers for model MEVs
@@ -224,9 +238,9 @@ class MEVLoader:
         # Track all MEV codes
         self._mev_codes: Set[str] = set()
         
-    def _load_mev_map(self, path: Optional[Union[str, Path]] = None) -> Dict[str, Dict[str, str]]:
-        """Load MEV type mapping from Excel file."""
-        file_path = Path(path) if path else _DEFAULT_MEV_TYPE_PATH
+    def _load_mev_map(self, path: Optional[Union[str, Path]] = None) -> Dict[str, Dict[str, Optional[str]]]:
+        """Load MEV mapping from Excel file."""
+        file_path = Path(path) if path else _DEFAULT_MEV_MAP_PATH
         if not file_path.exists():
             raise FileNotFoundError(f"MEV type mapping file not found: {file_path}")
             
@@ -235,10 +249,25 @@ class MEVLoader:
         if not required_cols.issubset(df.columns):
             raise ValueError(f"Expected columns {required_cols} in {file_path}")
             
-        return {
-            code: {'type': type_, 'description': desc}
-            for code, type_, desc in zip(df['mev_code'], df['type'], df['description'])
-        }
+        # Check if category column exists
+        has_category = 'category' in df.columns
+        
+        if has_category:
+            return {
+                code: {
+                    'type': type_, 
+                    'description': desc, 
+                    'category': cat if pd.notna(cat) else None
+                }
+                for code, type_, desc, cat in zip(
+                    df['mev_code'], df['type'], df['description'], df['category']
+                )
+            }
+        else:
+            return {
+                code: {'type': type_, 'description': desc, 'category': None}
+                for code, type_, desc in zip(df['mev_code'], df['type'], df['description'])
+            }
         
     def _load_tsfm_map(self, path: Optional[Union[str, Path]] = None) -> Dict[str, List[str]]:
         """Load transform mapping from YAML file."""
@@ -573,7 +602,7 @@ class MEVLoader:
         if missing_codes:
             warnings.warn(
                 f"The following MEV codes are not in MEV_MAP: {missing_codes}\n"
-                "Please add them to mev_type.xlsx with appropriate type and description.",
+                "Please add them to mev_map.xlsx with appropriate type and description.",
                 UserWarning
             )
             
@@ -623,7 +652,7 @@ class MEVLoader:
         return sorted(list(self._mev_codes))
         
     @property
-    def mev_map(self) -> Dict[str, Dict[str, str]]:
+    def mev_map(self) -> Dict[str, Dict[str, Optional[str]]]:
         """Get the MEV type mapping."""
         return self._mev_map
         
@@ -632,9 +661,9 @@ class MEVLoader:
         """Get the transform mapping."""
         return self._tsfm_map
         
-    def get_mev_info(self, mev_code: str) -> Dict[str, str]:
+    def get_mev_info(self, mev_code: str) -> Dict[str, Optional[str]]:
         """
-        Get type and description for a MEV code.
+        Get type, description, and category for a MEV code.
         
         Parameters
         ----------
@@ -644,7 +673,7 @@ class MEVLoader:
         Returns
         -------
         dict
-            Dictionary with 'type' and 'description' keys
+            Dictionary with 'type', 'description', and 'category' keys
             
         Raises
         ------
@@ -654,6 +683,110 @@ class MEVLoader:
         if mev_code not in self._mev_map:
             raise KeyError(f"MEV code '{mev_code}' not found in MEV_MAP")
         return self._mev_map[mev_code]
+
+    def update_mev_map(self, updates: Dict[str, Dict[str, Optional[str]]]) -> None:
+        """
+        Update the MEV mapping with new or modified MEV codes.
+        
+        This method allows users to easily add new MEV codes or update existing ones
+        without modifying the Excel file directly. For new MEV codes, it's highly
+        recommended to specify both 'type' and 'category'. Description is optional
+        if you can remember what the MEV code means.
+        
+        Parameters
+        ----------
+        updates : dict
+            Dictionary where keys are MEV codes and values are dictionaries
+            containing the attributes to update. Supported attributes are:
+            - 'type': MEV type (e.g., 'level', 'rate')
+            - 'description': Human-readable description
+            - 'category': MEV category (e.g., 'GDP', 'Job Market', 'Inflation')
+            
+            For existing MEV codes, only the specified attributes will be updated;
+            unspecified attributes will remain unchanged.
+            
+            For new MEV codes, unspecified attributes will be set to None.
+            
+        Examples
+        --------
+        >>> loader = MEVLoader()
+        >>> 
+        >>> # Add new MEV codes
+        >>> loader.update_mev_map({
+        ...     'NEWGDP': {
+        ...         'type': 'level',
+        ...         'description': 'New GDP Measure',
+        ...         'category': 'GDP'
+        ...     },
+        ...     'CUSTOM_RATE': {
+        ...         'type': 'rate',
+        ...         'category': 'Custom Metrics'
+        ...         # description will be None
+        ...     }
+        ... })
+        >>> 
+        >>> # Update existing MEV code (only specified attributes)
+        >>> loader.update_mev_map({
+        ...     'GDP': {
+        ...         'category': 'Economic Growth'  # Only update category
+        ...         # type and description remain unchanged
+        ...     }
+        ... })
+        >>> 
+        >>> # Verify updates
+        >>> print(loader.get_mev_info('NEWGDP'))
+        >>> print(loader.get_mev_info('GDP'))
+        
+        Notes
+        -----
+        - Changes are made to the in-memory MEV map only
+        - To persist changes, you would need to update the Excel file manually
+        - For new MEV codes, 'type' and 'category' are highly recommended
+        - Valid attributes: 'type', 'description', 'category'
+        """
+        for mev_code, attributes in updates.items():
+            if mev_code in self._mev_map:
+                # Update existing MEV code - only update specified attributes
+                for attr, value in attributes.items():
+                    if attr in ['type', 'description', 'category']:
+                        self._mev_map[mev_code][attr] = value
+                    else:
+                        warnings.warn(
+                            f"Unknown attribute '{attr}' for MEV code '{mev_code}'. "
+                            "Valid attributes are: 'type', 'description', 'category'",
+                            UserWarning
+                        )
+            else:
+                # Add new MEV code - set unspecified attributes to None
+                new_entry = {
+                    'type': attributes.get('type'),
+                    'description': attributes.get('description'),
+                    'category': attributes.get('category')
+                }
+                
+                # Warn if important attributes are missing for new MEV codes
+                if new_entry['type'] is None or new_entry['category'] is None:
+                    warnings.warn(
+                        f"For new MEV code '{mev_code}', it's highly recommended to "
+                        "specify both 'type' and 'category' attributes.",
+                        UserWarning
+                    )
+                
+                # Check for unknown attributes
+                for attr in attributes:
+                    if attr not in ['type', 'description', 'category']:
+                        warnings.warn(
+                            f"Unknown attribute '{attr}' for MEV code '{mev_code}'. "
+                            "Valid attributes are: 'type', 'description', 'category'",
+                            UserWarning
+                        )
+                
+                self._mev_map[mev_code] = new_entry
+                
+        # Update MEV codes tracking if new codes were added
+        new_codes = set(updates.keys()) - self._mev_codes
+        if new_codes:
+            self._mev_codes.update(new_codes)
 
     def clean_model_mevs(self) -> None:
         """

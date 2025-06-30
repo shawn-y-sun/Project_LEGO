@@ -15,7 +15,8 @@ class TSFM(Feature):
     Transformation feature subclass of Feature.
 
     Applies a specified function (callable or name string) to an input variable series,
-    with optional lag and exponent sign adjustments.
+    with optional lag. The exp_sign parameter indicates the expected coefficient sign
+    for economic validation during model filtering.
 
     Parameters
     ----------
@@ -26,9 +27,24 @@ class TSFM(Feature):
     lag : int, default 0
         Number of periods to lag the series before transformation.
     exp_sign : int, default 0
-        Exponent sign adjustment: 1 for absolute, -1 for negated absolute, 0 for none.
+        Expected coefficient sign for economic validation:
+        - 1: expect positive coefficient (positive relationship with target)
+        - -1: expect negative coefficient (negative relationship with target)
+        - 0: no expectation (no sign constraint)
+        Used in exhaustive search filtering to ensure economically sensible models.
     alias : str, optional
         Custom name for the output feature.
+        
+    Example
+    -------
+    # GDP growth should have positive relationship with target
+    gdp_growth = TSFM('GDP', 'GR', exp_sign=1)
+    
+    # Interest rates might have negative relationship with target
+    interest_rate = TSFM('RATE', 'LV', exp_sign=-1)
+    
+    # No expectation for some variable
+    control_var = TSFM('CONTROL', 'DF', exp_sign=0)
     """
     def __init__(
         self,
@@ -91,7 +107,7 @@ class TSFM(Feature):
 
     def apply(self, *dfs: pd.DataFrame) -> pd.Series:
         """
-        Resolve input series, apply lag, transform, and exponent adjustments.
+        Resolve input series, apply lag, and transform.
 
         Parameters
         ----------
@@ -117,12 +133,6 @@ class TSFM(Feature):
 
         # Apply the transformation function
         result = self.transform_fn(series)
-
-        # Apply exponent sign adjustments
-        if self.exp_sign == 1:
-            result = result.abs()
-        elif self.exp_sign == -1:
-            result = -result.abs()
 
         # Set the result name and return
         result.name = self.name

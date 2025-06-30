@@ -111,9 +111,9 @@ class DataManager:
 
     Notes
     -----
-    - The DataManager maintains caches for interpolated MEV data to improve performance
-    - All data modifications through apply_* methods are made to the original data in loaders
-    - The class provides dynamic access to loader data, ensuring you always have the latest data
+    - The DataManager maintains caches for all data to improve performance and isolation
+    - All data modifications through apply_* methods are made to cached data, not loaders
+    - The class provides dynamic access to cached data, ensuring consistency
     - Sample splits are managed by the internal_loader and accessed through properties
     - Use refresh() to update cached data after loader modifications or to replace loaders
 
@@ -135,6 +135,12 @@ class DataManager:
         # Cache for interpolated MEV data
         self._mev_cache: Dict[str, pd.DataFrame] = {}
         self._scen_cache: Dict[str, Dict[str, pd.DataFrame]] = {}
+        
+        # Cache for data copies that can be modified
+        self._internal_data_cache: Optional[pd.DataFrame] = None
+        self._scen_internal_data_cache: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None
+        self._model_mev_cache: Optional[pd.DataFrame] = None
+        self._scen_mevs_cache: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None
         
         # Check if both monthly and quarterly MEVs exist
         if not (self._mev_loader.model_mev_mth.empty or self._mev_loader.model_mev_qtr.empty):
@@ -200,16 +206,20 @@ class DataManager:
         # Clear all caches to force reloading
         self._mev_cache.clear()
         self._scen_cache.clear()
+        self._internal_data_cache = None
+        self._scen_internal_data_cache = None
+        self._model_mev_cache = None
+        self._scen_mevs_cache = None
 
     @property
     def internal_data(self) -> pd.DataFrame:
         """
-        Get the latest internal data from the internal loader.
+        Get the cached internal data, creating a copy from the loader if needed.
 
         Returns
         -------
         pd.DataFrame
-            The most recent internal data. Any modifications made through
+            Cached internal data. Any modifications made through
             apply_to_internal() will be reflected in this data.
 
         Example
@@ -218,28 +228,37 @@ class DataManager:
         >>> print(f"Available variables: {internal.columns.tolist()}")
         >>> print(f"Date range: {internal.index.min()} to {internal.index.max()}")
         """
-        return self._internal_loader.internal_data
+        if self._internal_data_cache is None:
+            self._internal_data_cache = self._internal_loader.internal_data.copy()
+        return self._internal_data_cache
 
     @property
-    def scen_internal_data(self) -> Dict[str, pd.DataFrame]:
+    def scen_internal_data(self) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
-        Get the latest scenario internal data from the internal loader.
+        Get the cached scenario internal data, creating copies from the loader if needed.
 
         Returns
         -------
-        Dict[str, pd.DataFrame]
-            Dictionary mapping scenario names to their corresponding internal data.
-            Each DataFrame contains the scenario-specific internal data.
+        Dict[str, Dict[str, pd.DataFrame]]
+            Dictionary mapping scenario set names to scenario dictionaries.
+            Each scenario DataFrame contains the scenario-specific internal data.
 
         Example
         -------
         >>> scenarios = dm.scen_internal_data
         >>> # Access base scenario data
-        >>> base_data = scenarios['Base']
-        >>> print(f"Base scenario variables: {base_data.columns.tolist()}")
-        >>> print(f"Base scenario range: {base_data.index.min()} to {base_data.index.max()}")
+        >>> if 'EWST2024' in scenarios and 'Base' in scenarios['EWST2024']:
+        ...     base_data = scenarios['EWST2024']['Base']
+        ...     print(f"Base scenario variables: {base_data.columns.tolist()}")
         """
-        return self._internal_loader.scen_internal_data
+        if self._scen_internal_data_cache is None:
+            # Create deep copies of scenario internal data
+            self._scen_internal_data_cache = {}
+            for set_name, scen_dict in self._internal_loader.scen_internal_data.items():
+                self._scen_internal_data_cache[set_name] = {}
+                for scen_name, df in scen_dict.items():
+                    self._scen_internal_data_cache[set_name][scen_name] = df.copy()
+        return self._scen_internal_data_cache
 
     def _combine_mevs(self, qtr_data: pd.DataFrame, mth_data: pd.DataFrame) -> pd.DataFrame:
         """
@@ -391,8 +410,8 @@ class DataManager:
     @property
     def model_mev(self) -> pd.DataFrame:
         """
-        Get the latest model MEV data, combining quarterly and monthly data appropriately.
-        Uses caching to avoid recomputing unless data has changed.
+        Get the cached model MEV data, combining quarterly and monthly data appropriately.
+        Creates a copy from the loader if needed and caches it for future modifications.
 
         The process depends on internal data frequency:
         
@@ -409,7 +428,7 @@ class DataManager:
         Returns
         -------
         pd.DataFrame
-            Combined MEV data matching internal data frequency.
+            Cached combined MEV data matching internal data frequency.
             For monthly data: Includes both interpolated quarterly and raw monthly data.
             For quarterly data: Includes both raw quarterly and averaged monthly data.
 
@@ -421,14 +440,11 @@ class DataManager:
         >>> monthly_vars = [col for col in mev.columns if col.endswith('_M')]
         >>> print("Monthly-derived variables:", monthly_vars)
         """
-        # Get current data from loader
-        current_qtr = self._mev_loader.model_mev_qtr
-        current_mth = self._mev_loader.model_mev_mth
-        
-        # Create cache key from both quarterly and monthly data
-        cache_key = hash(str(current_qtr) + str(current_mth))
-        
-        if cache_key not in self._mev_cache:
+        if self._model_mev_cache is None:
+            # Get current data from loader
+            current_qtr = self._mev_loader.model_mev_qtr
+            current_mth = self._mev_loader.model_mev_mth
+            
             # Combine the data based on frequency
             df = self._combine_mevs(current_qtr, current_mth)
             
@@ -436,15 +452,15 @@ class DataManager:
             df['M'] = df.index.month
             df['Q'] = df.index.quarter
             
-            self._mev_cache[cache_key] = df
+            self._model_mev_cache = df
         
-        return self._mev_cache[cache_key]
+        return self._model_mev_cache
 
     @property
     def scen_mevs(self) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
-        Get the latest scenario MEV data, combining quarterly and monthly data appropriately.
-        Uses caching to avoid recomputing unless data has changed.
+        Get the cached scenario MEV data, combining quarterly and monthly data appropriately.
+        Creates copies from the loader if needed and caches them for future modifications.
 
         The method maintains a three-level structure:
         {scenario_set: {scenario_name: DataFrame}}
@@ -466,7 +482,7 @@ class DataManager:
         Returns
         -------
         Dict[str, Dict[str, pd.DataFrame]]
-            Nested dictionary of combined scenario data.
+            Nested dictionary of cached combined scenario data.
             Outer key: scenario set name (e.g., 'EWST2024')
             Inner key: scenario name (e.g., 'Base', 'Adverse')
             Value: DataFrame with combined MEV data matching internal data frequency
@@ -475,25 +491,19 @@ class DataManager:
         -------
         >>> scenarios = dm.scen_mevs
         >>> # Access base scenario from EWST2024
-        >>> base_ewst = scenarios['EWST2024']['Base']
-        >>> print(f"EWST Base scenario range: {base_ewst.index.min()} to {base_ewst.index.max()}")
+        >>> if 'EWST2024' in scenarios and 'Base' in scenarios['EWST2024']:
+        ...     base_ewst = scenarios['EWST2024']['Base']
+        ...     print(f"EWST Base scenario range: {base_ewst.index.min()} to {base_ewst.index.max()}")
         >>> 
         >>> # Compare GDP across scenarios
-        >>> for scen_name, scen_df in scenarios['EWST2024'].items():
+        >>> for scen_name, scen_df in scenarios.get('EWST2024', {}).items():
         ...     print(f"{scen_name} GDP mean: {scen_df['GDP'].mean():.2f}")
-        >>> 
-        >>> # Check if we have both quarterly and monthly versions
-        >>> monthly_vars = [col for col in base_ewst.columns if col.endswith('_M')]
-        >>> print("Monthly-derived variables:", monthly_vars)
         """
-        # Get current data from loader
-        current_qtr = self._mev_loader.scen_mev_qtr
-        current_mth = self._mev_loader.scen_mev_mth
-        
-        # Create cache key from both quarterly and monthly data
-        cache_key = hash(str(current_qtr) + str(current_mth))
-        
-        if cache_key not in self._scen_cache:
+        if self._scen_mevs_cache is None:
+            # Get current data from loader
+            current_qtr = self._mev_loader.scen_mev_qtr
+            current_mth = self._mev_loader.scen_mev_mth
+            
             # Process each scenario set and scenario
             processed = {}
             
@@ -524,9 +534,9 @@ class DataManager:
                     
                     processed[scen_set][scen_name] = combined_df
             
-            self._scen_cache[cache_key] = processed
+            self._scen_mevs_cache = processed
             
-        return self._scen_cache[cache_key]
+        return self._scen_mevs_cache
 
      # Modeling in‑sample/out‑of‑sample splits
     @property
@@ -760,7 +770,8 @@ class DataManager:
         self,
         specs: List[Union[str, TSFM]],
         max_lag: int = 0,
-        max_periods: int = 1
+        max_periods: Union[int, List[int]] = 1,
+        exp_sign_map: Optional[Dict[str, int]] = None
     ) -> Dict[str, List[Union[str, TSFM]]]:
         """
         Generate TSFM specification lists for each variable based on their type.
@@ -778,9 +789,21 @@ class DataManager:
         max_lag : int, default=0
             Generate transform entries for lags 0 through max_lag.
             Must be non-negative.
-        max_periods : int, default=1
-            For transforms that accept a 'periods' parameter, generate entries
-            for periods 1 through max_periods. Must be positive.
+        max_periods : Union[int, List[int]], default=1
+            For transforms that accept a 'periods' parameter:
+            - If int: generate entries for periods 1 through max_periods
+            - If List[int]: generate entries for the specific periods provided
+            Must be positive (if int) or contain only positive values (if list).
+            
+            Special handling for monthly data: When internal data has monthly frequency
+            and max_periods > 3, automatically creates periods [1, 2, 3, 6, 9, 12, ...]
+            (multiples of 3 beyond period 3) instead of [1, 2, 3, 4, 5, 6, ...].
+        exp_sign_map : Optional[Dict[str, int]], default=None
+            Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
+            - Keys: MEV variable names (str)
+            - Values: Expected signs (int): 1 for positive, -1 for negative, 0 for no expectation
+            If provided, TSFM instances created from matching variable names will use 
+            the specified exp_sign value. Variables not in the map default to exp_sign=0.
 
         Returns
         -------
@@ -801,7 +824,7 @@ class DataManager:
         >>> #     'UNRATE': [TSFM(UNRATE, diff)]
         >>> # }
         >>> 
-        >>> # With lags and multiple periods
+        >>> # With lags and multiple periods (int)
         >>> specs = dm.build_tsfm_specs(
         ...     specs=['GDP', 'UNRATE'],
         ...     max_lag=2,
@@ -813,6 +836,26 @@ class DataManager:
         >>> #     TSFM(GDP, diff, periods=1), TSFM(GDP, diff, periods=2),
         >>> #     TSFM(GDP, log, lag=1), TSFM(GDP, log, lag=2)
         >>> # ]
+        >>> 
+        >>> # With specific periods (list) - useful for monthly data
+        >>> specs = dm.build_tsfm_specs(
+        ...     specs=['GDP', 'UNRATE'],
+        ...     max_lag=1,
+        ...     max_periods=[1, 2, 3, 6, 9, 12]
+        ... )
+        >>> # Result includes transforms with specific periods like:
+        >>> # GDP: [
+        >>> #     TSFM(GDP, log),
+        >>> #     TSFM(GDP, diff, periods=1), TSFM(GDP, diff, periods=2),
+        >>> #     TSFM(GDP, diff, periods=3), TSFM(GDP, diff, periods=6),
+        >>> #     TSFM(GDP, diff, periods=9), TSFM(GDP, diff, periods=12),
+        >>> #     (plus lagged versions)
+        >>> # ]
+        >>> 
+        >>> # Monthly data automatic behavior (max_periods > 3)
+        >>> # For monthly internal data with max_periods=13:
+        >>> specs = dm.build_tsfm_specs(['GDP'], max_periods=13)
+        >>> # Automatically creates periods [1, 2, 3, 6, 9, 12] instead of [1...13]
 
         Notes
         -----
@@ -823,8 +866,35 @@ class DataManager:
         """
         if max_lag < 0:
             raise ValueError("max_lag must be >= 0")
-        if max_periods < 1:
-            raise ValueError("max_periods must be >= 1")
+        
+        # Validate max_periods
+        if isinstance(max_periods, int):
+            if max_periods < 1:
+                raise ValueError("max_periods must be >= 1")
+        elif isinstance(max_periods, list):
+            if not max_periods:
+                raise ValueError("max_periods list cannot be empty")
+            if any(p < 1 for p in max_periods):
+                raise ValueError("all values in max_periods list must be >= 1")
+        else:
+            raise TypeError("max_periods must be int or List[int]")
+
+        # Apply special period logic for monthly data
+        # When internal_data is monthly, periods > 3 should only include multiples of 3
+        effective_max_periods = max_periods
+        if hasattr(self, 'internal_data') and hasattr(self.internal_data, 'index'):
+            try:
+                freq = pd.infer_freq(self.internal_data.index)
+                if freq and freq.startswith('M'):  # Monthly frequency (M, MS, etc.)
+                    if isinstance(max_periods, int) and max_periods > 3:
+                        # Create periods list: (1, 2, 3, 6, 9, 12, ...) up to max_periods
+                        periods_list = [1, 2, 3]
+                        for p in range(6, max_periods + 1, 3):  # multiples of 3 starting from 6
+                            periods_list.append(p)
+                        effective_max_periods = periods_list
+            except (AttributeError, TypeError):
+                # If frequency detection fails, use original max_periods
+                pass
 
         vt_map = self._mev_loader.mev_map
         tf_map = self._mev_loader.tsfm_map
@@ -833,7 +903,7 @@ class DataManager:
     
         for spec in specs:
             if isinstance(spec, TSFM):
-                specs_map[spec.feature_name] = [spec]
+                specs_map[spec.var] = [spec]
 
             elif isinstance(spec, str):
                 var_name = spec
@@ -851,11 +921,21 @@ class DataManager:
                         if not callable(fn):
                             continue
                         sig = inspect.signature(fn)
-                        pvals = list(range(1, max_periods+1)) if 'periods' in sig.parameters else [None]
+                        if 'periods' in sig.parameters:
+                            if isinstance(effective_max_periods, int):
+                                pvals = list(range(1, effective_max_periods + 1))
+                            else:  # List[int]
+                                pvals = effective_max_periods
+                        else:
+                            pvals = [None]
                         for p in pvals:
                             base_fn = functools.partial(fn, periods=p) if p else fn
                             for lag in range(max_lag+1):
-                                tsfms.append(TSFM(spec, base_fn, lag))
+                                # Get expected sign from map if provided
+                                exp_sign = 0
+                                if exp_sign_map and spec in exp_sign_map:
+                                    exp_sign = exp_sign_map[spec]
+                                tsfms.append(TSFM(spec, base_fn, lag, exp_sign=exp_sign))
                     specs_map[var_name] = tsfms
             else:
                 raise ValueError(f"Invalid spec: {spec!r}")
@@ -870,7 +950,8 @@ class DataManager:
         self,
         specs: List[Union[str, TSFM]],
         max_lag: int = 0,
-        max_periods: int = 1
+        max_periods: Union[int, List[int]] = 1,
+        exp_sign_map: Optional[Dict[str, int]] = None
     ) -> Dict[str, pd.DataFrame]:
         """
         Build a DataFrame for each variable by generating transform specifications
@@ -886,9 +967,14 @@ class DataManager:
             See build_tsfm_specs() for details.
         max_lag : int, default=0
             Maximum lag to include in transforms. Must be non-negative.
-        max_periods : int, default=1
+        max_periods : Union[int, List[int]], default=1
             Maximum periods for transforms that accept this parameter.
-            Must be positive.
+            Must be positive (if int) or contain only positive values (if list).
+            For monthly data with max_periods > 3, automatically uses 
+            [1, 2, 3, 6, 9, 12, ...] instead of [1, 2, 3, 4, 5, 6, ...].
+        exp_sign_map : Optional[Dict[str, int]], default=None
+            Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
+            See build_tsfm_specs() for details.
 
         Returns
         -------
@@ -921,7 +1007,8 @@ class DataManager:
         tsfm_specs = self.build_tsfm_specs(
             specs,
             max_lag=max_lag,
-            max_periods=max_periods
+            max_periods=max_periods,
+            exp_sign_map=exp_sign_map
         )
         var_df_map: Dict[str, pd.DataFrame] = {}
         for var, tsfms in tsfm_specs.items():
@@ -935,6 +1022,11 @@ class DataManager:
 
         This method performs cubic interpolation on quarterly data to estimate
         monthly values. If the input is not quarterly, it returns the original data.
+
+        For quarterly data with quarter-end dates (Mar, Jun, Sep, Dec), the values
+        are treated as quarterly averages and the index is shifted back by one month
+        (to Feb, May, Aug, Nov) before interpolation to properly represent the
+        quarterly periods.
 
         Parameters
         ----------
@@ -953,12 +1045,23 @@ class DataManager:
         - Preserves the original column names and types
         - Normalizes all dates to midnight UTC
         - For quarterly data, creates a monthly date range from min to max date
+        - Quarter-end dates are shifted back by one month to represent quarterly averages
         """
         df2 = df.copy()
         df2.index = pd.to_datetime(df2.index).normalize()
         freq_mev = pd.infer_freq(df2.index)
+        
         # Only interpolate Q -> M
         if freq_mev and freq_mev.startswith('Q'):
+            # Check if dates are quarter-end (March, June, September, December)
+            quarter_end_months = {3, 6, 9, 12}
+            is_quarter_end = all(date.month in quarter_end_months for date in df2.index)
+            
+            if is_quarter_end:
+                # Shift index back by one month to represent quarterly averages
+                # Mar -> Feb, Jun -> May, Sep -> Aug, Dec -> Nov
+                df2.index = df2.index - pd.DateOffset(months=1)
+            
             start = df2.index.min()
             end = df2.index.max()
             target_idx = pd.date_range(start=start, end=end, freq='M')
@@ -976,11 +1079,11 @@ class DataManager:
         ]
     ) -> None:
         """
-        Apply a feature engineering function to all MEV tables (model and scenarios).
+        Apply a feature engineering function to all cached MEV tables (model and scenarios).
 
         This method allows you to add derived features to all MEV tables at once.
         The function is applied to both the model MEVs and all scenario MEVs.
-        Changes are made in-place to the original data in the MEVLoader.
+        Changes are made to the cached data in the DataManager, not the original loaders.
 
         Parameters
         ----------
@@ -1011,8 +1114,8 @@ class DataManager:
         Notes
         -----
         - The function must return a DataFrame (modified or new)
-        - Changes are applied to both model_mev_qtr and scen_mev_qtr
-        - The MEV cache is cleared after applying changes
+        - Changes are applied to cached MEV data in DataManager
+        - Original loaders remain unchanged
         - The function has access to internal data for reference calculations
         """
         internal_df = self.internal_data
@@ -1024,17 +1127,15 @@ class DataManager:
             for col in result.columns:
                 mev_df[col] = result[col].reindex(mev_df.index)
 
-        # Apply to main MEV in loader
-        _apply_mev(self._mev_loader.model_mev_qtr)
+        # Apply to cached model MEV data
+        model_mev_df = self.model_mev  # This ensures cache is created
+        _apply_mev(model_mev_df)
 
-        # Apply to each scenario in loader
-        for wb_key, scen_map in self._mev_loader.scen_mev_qtr.items():
-            for scen_name, df in scen_map.items():
-                _apply_mev(df)
-                
-        # Clear caches since data has changed
-        self._mev_cache.clear()
-        self._scen_cache.clear()
+        # Apply to cached scenario MEV data
+        scen_mevs_dict = self.scen_mevs  # This ensures cache is created
+        for scen_set, scen_dict in scen_mevs_dict.items():
+            for scen_name, scen_df in scen_dict.items():
+                _apply_mev(scen_df)
     
     def apply_to_internal(
         self,
@@ -1044,10 +1145,11 @@ class DataManager:
         ]
     ) -> None:
         """
-        Apply a feature engineering function to internal data.
+        Apply a feature engineering function to cached internal data.
 
         This method allows you to add derived features to the internal data.
         Changes can be made either in-place or by returning new data to merge.
+        Changes are made to the cached data in the DataManager, not the original loader.
 
         Parameters
         ----------
@@ -1085,9 +1187,9 @@ class DataManager:
         - The function can modify data in-place and/or return new features
         - Returned Series must have a name
         - All new columns are aligned to the internal data index
-        - Changes are made directly to the loader's internal_data
+        - Changes are made to cached data in DataManager, not the original loader
         """
-        internal_df = self._internal_loader.internal_data
+        internal_df = self.internal_data  # This ensures cache is created
 
         ret = fn(internal_df)
         if ret is None:
@@ -1105,24 +1207,38 @@ class DataManager:
     @property
     def mev_map(self) -> Dict[str, Dict[str, str]]:
         """
-        Get the latest MEV type mapping from the MEV loader.
-        This includes both original MEVs and any derived MEVs (e.g., with '_Q' suffix).
+        Get the MEV type mapping for codes that exist in the model_mev data.
+        This includes both original MEVs and any derived MEVs (e.g., with '_Q' suffix),
+        but only for codes that are actually present in the model_mev DataFrame.
 
         Returns
         -------
         Dict[str, Dict[str, str]]
             Dictionary mapping MEV codes to their type and description information.
-            Includes both original and derived MEVs.
+            Only includes MEV codes that exist in model_mev columns.
 
         Example
         -------
         >>> mev_info = dm.mev_map
-        >>> # Original MEV info
+        >>> # Only shows info for MEVs that exist in model_mev
         >>> print(mev_info['GDP'])  # {'type': 'level', 'description': 'Gross Domestic Product'}
-        >>> # Derived quarterly MEV info
-        >>> print(mev_info['GDP_Q'])  # {'type': 'level', 'description': 'GDP (Interpolated from quarterly)'}
+        >>> # If GDP_Q exists in model_mev, it will be included
+        >>> if 'GDP_Q' in dm.model_mev.columns:
+        ...     print(mev_info['GDP_Q'])  # {'type': 'level', 'description': 'GDP (Interpolated from quarterly)'}
         """
-        return self._mev_loader.mev_map
+        # Get all MEV codes from the loader's map
+        full_mev_map = self._mev_loader.mev_map
+        
+        # Get available MEV columns from model_mev
+        available_mev_codes = set(self.model_mev.columns)
+        
+        # Filter the map to only include codes that exist in model_mev
+        filtered_map = {
+            code: info for code, info in full_mev_map.items()
+            if code in available_mev_codes
+        }
+        
+        return filtered_map
 
     @property
     def in_sample_end(self) -> Optional[pd.Timestamp]:
@@ -1209,3 +1325,75 @@ class DataManager:
             Index of scenario out-of-sample observations, or None if not available.
         """
         return self._internal_loader.scen_out_sample_idx
+
+    def update_mev_map(self, updates: Dict[str, Dict[str, Optional[str]]]) -> None:
+        """
+        Update the MEV mapping with new or modified MEV codes.
+        
+        This method provides a convenient way to update MEV mappings directly through
+        the DataManager interface. It delegates to the underlying MEVLoader's
+        update_mev_map method while preserving any cached MEV data that was modified
+        through apply_to_mevs().
+        
+        For new MEV codes, it's highly recommended to specify both 'type' and 'category'.
+        Description is optional if you can remember what the MEV code means.
+        
+        Parameters
+        ----------
+        updates : dict
+            Dictionary where keys are MEV codes and values are dictionaries
+            containing the attributes to update. Supported attributes are:
+            - 'type': MEV type (e.g., 'level', 'rate')
+            - 'description': Human-readable description
+            - 'category': MEV category (e.g., 'GDP', 'Job Market', 'Inflation')
+            
+            For existing MEV codes, only the specified attributes will be updated;
+            unspecified attributes will remain unchanged.
+            
+            For new MEV codes, unspecified attributes will be set to None.
+            
+        Examples
+        --------
+        >>> # Typical workflow: add new MEV columns then update mapping
+        >>> def add_custom_mev(mev_df, internal_df):
+        ...     mev_df['CUSTOM_GDP'] = mev_df['GDP'] * 1.1  # Custom GDP calculation
+        ...     return mev_df
+        >>> dm.apply_to_mevs(add_custom_mev)
+        >>> 
+        >>> # Now update the mapping for the new MEV
+        >>> dm.update_mev_map({
+        ...     'CUSTOM_GDP': {
+        ...         'type': 'level',
+        ...         'description': 'Custom GDP Measure',
+        ...         'category': 'GDP'
+        ...     }
+        ... })
+        >>> 
+        >>> # Both the new column and mapping are preserved
+        >>> print('CUSTOM_GDP' in dm.model_mev.columns)  # True
+        >>> print(dm.mev_map['CUSTOM_GDP'])  # Shows the mapping info
+        >>> 
+        >>> # Update existing MEV code (only specified attributes)
+        >>> dm.update_mev_map({
+        ...     'GDP': {
+        ...         'category': 'Economic Growth'  # Only update category
+        ...         # type and description remain unchanged
+        ...     }
+        ... })
+        
+        Notes
+        -----
+        - Changes are made to the MEVLoader's in-memory MEV map
+        - Cached MEV data is preserved, including any columns added via apply_to_mevs()
+        - To persist mapping changes, you would need to update the Excel file manually
+        - For new MEV codes, 'type' and 'category' are highly recommended
+        - Valid attributes: 'type', 'description', 'category'
+        
+        See Also
+        --------
+        MEVLoader.update_mev_map : The underlying method that performs the update
+        apply_to_mevs : Method for adding new MEV columns
+        """
+        # Delegate to the MEVLoader's update_mev_map method
+        # This updates the mapping without affecting cached data
+        self._mev_loader.update_mev_map(updates)

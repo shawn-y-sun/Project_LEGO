@@ -12,6 +12,7 @@ from typing import Optional, Any, Callable, Type, Dict
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from .test import *
 from .report import ModelReportBase, OLS_ModelReport
+from .model_test import ppnr_ols_testset_func
 
 class ModelBase(ABC):
     """
@@ -150,125 +151,7 @@ class ModelBase(ABC):
         return self.testset
 
 
-# Default PPNR OLS testset builder
-def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
-    """
-    Pre-defined TestSet for PPNR OLS models with improved group labels:
-    - In-sample R²
-    - Individual significance (common drivers)
-    - Joint F-tests (group drivers)
-    - Residual stationarity & normality
-    """
-    tests: Dict[str, ModelTestBase] = {}
 
-    #---Fit & Error Measures (inactive for filtering)---
-    # Goodness of fit (in-sample)
-    tests['Fit Measures'] = FitMeasure(
-        actual=mdl.y,
-        predicted=mdl.y_fitted_in,
-        n_features=len(mdl.params) - 1  # subtract intercept
-    )
-
-    # Add error measures (in-sample)
-    tests['IS Error Measures'] = ErrorMeasure(
-        actual=mdl.y,
-        predicted=mdl.y_fitted_in
-    )
-
-    # Optionally, out-of-sample:
-    if not mdl.X_out.empty:
-        tests['OOS Error Measures'] = ErrorMeasure(
-            actual=mdl.y_out,
-            predicted=mdl.y_pred_out
-        )
-
-    #---Filtering Test---
-    # In-sample R²
-    tests['In-Sample R²'] = R2Test(
-        r2=mdl.rsquared,
-        filter_mode='moderate'
-    )
-
-    # Common-driver significance
-    common = mdl.spec_map.get('common', [])
-    if common:
-        tests['Common Driver Significance'] = PvalueTest(
-            pvalues=mdl.pvalues.loc[common],
-            filter_mode='moderate'
-        )
-
-    # Group-driver significance with "'" labels
-    for grp in mdl.spec_map.get('group', []):
-        # list of names
-        if isinstance(grp, (list, tuple)):
-            names = list(grp)
-            parts = [name.split(':', 1) if ':' in name else [None, name] for name in names]
-            prefixes = [p[0] for p in parts]
-            suffixes = [p[1] for p in parts]
-            # detect common prefix
-            if None not in prefixes and len(set(prefixes)) == 1:
-                prefix = prefixes[0] + ':'
-                label_body = "'".join(suffixes)
-                group_label = f"{prefix}{label_body}"
-            else:
-                group_label = "'".join(names)
-            vars_for = names
-        else:
-            group_label = str(grp)
-            vars_for = [grp]
-
-        alias = f"Group Driver F-Test {group_label}"
-        tests[alias] = FTest(
-            model_result=mdl.fitted,
-            vars=vars_for,
-            filter_mode='moderate'
-        )
-    
-    # Coefficient Multicollinearity
-    tests['Multicollinearity'] = VIFTest(
-        exog=sm.add_constant(mdl.X),
-        filter_mode='moderate'
-     )
-    
-    # Residual diagnostics
-    tests['Residual Stationarity'] = StationarityTest(
-        series=mdl.resid,
-        filter_mode='moderate'
-    )
-    tests['Residual Normality'] = NormalityTest(
-        series=mdl.resid,
-        filter_mode='moderate'
-    )
-    tests['Residual Autocorrelation'] = AutocorrTest(
-        results=mdl.fitted,
-        filter_mode='moderate',
-        filter_on=False
-    )
-    tests['Residual Heteroscedasticity'] = HetTest(
-        resids=mdl.resid,
-        exog=sm.add_constant(mdl.X),
-        filter_mode='moderate',
-        filter_on=False
-    )
-
-    # --- Target Stationarity & Cointegration ---
-    # 1) Check if Y itself is stationary
-    y_stat = StationarityTest(
-        series=mdl.y.copy(),
-        filter_mode='moderate',
-        filter_on=False
-    )
-    tests['Y Stationarity'] = y_stat
-
-    # 2) If Y is nonstationary, test cointegration of Y with all X
-    if not y_stat.test_filter:
-        tests['Y–X Cointegration'] = CointTest(
-            y=mdl.y.copy(),
-            X=mdl.X.copy(),
-            filter_mode='moderate'
-        )
-
-    return tests
 
 
 class OLS(ModelBase):

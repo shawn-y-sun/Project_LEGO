@@ -1,16 +1,58 @@
-from typing import List, Union, Tuple, Type, Any, Optional, Callable
+from typing import List, Union, Tuple, Type, Any, Optional, Callable, Dict
 import itertools
 import time
 import datetime
+from collections import defaultdict
 
 import pandas as pd
 from tqdm import tqdm
 
 from .data import DataManager
-from .feature import Feature
+from .feature import Feature, DumVar
 from .transform import TSFM
 from .model import ModelBase
 from .cm import CM
+
+
+def _sort_specs_with_dummies_first(spec_list: List[Any]) -> List[Any]:
+    """
+    Sort spec list so quarterly and monthly dummy variables come first.
+    
+    Priority order:
+    1. DumVar('Q') - Quarterly dummies first
+    2. DumVar('M') - Monthly dummies second  
+    3. Everything else - maintain relative order
+    
+    Parameters
+    ----------
+    spec_list : List[Any]
+        List of specification items to sort
+        
+    Returns
+    -------
+    List[Any]
+        Sorted list with dummy variables first
+    """
+    def get_dummy_priority(spec):
+        """Get priority for sorting. Lower numbers come first."""
+        try:
+            # Check if this is a DumVar instance
+            if isinstance(spec, DumVar):
+                # Check the variable name to determine type
+                var_name = str(spec.var).upper()
+                if var_name == 'Q':
+                    return 0  # Quarterly first
+                elif var_name == 'M':
+                    return 1  # Monthly second
+                else:
+                    return 2  # Other dummy variables
+            else:
+                return 3  # Non-dummy features
+        except:
+            return 3  # Safe fallback for any errors
+    
+    # Sort by priority, keeping relative order for items with same priority
+    return sorted(spec_list, key=lambda x: (get_dummy_priority(x), str(x)))
 
 
 class ModelSearch:
@@ -48,8 +90,10 @@ class ModelSearch:
         forced_in: Optional[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]],
         desired_pool: List[Union[str, TSFM, Feature, Tuple[Any, ...], set]],
         max_var_num: int,
-        max_lag: int = 0,
-        max_periods: int = 1
+        max_lag: int = 3,
+        max_periods: int = 3,
+        category_limit: int = 1,
+        exp_sign_map: Optional[Dict[str, int]] = None
     ) -> List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]]:
         """
         Build all valid feature-spec combos:
@@ -60,6 +104,7 @@ class ModelSearch:
           * set: treated as a pool where exactly one must be selected.
         - Strings at top-level are expanded into TSFM variants via DataManager.
         - Respects max_var_num (total features per combo).
+        - Respects category_limit (max variables from each MEV category per combo).
 
         Parameters
         ----------
@@ -73,6 +118,13 @@ class ModelSearch:
             Max lag for string TSFM expansion.
         max_periods : int
             Max periods for string TSFM expansion.
+        category_limit : int, default 1
+            Max variables from each MEV category per combo. Only applies to 
+            top-level strings and TSFM instances in desired_pool; other Feature 
+            instances or items in nested structures are not subject to this constraint.
+        exp_sign_map : Optional[Dict[str, int]], default=None
+            Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
+            Passed to DataManager.build_tsfm_specs() for string expansion.
 
         Returns
         -------
@@ -82,9 +134,62 @@ class ModelSearch:
         # Handle forced_in being optional
         forced_specs = (forced_in or []).copy()
 
-        # Step 1: Build raw combos from desired_pool with set-as-exclusives
-        pools: List[List[Any]] = []
+        # Step 1: Build raw combos from desired_pool with category constraints
+        # Separate constrained and unconstrained items
+        constrained_items = []  # top-level strings and TSFM instances
+        unconstrained_items = []  # everything else (sets, tuples, other Features)
+
         for item in desired_pool:
+            if isinstance(item, (str, TSFM)):
+                constrained_items.append(item)
+            else:
+                unconstrained_items.append(item)
+
+        # Group constrained items by MEV category
+        category_groups = defaultdict(list)
+        uncategorized_constrained = []
+
+        if constrained_items:
+            mev_map = self.dm.mev_map
+            for item in constrained_items:
+                # Get variable name to look up category
+                if isinstance(item, str):
+                    var_name = item
+                elif isinstance(item, TSFM):
+                    var_name = item.var
+                else:
+                    # This shouldn't happen based on isinstance check above
+                    uncategorized_constrained.append(item)
+                    continue
+                
+                # Look up category in MEV map
+                var_info = mev_map.get(var_name, {})
+                category = var_info.get('category')
+                
+                if category:
+                    category_groups[category].append(item)
+                else:
+                    uncategorized_constrained.append(item)
+
+        # Create pools for combination generation
+        pools: List[List[Any]] = []
+
+        # Add category-based pools (each category becomes one pool of possible combinations)
+        for category, items in category_groups.items():
+            category_pool = []
+            # Generate all possible subsets of size 1 to category_limit
+            for r in range(1, min(len(items), category_limit) + 1):
+                for combo in itertools.combinations(items, r):
+                    category_pool.append(list(combo))
+            if category_pool:
+                pools.append(category_pool)
+
+        # Add uncategorized constrained items as individual pools
+        for item in uncategorized_constrained:
+            pools.append([item])
+
+        # Handle unconstrained items (existing logic)
+        for item in unconstrained_items:
             if isinstance(item, set):
                 # Flatten nested sets into a single pool of choices
                 flat: set = set()
@@ -99,15 +204,22 @@ class ModelSearch:
             else:
                 pools.append([item])
 
-        # Combine pools by choosing any non-empty subset of pools
+        # Generate combinations by choosing from pools
         raw_combos: List[List[Any]] = []
-        m = len(pools)
-        for r in range(1, m+1):
-            for indices in itertools.combinations(range(m), r):
-                selected_pools = [pools[i] for i in indices]
-                # pick exactly one from each selected pool
-                for choice in itertools.product(*selected_pools):
-                    raw_combos.append(list(choice))
+        if pools:
+            m = len(pools)
+            for r in range(1, m + 1):
+                for indices in itertools.combinations(range(m), r):
+                    selected_pools = [pools[i] for i in indices]
+                    for choice in itertools.product(*selected_pools):
+                        # Flatten choice (some elements might be lists from category pools)
+                        flat_combo = []
+                        for item in choice:
+                            if isinstance(item, list):
+                                flat_combo.extend(item)
+                            else:
+                                flat_combo.append(item)
+                        raw_combos.append(flat_combo)
 
         # Step 2: Prepend forced_in-only combo if any forced specs exist
         combos: List[List[Any]] = []
@@ -122,8 +234,27 @@ class ModelSearch:
         # Step 3: Expand only top-level strings into TSFM variants
         # Gather unique strings to expand
         top_strings = {spec for combo in combos for spec in combo if isinstance(spec, str)}
+        
+        # Apply special period logic for monthly data
+        # When internal_data is monthly, periods > 3 should only include multiples of 3
+        effective_max_periods = max_periods
+        if hasattr(self.dm, 'internal_data') and hasattr(self.dm.internal_data, 'index'):
+            try:
+                freq = pd.infer_freq(self.dm.internal_data.index)
+                if freq and freq.startswith('M'):  # Monthly frequency (M, MS, etc.)
+                    if max_periods > 3:
+                        # Create periods list: (1, 2, 3, 6, 9, 12, ...) up to max_periods
+                        periods_list = [1, 2, 3]
+                        for p in range(6, max_periods + 1, 3):  # multiples of 3 starting from 6
+                            periods_list.append(p)
+                        effective_max_periods = periods_list
+            except (AttributeError, TypeError):
+                # If frequency detection fails, use original max_periods
+                pass
+        
         tsfm_map = self.dm.build_tsfm_specs(
-            list(top_strings), max_lag=max_lag, max_periods=max_periods
+            list(top_strings), max_lag=max_lag, max_periods=effective_max_periods,
+            exp_sign_map=exp_sign_map
         )
 
         expanded: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
@@ -136,7 +267,9 @@ class ModelSearch:
                     variant_lists.append([spec])
             # Cartesian product over variant lists
             for prod in itertools.product(*variant_lists):
-                expanded.append(list(prod))
+                # Sort each spec list so quarterly and monthly dummies come first
+                sorted_prod = _sort_specs_with_dummies_first(list(prod))
+                expanded.append(sorted_prod)
 
         self.all_specs = expanded
         return expanded
@@ -338,9 +471,11 @@ class ModelSearch:
         forced_in: Optional[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = None,
         top_n: int = 10,
         sample: str = 'in',
-        max_var_num: int = 5,
+        max_var_num: int = 10,
         max_lag: int = 3,
         max_periods: int = 3,
+        category_limit: int = 1,
+        exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
         outlier_idx: Optional[List[Any]] = None
@@ -355,6 +490,34 @@ class ModelSearch:
         3. Print number of generated combos.
         4. Assess and filter combos via filter_specs (printing test info for first combo).
         5. Rank passed models via rank_cms and retain top_n.
+
+        Parameters
+        ----------
+        desired_pool : list
+            Pool of variables or transformation specifications to consider.
+        forced_in : list, optional
+            Variables or specifications that must be included in every model.
+        top_n : int, default 10
+            Number of top performing models to retain.
+        sample : str, default 'in'
+            Which sample to use for model building ('in' or 'full').
+        max_var_num : int, default 10
+            Maximum number of features allowed in each model.
+        max_lag : int, default 3
+            Maximum lag to consider in transformation specifications.
+        max_periods : int, default 3
+            Maximum number of periods to consider in transformations.
+        category_limit : int, default 1
+            Maximum number of variables from each MEV category per combo.
+        exp_sign_map : Optional[Dict[str, int]], default=None
+            Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
+            Passed to build_spec_combos() and ultimately to DataManager.build_tsfm_specs().
+        rank_weights : tuple, default (1.0, 1.0, 1.0)
+            Weights for (Fit Measures, IS Error, OOS Error) when ranking models.
+        test_update_func : callable, optional
+            Optional function to update each CM's test set.
+        outlier_idx : list, optional
+            List of index labels corresponding to outliers to exclude.
 
         Returns
         -------
@@ -372,13 +535,15 @@ class ModelSearch:
               f"Max var num     : {max_var_num}\n"
               f"Max lag         : {max_lag}\n"
               f"Max periods     : {max_periods}\n"
+              f"Category limit  : {category_limit}\n"
+              f"Exp sign map    : {exp_sign_map}\n"
               f"Top N           : {top_n}\n"
               f"Rank weights    : {rank_weights}\n"
-              f"Test update func: {test_update_func}")
+              f"Test update func: {test_update_func}\n")
         print("==================================\n")
 
         # 2. Build specs
-        combos = self.build_spec_combos(forced, desired_pool, max_var_num, max_lag, max_periods)
+        combos = self.build_spec_combos(forced, desired_pool, max_var_num, max_lag, max_periods, category_limit, exp_sign_map)
         print(f"Built {len(combos)} spec combinations.\n")
 
         # 3. Example test info

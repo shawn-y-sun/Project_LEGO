@@ -76,6 +76,10 @@ class Feature(ABC):
         """
         Resolve all attributes listed in `lookup_map` against provided DataFrames.
 
+        Always re-resolves attributes to ensure fresh data is used, which is essential
+        for scenario analysis where the same Feature object may be used with different
+        datasets (e.g., model MEV vs scenario-specific MEV data).
+
         Parameters
         ----------
         *dfs : pandas.DataFrame
@@ -87,8 +91,9 @@ class Feature(ABC):
             If any var name is not found in any DataFrame.
         """
         for attr, var_name in self.lookup_map().items():
-            if getattr(self, attr, None) is not None:
-                continue
+            # Always re-resolve to ensure fresh data (removed caching check)
+            # This is essential for scenario analysis where Feature objects
+            # are reused with different datasets
             for df in dfs:
                 if df is not None and var_name in df.columns:
                     setattr(self, attr, df[var_name])
