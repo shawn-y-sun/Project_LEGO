@@ -1145,11 +1145,12 @@ class DataManager:
         ]
     ) -> None:
         """
-        Apply a feature engineering function to cached internal data.
+        Apply a feature engineering function to all cached internal data (main and scenarios).
 
-        This method allows you to add derived features to the internal data.
-        Changes can be made either in-place or by returning new data to merge.
-        Changes are made to the cached data in the DataManager, not the original loader.
+        This method allows you to add derived features to both the main internal data
+        and all scenario internal data. Changes can be made either in-place or by 
+        returning new data to merge. Changes are made to the cached data in the 
+        DataManager, not the original loader.
 
         Parameters
         ----------
@@ -1163,13 +1164,13 @@ class DataManager:
 
         Examples
         --------
-        >>> # In-place modification
+        >>> # In-place modification applied to all internal data
         >>> def add_growth_rate(df):
         ...     df['GROWTH'] = df['VALUE'].pct_change()
         ...     # No return needed for in-place changes
         >>> dm.apply_to_internal(add_growth_rate)
         >>> 
-        >>> # Return new features
+        >>> # Return new features for all internal data
         >>> def create_indicators(df):
         ...     return pd.DataFrame({
         ...         'HIGH_VALUE': df['VALUE'] > df['VALUE'].mean(),
@@ -1177,51 +1178,73 @@ class DataManager:
         ...     })
         >>> dm.apply_to_internal(create_indicators)
         >>> 
-        >>> # Return single feature as Series
+        >>> # Return single feature as Series for all internal data
         >>> def moving_average(df):
         ...     return df['VALUE'].rolling(window=3).mean().rename('MA3')
         >>> dm.apply_to_internal(moving_average)
 
         Notes
         -----
+        - The function is applied to both main internal data and all scenario internal data
         - The function can modify data in-place and/or return new features
         - Returned Series must have a name
-        - All new columns are aligned to the internal data index
+        - All new columns are aligned to the respective DataFrame indices
         - Changes are made to cached data in DataManager, not the original loader
+        - If no scenario data exists, a warning is issued but main data is still processed
         """
-        internal_df = self.internal_data  # This ensures cache is created
+        def _apply_internal(internal_df: pd.DataFrame):
+            """Helper function to apply the user function to a single DataFrame."""
+            ret = fn(internal_df)
+            if ret is None:
+                return
+            if isinstance(ret, pd.Series):
+                internal_df[ret.name] = ret.reindex(internal_df.index)
+            elif isinstance(ret, pd.DataFrame):
+                for col in ret.columns:
+                    internal_df[col] = ret[col].reindex(internal_df.index)
+            else:
+                raise TypeError(
+                    f"apply_to_internal(): fn must return None, Series or DataFrame, got {type(ret)}"
+                )
 
-        ret = fn(internal_df)
-        if ret is None:
-            return
-        if isinstance(ret, pd.Series):
-            internal_df[ret.name] = ret.reindex(internal_df.index)
-        elif isinstance(ret, pd.DataFrame):
-            for col in ret.columns:
-                internal_df[col] = ret[col].reindex(internal_df.index)
-        else:
-            raise TypeError(
-                f"apply_to_internal(): fn must return None, Series or DataFrame, got {type(ret)}"
+        # Apply to cached main internal data
+        main_internal_df = self.internal_data  # This ensures cache is created
+        _apply_internal(main_internal_df)
+
+        # Apply to cached scenario internal data
+        scen_internal_dict = self.scen_internal_data  # This ensures cache is created
+        
+        if not scen_internal_dict:
+            warnings.warn(
+                "No scenario internal data found. Function only applied to main internal data. "
+                "Load scenario data using load_scens() if you want to apply the function to scenarios as well.",
+                UserWarning
             )
+        else:
+            for scen_set, scen_dict in scen_internal_dict.items():
+                for scen_name, scen_df in scen_dict.items():
+                    _apply_internal(scen_df)
 
     @property
     def mev_map(self) -> Dict[str, Dict[str, str]]:
         """
-        Get the MEV type mapping for codes that exist in the model_mev data.
+        Get the MEV type mapping for codes that exist in either model_mev or internal_data.
         This includes both original MEVs and any derived MEVs (e.g., with '_Q' suffix),
-        but only for codes that are actually present in the model_mev DataFrame.
+        as well as internal data variables that have been added to the MEV map.
 
         Returns
         -------
         Dict[str, Dict[str, str]]
-            Dictionary mapping MEV codes to their type and description information.
-            Only includes MEV codes that exist in model_mev columns.
+            Dictionary mapping variable codes to their type and description information.
+            Includes codes that exist in either model_mev columns or internal_data columns.
 
         Example
         -------
         >>> mev_info = dm.mev_map
-        >>> # Only shows info for MEVs that exist in model_mev
+        >>> # Shows info for MEVs that exist in model_mev
         >>> print(mev_info['GDP'])  # {'type': 'level', 'description': 'Gross Domestic Product'}
+        >>> # Also shows internal variables added to MEV map
+        >>> print(mev_info['balance'])  # {'type': 'level', 'description': 'Account Balance'}
         >>> # If GDP_Q exists in model_mev, it will be included
         >>> if 'GDP_Q' in dm.model_mev.columns:
         ...     print(mev_info['GDP_Q'])  # {'type': 'level', 'description': 'GDP (Interpolated from quarterly)'}
@@ -1229,13 +1252,15 @@ class DataManager:
         # Get all MEV codes from the loader's map
         full_mev_map = self._mev_loader.mev_map
         
-        # Get available MEV columns from model_mev
+        # Get available codes from both model_mev and internal_data
         available_mev_codes = set(self.model_mev.columns)
+        available_internal_codes = set(self.internal_data.columns)
+        all_available_codes = available_mev_codes | available_internal_codes
         
-        # Filter the map to only include codes that exist in model_mev
+        # Filter the map to only include codes that exist in either data source
         filtered_map = {
             code: info for code, info in full_mev_map.items()
-            if code in available_mev_codes
+            if code in all_available_codes
         }
         
         return filtered_map
