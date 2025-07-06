@@ -1,5 +1,5 @@
 # =============================================================================
-# module: model_test.py
+# module: testset.py
 # Purpose: Test set builder functions for different model types
 # Dependencies: pandas, numpy, statsmodels, typing, .test module classes
 # =============================================================================
@@ -7,11 +7,137 @@
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
-from typing import Dict, Any, TYPE_CHECKING
+from typing import Dict, Any, TYPE_CHECKING, List, Tuple
 from .test import *
 
 if TYPE_CHECKING:
     from .model import ModelBase
+
+
+# ----------------------------------------------------------------------------
+# TestSet class
+# ----------------------------------------------------------------------------
+
+class TestSet:
+    """
+    Aggregator for ModelTestBase instances, with filtering and reporting utilities.
+
+    Parameters
+    ----------
+    tests : dict
+        Mapping from test alias (str) to ModelTestBase instance.
+    """
+    def __init__(
+        self,
+        tests: Dict[str, ModelTestBase]
+    ):
+        # Override each test's alias and collect in defined order
+        self.tests: List[ModelTestBase] = []
+        for alias, test_obj in tests.items():
+            test_obj.alias = alias
+            self.tests.append(test_obj)
+
+    @property
+    def all_test_results(self) -> Dict[str, Any]:
+        """
+        Return the test_result dict for every test in this set,
+        keyed by the test's display name (alias or class name),
+        including both active and inactive tests.
+        """
+        return {t.name: t.test_result for t in self.tests}
+    
+    @property
+    def test_info(self) -> Dict[str, Dict[str, str]]:
+        """
+        Return key information of each test in dictionary format.
+        
+        Returns
+        -------
+        dict
+            Keys: test names
+            Values: dict containing 'filter_mode' and 'desc' for each test
+        """
+        info = {}
+        for test in self.tests:
+            info[test.name] = {
+                'filter_mode': test.filter_mode,
+                'desc': test.filter_mode_desc if hasattr(test, 'filter_mode_desc') else ''
+            }
+        return info
+    
+    @property
+    def filter_test_info(self) -> Dict[str, Dict[str, str]]:
+        """
+        Return key information of only active tests (filter_on=True) in dictionary format.
+        
+        Returns
+        -------
+        dict
+            Keys: test names for tests with filter_on=True
+            Values: dict containing 'filter_mode' and 'desc' for each active test
+        """
+        info = {}
+        for test in self.tests:
+            if test.filter_on:
+                info[test.name] = {
+                    'filter_mode': test.filter_mode,
+                    'desc': test.filter_mode_desc if hasattr(test, 'filter_mode_desc') else ''
+                }
+        return info
+
+    def filter_pass(
+        self,
+        fast_filter: bool = True
+    ) -> Tuple[bool, List[str]]:
+        """
+        Run active tests and return overall pass flag and failed test names.
+
+        Parameters
+        ----------
+        fast_filter : bool, default True
+            If True, stops on first failure.
+
+        Returns
+        -------
+        passed : bool
+            True if all active tests pass.
+        failed_tests : list of str
+            Names of tests that did not pass.
+        """
+        failed = []
+        for t in self.tests:
+            if not t.filter_on:
+                continue
+            if not t.test_filter:
+                failed.append(t.name)
+                if fast_filter:
+                    return False, failed
+        return len(failed) == 0, failed
+
+    def print_test_info(self) -> None:
+        """
+        Print summary of test configurations using test_info property:
+          - Active tests: name, filter_mode, desc
+          - Inactive tests: name only, with note.
+        """
+        info = self.test_info
+        
+        print("Active Tests:")
+        for test in self.tests:
+            if test.filter_on:
+                test_info = info[test.name]
+                print(f"- {test.name} | filter_mode: {test_info['filter_mode']} | desc: {test_info['desc']}")
+        
+        print("\nInactive Tests:")
+        inactive = [t for t in self.tests if not t.filter_on]
+        for test in inactive:
+            print(f"- {test.name}")
+        
+        if inactive:
+            print(
+                "\nNote: These tests are included but not turned on. "
+                "Set `filter_on=True` on a test to include it in filter_pass results."
+            )
 
 
 def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
@@ -140,12 +266,14 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
     
     if y_stat.test_filter:
         # Y is stationary - check that all X variables are also stationary
-        for i, var in enumerate(stationarity_vars):
-            if var in mdl.X.columns:
-                tests[f'X Stationarity {var}'] = StationarityTest(
-                    series=mdl.X[var].copy(),
-                    filter_mode='moderate',
-                    alias=f'X Stationarity {var}'
+        if stationarity_vars:
+            # Filter to only include variables that exist in X
+            available_vars = [var for var in stationarity_vars if var in mdl.X.columns]
+            if available_vars:
+                X_vars_df = mdl.X[available_vars].copy()
+                tests['X Stationarity'] = MultiStationarityTest(
+                    dataframe=X_vars_df,
+                    filter_mode='moderate'
                 )
     else:
         # Y is non-stationary - test cointegration with applicable X variables

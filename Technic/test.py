@@ -81,88 +81,6 @@ class ModelTestBase(ABC):
         ...
 
 # ----------------------------------------------------------------------------
-# TestSet class
-# ----------------------------------------------------------------------------
-
-class TestSet:
-    """
-    Aggregator for ModelTestBase instances, with filtering and reporting utilities.
-
-    Parameters
-    ----------
-    tests : dict
-        Mapping from test alias (str) to ModelTestBase instance.
-    """
-    def __init__(
-        self,
-        tests: Dict[str, ModelTestBase]
-    ):
-        # Override each test's alias and collect in defined order
-        self.tests: List[ModelTestBase] = []
-        for alias, test_obj in tests.items():
-            test_obj.alias = alias
-            self.tests.append(test_obj)
-
-    @property
-    def all_test_results(self) -> Dict[str, Any]:
-        """
-        Return the test_result dict for every test in this set,
-        keyed by the test’s display name (alias or class name),
-        including both active and inactive tests.
-        """
-        return {t.name: t.test_result for t in self.tests}
-    
-
-    def filter_pass(
-        self,
-        fast_filter: bool = True
-    ) -> Tuple[bool, List[str]]:
-        """
-        Run active tests and return overall pass flag and failed test names.
-
-        Parameters
-        ----------
-        fast_filter : bool, default True
-            If True, stops on first failure.
-
-        Returns
-        -------
-        passed : bool
-            True if all active tests pass.
-        failed_tests : list of str
-            Names of tests that did not pass.
-        """
-        failed = []
-        for t in self.tests:
-            if not t.filter_on:
-                continue
-            if not t.test_filter:
-                failed.append(t.name)
-                if fast_filter:
-                    return False, failed
-        return len(failed) == 0, failed
-
-    def print_test_info(self) -> None:
-        """
-        Print summary of test configurations:
-          - Active tests: name, category, filter_mode, filter_mode_desc
-          - Inactive tests: name only, with note.
-        """
-        print("Active Tests:")
-        for t in self.tests:
-            if t.filter_on:
-                print(f"- {t.name} | category: {t.category} | filter_mode: {t.filter_mode} | desc: {t.filter_mode_desc}")
-        print("\nInactive Tests:")
-        inactive = [t for t in self.tests if not t.filter_on]
-        for t in inactive:
-            print(f"- {t.name}")
-        if inactive:
-            print(
-                "\nNote: These tests are included but not turned on. "
-                "Set `filter_on=True` on a test to include it in filter_pass results."
-            )
-
-# ----------------------------------------------------------------------------
 # FitMeasure class
 # ----------------------------------------------------------------------------
 class FitMeasure(ModelTestBase):
@@ -1363,3 +1281,145 @@ class CointTest(ModelTestBase):
             
         # All variables must pass their expectations (logic already handled in test_result)
         return results['Passed'].all()
+
+class MultiStationarityTest(ModelTestBase):
+    """
+    Conduct stationarity tests on multiple variables (DataFrame columns) simultaneously.
+    
+    This class creates individual StationarityTest instances for each column in the input
+    DataFrame and consolidates the results into a comprehensive test result.
+
+    Parameters
+    ----------
+    dataframe : pd.DataFrame
+        DataFrame containing all series to test for stationarity.
+    test_dict : Dict[str, callable], optional
+        Mapping of test names to functions; defaults to stationarity_test_dict.
+    test_threshold : Dict[str, Tuple[float, str]], optional
+        Test thresholds and directions; defaults to stationarity_test_threshold.
+    alias : str, optional
+        Display name for this test (defaults to class name).
+    filter_mode : {'strict','moderate'}, default 'moderate'
+        - 'strict': all individual tests must pass for each variable
+        - 'moderate': at least half of individual tests must pass for each variable
+    filter_on : bool, default True
+        Whether this test is active in filtering.
+        
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> # Create test data
+    >>> df = pd.DataFrame({
+    ...     'var1': [1, 2, 3, 4, 5],
+    ...     'var2': [2, 4, 6, 8, 10],
+    ...     'var3': [0.1, -0.2, 0.1, -0.1, 0.0]
+    ... })
+    >>> 
+    >>> # Create multi-variable stationarity test
+    >>> multi_test = MultiStationarityTest(df, filter_mode='moderate')
+    >>> print(multi_test.test_result)
+    >>> print(f"Overall passed: {multi_test.test_filter}")
+    """
+    category = 'assumption'
+
+    def __init__(
+        self,
+        dataframe: pd.DataFrame,
+        test_dict: Optional[Dict[str, Callable]] = None,
+        test_threshold: Optional[Dict[str, Tuple[float, str]]] = None,
+        alias: Optional[str] = None,
+        filter_mode: str = 'moderate',
+        filter_on: bool = True
+    ):
+        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        self.dataframe = dataframe
+        self.test_dict = test_dict if test_dict is not None else stationarity_test_dict
+        self.thresholds = test_threshold if test_threshold is not None else stationarity_test_threshold
+        self.filter_mode_descs = {
+            'strict':   'All individual tests must pass for each variable.',
+            'moderate': 'At least half of individual tests must pass for each variable.'
+        }
+        
+        # Create individual StationarityTest instances for each column
+        self._individual_tests = {}
+        for col in self.dataframe.columns:
+            if len(self.dataframe[col].dropna()) >= 10:  # Skip columns with insufficient data
+                self._individual_tests[col] = StationarityTest(
+                    series=self.dataframe[col],
+                    test_dict=self.test_dict,
+                    test_threshold=self.thresholds,
+                    filter_mode=self.filter_mode,
+                    filter_on=True
+                )
+    
+    @property
+    def filter_mode_desc(self):
+        return self.filter_mode_descs[self.filter_mode]
+
+    @property
+    def test_result(self) -> pd.DataFrame:
+        """
+        Run stationarity tests on all variables and return consolidated DataFrame.
+
+        Returns
+        -------
+        pd.DataFrame
+            Index: Variable names
+            Columns: For each test in test_dict:
+                - '{test_name}_Statistic': Test statistic value
+                - '{test_name}_P-value': P-value from test
+                - '{test_name}_Passed': Boolean indicating if test passed
+            Plus final 'Passed' column indicating overall result for each variable
+            
+        Example output structure:
+        ┌──────┬─────────────────┬─────────────────┬──────────────────┬─────────────────┬─────────────────┬──────────────────┬────────┐
+        │ Var  │ ADF_Statistic   │ ADF_P-value     │ ADF_Passed       │ PP_Statistic    │ PP_P-value      │ PP_Passed        │ Passed │
+        ├──────┼─────────────────┼─────────────────┼──────────────────┼─────────────────┼─────────────────┼──────────────────┼────────┤
+        │ var1 │ -2.1            │ 0.03            │ True             │ -1.8            │ 0.07            │ False            │ True   │
+        │ var2 │ -1.5            │ 0.12            │ False            │ -1.2            │ 0.15            │ False            │ False  │
+        └──────┴─────────────────┴─────────────────┴──────────────────┴─────────────────┴─────────────────┴──────────────────┴────────┘
+        """
+        if not self._individual_tests:
+            return pd.DataFrame()
+        
+        records = []
+        test_names = list(self.test_dict.keys())
+        
+        for var_name, stat_test in self._individual_tests.items():
+            record = {'Variable': var_name}
+            
+            # Get individual test results
+            individual_results = stat_test.test_result
+            
+            # Add columns for each test
+            for test_name in test_names:
+                if test_name in individual_results.index:
+                    record[f'{test_name}_Statistic'] = individual_results.loc[test_name, 'Statistic']
+                    record[f'{test_name}_P-value'] = individual_results.loc[test_name, 'P-value']
+                    record[f'{test_name}_Passed'] = individual_results.loc[test_name, 'Passed']
+                else:
+                    record[f'{test_name}_Statistic'] = np.nan
+                    record[f'{test_name}_P-value'] = np.nan
+                    record[f'{test_name}_Passed'] = False
+            
+            # Determine overall pass/fail for this variable
+            record['Passed'] = stat_test.test_filter
+            
+            records.append(record)
+        
+        df = pd.DataFrame(records).set_index('Variable')
+        return df
+
+    @property
+    def test_filter(self) -> bool:
+        """
+        Return True if all variables pass their stationarity tests.
+        
+        The individual filter_mode logic is already handled by each StationarityTest instance,
+        so we just need to check if all variables passed.
+        """
+        if not self._individual_tests:
+            return True  # No tests to run
+            
+        # All variables must pass their individual stationarity tests
+        return all(test.test_filter for test in self._individual_tests.values())

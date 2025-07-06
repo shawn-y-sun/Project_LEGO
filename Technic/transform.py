@@ -34,16 +34,19 @@ class TSFM(Feature):
         Used in exhaustive search filtering to ensure economically sensible models.
     alias : str, optional
         Custom name for the output feature.
+    freq : str, optional
+        Data frequency ('M' for monthly, 'Q' for quarterly).
+        If None, frequency will be inferred from the data index during apply().
         
     Example
     -------
     # GDP growth should have positive relationship with target
-    gdp_growth = TSFM('GDP', 'GR', exp_sign=1)
+    gdp_growth = TSFM('GDP', 'GR', exp_sign=1, freq='Q')
     
     # Interest rates might have negative relationship with target
-    interest_rate = TSFM('RATE', 'LV', exp_sign=-1)
+    interest_rate = TSFM('RATE', 'LV', exp_sign=-1, freq='M')
     
-    # No expectation for some variable
+    # No expectation for some variable, frequency auto-detected
     control_var = TSFM('CONTROL', 'DF', exp_sign=0)
     """
     def __init__(
@@ -52,7 +55,8 @@ class TSFM(Feature):
         transform_fn: Union[str, Callable[[pd.Series], pd.Series]],
         lag: int = 0,
         exp_sign: int = 0,
-        alias: Optional[str] = None
+        alias: Optional[str] = None,
+        freq: Optional[str] = None
     ):
         super().__init__(var=var, alias=alias)
         # Resolve transform function if given by name
@@ -66,6 +70,7 @@ class TSFM(Feature):
             self.transform_fn = transform_fn
         self.lag = lag
         self.exp_sign = exp_sign
+        self.freq = freq  # User-specified frequency (M or Q), None if not specified
 
     @property
     def name(self) -> str:
@@ -74,12 +79,13 @@ class TSFM(Feature):
 
         Uses alias if provided; otherwise combines:
           • var
-          • function name (with a period‐suffix if periods>1)
+          • frequency prefix (MM/QQ) + function name (with a period‐suffix if periods>1)
           • lag indicator (L# if lag>0)
 
         Examples:
-          x_DF2        ← DF with periods=2, no lag
-          x_GR3_L1     ← GR with periods=3 and lag=1
+          x_QQDF2        ← Quarterly DF with periods=2, no lag
+          x_MMGR3_L1     ← Monthly GR with periods=3 and lag=1
+          x_LV           ← LV function (no frequency prefix)
         """
         # 1) Handle functools.partial with a 'periods' keyword
         if isinstance(self.transform_fn, functools.partial):
@@ -93,6 +99,13 @@ class TSFM(Feature):
         else:
             # 2) Direct callables or alias functions
             fn_name = getattr(self.transform_fn, "__name__", "transform")
+
+        # 3) Add frequency prefix for non-LV functions
+        if fn_name != "LV" and self.freq is not None:
+            if self.freq == "M":
+                fn_name = f"MM{fn_name}"  # Month-over-month
+            elif self.freq == "Q":
+                fn_name = f"QQ{fn_name}"  # Quarter-over-quarter
 
         parts = [fn_name]
         if self.lag > 0:
@@ -127,6 +140,20 @@ class TSFM(Feature):
         # Resolve the input series via lookup()
         self.lookup(*dfs)
         series = self.var_series
+
+        # Detect and cache frequency from series index only if not already specified
+        if self.freq is None:
+            if hasattr(series.index, 'freq') and series.index.freq is not None:
+                freq_str = str(series.index.freq)
+            else:
+                freq_str = pd.infer_freq(series.index)
+            
+            if freq_str and freq_str.startswith('M'):
+                self.freq = "M"
+            elif freq_str and freq_str.startswith('Q'):
+                self.freq = "Q"
+            else:
+                self.freq = None
 
         # Apply lag if requested
         series = series.shift(self.lag)

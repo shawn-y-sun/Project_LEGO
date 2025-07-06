@@ -62,11 +62,14 @@ class DataLoader(ABC):
     
     def __init__(
         self,
-        freq: str = 'M',
+        freq: Optional[str] = None,
         full_sample_start: Optional[str] = None,
         full_sample_end: Optional[str] = None,
         scen_p0: Optional[str] = None
     ):
+        # Allow freq to be None initially - will be inferred from data if not specified
+        if freq is not None and freq not in ['M', 'Q']:
+            raise ValueError("freq must be either 'M' (monthly) or 'Q' (quarterly)")
         self.freq = freq
         self.full_sample_start = pd.to_datetime(full_sample_start).normalize() if full_sample_start else None
         self.full_sample_end = pd.to_datetime(full_sample_end).normalize() if full_sample_end else None
@@ -759,6 +762,7 @@ class TimeSeriesLoader(DataLoader):
     def _standardize_index(self, df: pd.DataFrame, date_col: Optional[str] = None) -> pd.DataFrame:
         """
         Convert a date column into a period-end DatetimeIndex and sort.
+        Also validates and potentially updates self.freq based on data.
         
         Parameters
         ----------
@@ -771,12 +775,18 @@ class TimeSeriesLoader(DataLoader):
         -------
         pd.DataFrame
             DataFrame with standardized DatetimeIndex
+            
+        Raises
+        ------
+        ValueError
+            If data frequency doesn't match self.freq or can't be determined
         """
         df = df.copy()
         
         # Handle datetime index
         if isinstance(df.index, pd.DatetimeIndex):
             df.index = df.index.normalize()
+            dates = df.index
         else:
             if date_col is None:
                 raise ValueError("date_col required when DataFrame does not have datetime index")
@@ -784,6 +794,32 @@ class TimeSeriesLoader(DataLoader):
                 raise ValueError(f"date_col '{date_col}' not found in DataFrame")
                 
             df[date_col] = pd.to_datetime(df[date_col])
+            dates = df[date_col]
+        
+        # Validate/infer frequency
+        inferred_freq = pd.infer_freq(dates.sort_values())
+        if inferred_freq is None:
+            raise ValueError("Could not infer data frequency. Please ensure data has regular time intervals.")
+            
+        # Convert inferred frequency to M or Q
+        if inferred_freq.startswith('M'):
+            data_freq = 'M'
+        elif inferred_freq.startswith('Q'):
+            data_freq = 'Q'
+        else:
+            raise ValueError(f"Data frequency {inferred_freq} not supported. Must be monthly (M) or quarterly (Q).")
+            
+        # Update or validate self.freq
+        if self.freq is None:
+            self.freq = data_freq
+        elif self.freq != data_freq:
+            raise ValueError(f"Data frequency ({data_freq}) does not match specified frequency ({self.freq})")
+        
+        # Standardize to period end dates
+        if isinstance(df.index, pd.DatetimeIndex):
+            periods = pd.PeriodIndex(df.index, freq=self.freq)
+            df.index = periods.to_timestamp(how='end').normalize()
+        else:
             periods = pd.PeriodIndex(df[date_col], freq=self.freq)
             idx = periods.to_timestamp(how='end').normalize()
             df.index = idx
