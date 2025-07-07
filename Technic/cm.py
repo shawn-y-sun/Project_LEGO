@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 from pandas.api.types import is_numeric_dtype, is_datetime64_any_dtype
 from typing import Type, List, Dict, Any, Optional, Union, Tuple
+import matplotlib.pyplot as plt
 
 from .model import ModelBase
 from .feature import DumVar, Feature
@@ -23,11 +24,9 @@ class CM:
     """
     Candidate Model wrapper.
 
-    Manages in-sample, out-of-sample, and full-sample fitting. Does not persist
-    feature DataFrames internally; instead, passes data directly into model instances.
-    Provides access to report and testset properties of the underlying models.
-    Handles removal of outlier records from the in-sample dataset.
-    Stores column names to reconstruct formula and representation.
+    Manages creation and coordination of in-sample, out-of-sample, and full-sample
+    models. This class serves as a factory for creating ModelBase instances and
+    provides unified access to their reports and test results.
 
     Attributes
     ----------
@@ -41,18 +40,18 @@ class CM:
         DataManager instance providing build_features() and internal_data.
     specs : List[Any]
         Cached feature specifications passed to DataManager.
-    cols_in : List[str]
-        Column names of in-sample features after build().
-    cols_full : List[str]
-        Column names of full-sample features after build().
     model_in : Optional[ModelBase]
         In-sample fitted model instance.
     model_full : Optional[ModelBase]
         Full-sample fitted model instance.
+    scen_cls : Type
+        Class to use for scenario management.
     scen_manager_in : Optional[ScenManager]
-        Scenario manager for in-sample model (created during build()).
+        Scenario manager for in-sample model (from model_in.scen_manager).
     scen_manager_full : Optional[ScenManager]
-        Scenario manager for full-sample model (created during build()).
+        Scenario manager for full-sample model (from model_full.scen_manager).
+    outlier_idx : List[str]
+        List of outlier indices that were removed from in-sample data.
     """
 
     def __init__(
@@ -61,6 +60,7 @@ class CM:
         target: str,
         model_cls: Type[ModelBase],
         data_manager: Any = None,
+        scen_cls: Type = None,
     ):
         """
         Initialize CM.
@@ -75,68 +75,36 @@ class CM:
             A class that extends ModelBase, to be used for fitting.
         data_manager : Any, optional
             DataManager instance; if None, must be provided to build().
+        scen_cls : Type, optional
+            Class to use for scenario management. If None, defaults to ScenManager.
         """
         self.model_id = model_id
         self.target = target
         self.model_cls = model_cls
         self.dm = data_manager
+        
+        # Import and set default ScenManager if not provided
+        if scen_cls is None:
+            self.scen_cls = ScenManager
+        else:
+            self.scen_cls = scen_cls
 
-        # Placeholders; we do NOT store large DataFrames to save memory
-        self.specs: List[Any] = []
-        self.cols_in: List[str] = []
-        self.cols_full: List[str] = []
+        # Model instances
         self.model_in: Optional[ModelBase] = None
         self.model_full: Optional[ModelBase] = None
+        
+        # Cached specs and outlier indices
+        self.specs: List[Any] = []
         self.outlier_idx: List[str] = []
-        self.scen_manager_in: Optional[ScenManager] = None
-        self.scen_manager_full: Optional[ScenManager] = None
-
-    @staticmethod
-    def _validate_data(X: pd.DataFrame, y: pd.Series) -> None:
-        """
-        Validate X (features) and y (target) for NaNs or infinite values.
-
-        Raises
-        ------
-        ValueError
-            If any column in X or the series y contains NaNs or infinite values.
-        """
-        nan_cols: List[str] = []
-        inf_cols: List[str] = []
-
-        for col in X.columns:
-            s = X[col]
-            if s.isna().any():
-                nan_cols.append(col)
-            elif is_numeric_dtype(s) and not np.isfinite(s.dropna()).all():
-                inf_cols.append(col)
-
-        has_nan_y = y.isna().any()
-        has_inf_y = is_numeric_dtype(y) and not np.isfinite(y.dropna()).all()
-
-        if nan_cols or inf_cols or has_nan_y or has_inf_y:
-            msgs: List[str] = []
-            if nan_cols:
-                msgs.append(f"X contains NaNs: {nan_cols}")
-            if inf_cols:
-                msgs.append(f"X contains infinite values: {inf_cols}")
-            if has_nan_y:
-                msgs.append("y contains NaNs")
-            if has_inf_y:
-                msgs.append("y contains infinite values")
-            raise ValueError("Data validation error: " + "; ".join(msgs))
 
     def build(
         self,
         specs: List[Union[str, Dict[str, Any]]],
         sample: str = 'in',
-        data_manager: Any = None,
         outlier_idx: Optional[List[Any]] = None
     ) -> None:
         """
-        Build features and target, validate data, split into in-/out-of-sample,
-        remove specified outliers from in-sample data, store column names, and
-        fit the model(s). After calling, model_in and/or model_full are defined.
+        Build model instance(s) using the specified sample type.
 
         Parameters
         ----------
@@ -144,243 +112,79 @@ class CM:
             Feature specifications to pass to DataManager.build_features().
         sample : {'in', 'full', 'both'}, default 'in'
             Which sample(s) to build and fit:
-            - 'in': fit only the in-sample model;
-            - 'full': fit only the full-sample model;
-            - 'both': fit both in-sample and full-sample models.
-        data_manager : Any, optional
-            If provided, overrides self.dm.
+            - 'in': create only the in-sample model;
+            - 'full': create only the full-sample model;
+            - 'both': create both in-sample and full-sample models.
         outlier_idx : List[Any], optional
             List of index labels (e.g. timestamps or keys) corresponding to outlier
-            records to remove from the in-sample data. If provided and `build_in`
-            is True, each label must exist within the in-sample period; otherwise,
-            a ValueError is raised.
+            records to remove from the in-sample data.
 
         Raises
         ------
         ValueError
-            If no DataManager is available or if `sample` is invalid,
-            or if data validation fails, or if any provided outlier index is
-            outside the in-sample period.
+            If no DataManager is available or if `sample` is invalid.
         """
-        # Cache input specs
+        # Cache input specs and outlier indices
         self.specs = specs
+        self.outlier_idx = outlier_idx or []
 
-        dm = data_manager or self.dm
-        if dm is None:
-            raise ValueError("No data_manager provided to CM.build().")
+        if self.dm is None:
+            raise ValueError("No DataManager available for CM.build().")
         if sample not in {'in', 'full', 'both'}:
             raise ValueError("sample must be 'in', 'full', or 'both'.")
 
         build_in = sample in {'in', 'both'}
         build_full = sample in {'full', 'both'}
 
-        # Get the union of in-sample and out-of-sample indices
-        idx = dm.in_sample_idx.union(dm.out_sample_idx)
-
-        # Prepare full DataFrame X_full and Series y_full
-        X_full = dm.build_features(specs)
-        y_full = dm.internal_data[self.target].copy()
-
-        # Align to index
-        X_full = X_full.reindex(idx).astype(float)
-        y_full = y_full.reindex(idx).astype(float)
-
-        # Validate full-sample data
-        self._validate_data(X_full, y_full)
-
-        # Split into in-sample and out-of-sample using DataLoader indices
-        X_in = X_full.loc[dm.in_sample_idx].copy()
-        y_in = y_full.loc[dm.in_sample_idx].copy()
-        X_out = X_full.loc[dm.out_sample_idx].copy()
-        y_out = y_full.loc[dm.out_sample_idx].copy()
-
-        # If in-sample fit is requested, remove specified outliers
-        if build_in and outlier_idx:
-            # 1) Convert outlier_idx to match X_in.index dtype
-            if is_datetime64_any_dtype(X_in.index):
-                converted_idx = pd.to_datetime(outlier_idx)
-            else:
-                converted_idx = outlier_idx
-
-            # 2) Check whether every converted index exists in X_in.index
-            missing = [i for i in converted_idx if i not in X_in.index]
-            if missing:
-                raise ValueError(f"Outlier indices {missing} not in in-sample period.")
-
-            # 3) Drop those rows from X_in and y_in
-            X_in = X_in.drop(index=converted_idx)
-            y_in = y_in.drop(index=converted_idx)
-
-            #4) Record outlier indices
-            self.outlier_idx = outlier_idx
-
-        # Store column names for representation/formula
-        self.cols_in = list(X_in.columns)
-        self.cols_full = list(X_full.columns)
-
-        # Fit in-sample model (no model_id argument)
+        # Create in-sample model if requested
         if build_in:
-            # Re-validate after dropping outliers
-            self._validate_data(X_in, y_in)
             self.model_in = self.model_cls(
-                X_in,
-                y_in,
-                X_out=X_out,
-                y_out=y_out,
-                spec_map=self.spec_map
-            ).fit()
-            
-            # Create ScenManager for in-sample model
-            self.scen_manager_in = ScenManager(
-                dm=dm,
-                model=self.model_in,
+                dm=self.dm,
                 specs=specs,
-                target=self.target
-            )
-            # Attach ScenManager to model_in
-            self.model_in.scen_manager = self.scen_manager_in
+                sample='in',
+                outlier_idx=outlier_idx,
+                target=self.target,
+                scen_cls=self.scen_cls
+            ).fit()
 
-        # Fit full-sample model (no model_id argument)
+        # Create full-sample model if requested
         if build_full:
             self.model_full = self.model_cls(
-                X_full,
-                y_full,
-                X_out=X_out,
-                y_out=y_out,
-                spec_map=self.spec_map
-            ).fit()
-            
-            # Create ScenManager for full-sample model
-            self.scen_manager_full = ScenManager(
-                dm=dm,
-                model=self.model_full,
+                dm=self.dm,
                 specs=specs,
-                target=self.target
-            )
-            # Attach ScenManager to model_full
-            self.model_full.scen_manager = self.scen_manager_full
+                sample='full',
+                outlier_idx=outlier_idx,
+                target=self.target,
+                scen_cls=self.scen_cls
+            ).fit()
 
     @property
-    def spec_map(self) -> Dict[str, List[Union[str, Tuple[str, ...]]]]:
+    def scen_manager_in(self) -> Optional[ScenManager]:
         """
-        Categorize self.specs into driver lists for different test purposes.
+        Get the scenario manager from the in-sample model.
 
         Returns
         -------
-        Dict[str, List[Union[str, Tuple[str, ...]]]]
-            - 'CoefTest': variable names for individual coefficient tests
-            - 'GroupTest': tuples of variable names for group F-tests (only full monthly/quarterly dummies)
-            - 'StationarityTest': variable names applicable for stationarity tests
-            - 'SignCheck': Feature instances with exp_sign attribute
+        Optional[ScenManager]
+            The scenario manager from model_in, or None if not available.
         """
-        coef_test_vars: List[str] = []
-        group_test_vars: List[Tuple[str, ...]] = []
-        stationarity_test_vars: List[str] = []
-        sign_check_features: List[Feature] = []
+        if self.model_in is not None:
+            return self.model_in.scen_manager
+        return None
 
-        def _flatten(items):
-            """Recursively flatten nested lists but leave tuples intact."""
-            for item in items:
-                if isinstance(item, list):
-                    yield from _flatten(item)
-                else:
-                    yield item
+    @property
+    def scen_manager_full(self) -> Optional[ScenManager]:
+        """
+        Get the scenario manager from the full-sample model.
 
-        def _is_full_monthly_quarterly_dummy(dumvar: DumVar) -> bool:
-            """Check if DumVar represents full monthly (M:2-12) or quarterly (Q:2-4) dummies."""
-            if not isinstance(dumvar, DumVar):
-                return False
-            
-            # Extract numbers from output_names that have the pattern var:number
-            dummy_names = [name for name in dumvar.output_names if ':' in name]
-            if not dummy_names:
-                return False
-                
-            # Check for monthly dummies: var should be 'M' and output should cover M:2 to M:12
-            if dumvar.var == 'M':
-                months = set()
-                for name in dummy_names:
-                    if name.startswith('M:'):
-                        try:
-                            month_num = int(name.split(':')[1])
-                            months.add(month_num)
-                        except (ValueError, IndexError):
-                            continue
-                # Check if covers months 2-12 (reference month 1 dropped)
-                if months == set(range(2, 13)):
-                    return True
-            
-            # Check for quarterly dummies: var should be 'Q' and output should cover Q:2 to Q:4
-            elif dumvar.var == 'Q':
-                quarters = set()
-                for name in dummy_names:
-                    if name.startswith('Q:'):
-                        try:
-                            quarter_num = int(name.split(':')[1])
-                            quarters.add(quarter_num)
-                        except (ValueError, IndexError):
-                            continue
-                # Check if covers quarters 2-4 (reference quarter 1 dropped)
-                if quarters == set(range(2, 5)):
-                    return True
-            
-            return False
-        
-        for spec in _flatten(self.specs):
-            # 1) Tuple of specs → one tuple of their output names
-            if isinstance(spec, tuple):
-                names = tuple(
-                    n
-                    for s in spec
-                    for n in (
-                        s.output_names if isinstance(s, Feature) else [str(s)]
-                    )
-                )
-                # Tuples go to CoefTest only (no overlap with GroupTest)
-                coef_test_vars.extend(names)
-                # Individual variables go to stationarity test if not dummies
-                for name in names:
-                    if not ':' in name:  # Not a dummy variable
-                        stationarity_test_vars.append(name)
-
-            # 2) DumVar instance → one tuple of its dummy-column names
-            elif isinstance(spec, DumVar):
-                names = tuple(spec.output_names)
-                
-                # Check if this is a full monthly/quarterly dummy group
-                if _is_full_monthly_quarterly_dummy(spec):
-                    # Full monthly/quarterly dummies go to GroupTest only
-                    group_test_vars.append(names)
-                else:
-                    # Other dummy groups go to CoefTest only
-                    coef_test_vars.extend(names)
-
-            # 3) Everything else → individual features
-            else:
-                if isinstance(spec, Feature):
-                    # Add to coef_test_vars
-                    coef_test_vars.extend(spec.output_names)
-                    
-                    # Check for stationarity test eligibility (non-dummy variables)
-                    for name in spec.output_names:
-                        if not ':' in name:  # Not a dummy variable
-                            stationarity_test_vars.append(name)
-                    
-                    # Check for SignCheck eligibility (Features with exp_sign attribute)
-                    if hasattr(spec, 'exp_sign'):
-                        sign_check_features.append(spec)
-                        
-                else:
-                    # String specifications
-                    coef_test_vars.append(str(spec))
-                    stationarity_test_vars.append(str(spec))
-
-        return {
-            'CoefTest': coef_test_vars,
-            'GroupTest': group_test_vars,
-            'StationarityTest': stationarity_test_vars,
-            'SignCheck': sign_check_features
-        }
+        Returns
+        -------
+        Optional[ScenManager]
+            The scenario manager from model_full, or None if not available.
+        """
+        if self.model_full is not None:
+            return self.model_full.scen_manager
+        return None
 
     def __repr__(self) -> str:
         """
@@ -388,29 +192,24 @@ class CM:
 
         Uses the __repr__ of the in-sample model if available; otherwise,
         uses the __repr__ of the full-sample model. The formula portion
-        (":target~C+...") remains unchanged.
+        (":target~C+...") is built from the model's feature columns.
 
         Returns
         -------
         str
-            e.g., "UnderlyingModelRepr:target~C+var1+var2"
+            e.g., "ModelRepr:target~C+var1+var2"
         """
         # Determine which underlying model repr to use
         if self.model_in is not None:
             prefix = self.model_in.__repr__()
+            cols = list(self.model_in.X.columns)
         elif self.model_full is not None:
             prefix = self.model_full.__repr__()
+            cols = list(self.model_full.X.columns)
         else:
             return f"<CM {self.model_id}: no model data>"
 
-        # Build the formula string exactly as before
-        if self.model_in is not None and self.cols_in:
-            cols = self.cols_in
-        elif self.model_full is not None and self.cols_full:
-            cols = self.cols_full
-        else:
-            cols = []
-
+        # Build the formula string
         formula = f"{self.target}~C"
         if cols:
             formula += "+" + "+".join(cols)
@@ -568,7 +367,7 @@ class CM:
         # Scenario plots
         if show_scens:
             # Plot scenarios for in-sample model
-            if hasattr(self, 'scen_manager_in') and self.scen_manager_in is not None:
+            if self.scen_manager_in is not None:
                 print(f"\n=== Model: {self.model_id} — Scenario Analysis ===")
                 try:
                     figures = self.scen_manager_in.plot_all(**scen_kwargs)
@@ -581,7 +380,7 @@ class CM:
                     print(f"Error generating in-sample scenario plots: {e}")
             
             # Plot scenarios for full-sample model if requested
-            if show_full and hasattr(self, 'scen_manager_full') and self.scen_manager_full is not None:
+            if show_full and self.scen_manager_full is not None:
                 print(f"\n=== Model: {self.model_id} — Full-Sample Scenario Analysis ===")
                 try:
                     figures = self.scen_manager_full.plot_all(**scen_kwargs)
@@ -594,6 +393,5 @@ class CM:
                     print(f"Error generating full-sample scenario plots: {e}")
             
             # If no scenario managers are available, inform the user
-            if not (hasattr(self, 'scen_manager_in') and self.scen_manager_in is not None):
-                if not show_full or not (hasattr(self, 'scen_manager_full') and self.scen_manager_full is not None):
-                    print("\nNo scenario managers available. Scenario data may not be loaded in DataManager.")
+            if not self.scen_manager_in and (not show_full or not self.scen_manager_full):
+                print("\nNo scenario managers available. Scenario data may not be loaded in DataManager.")

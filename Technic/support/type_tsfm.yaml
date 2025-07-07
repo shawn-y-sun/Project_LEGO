@@ -1,11 +1,26 @@
+# =============================================================================
 # type_tsfm.yaml
+# Purpose: Define transformation mappings for different MEV types
+# Structure: transforms -> <type_name> -> [list of transform functions]
+# =============================================================================
+
+# Available transformation functions (defined in transform.py):
+# LV   - Original values     DF   - Period difference
+# GR   - Growth rate        ABSGR - Absolute growth rate
+# DF2  - 2-period diff      GR2   - 2-period growth
+# DF3  - 3-period diff      GR3   - 3-period growth
 
 transforms:
+  # Level variables (e.g., GDP, Population, Stock Prices)
   level:
-    - LV      # No change
+    - LV      # No change - use original values
     - GR      # MoM or QoQ growth rate
 
+  # Rate variables (e.g., Unemployment Rate, Interest Rate)
   rate:
-    - LV      # No change
+    - LV      # No change - use original values
     - DF      # MoM or QoQ difference
-    - GR      # MoM or QoQ growth rate
+
+# To add new transformations:
+# 1. Define the function in transform.py (see TSFM class documentation)
+# 2. Add the function name to the appropriate type list above

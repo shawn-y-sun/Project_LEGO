@@ -11,6 +11,7 @@ from .model import ModelBase
 from .template import ExportTemplateBase
 from .report import ReportSet
 from .search import ModelSearch  # new import
+from .scenario import ScenManager
 
 
 class Segment:
@@ -37,6 +38,8 @@ class Segment:
         Class for assembling and displaying model reports.
     search_cls : Type[ModelSearch], default ModelSearch
         Class to use for exhaustive model search.
+    scen_cls : Type, optional
+        Class to use for scenario management. If None, defaults to ScenManager.
 
     Attributes
     ----------
@@ -74,7 +77,8 @@ class Segment:
         model_cls: Type[ModelBase],
         export_template_cls: Optional[Type[ExportTemplateBase]] = None,
         reportset_cls: Type[ReportSet] = ReportSet,
-        search_cls: Type[ModelSearch] = ModelSearch  # added parameter
+        search_cls: Type[ModelSearch] = ModelSearch,  # added parameter
+        scen_cls: Type = None  # new parameter for scenario manager class
     ):
         self.segment_id = segment_id
         self.target = target
@@ -83,6 +87,11 @@ class Segment:
         self.export_template_cls = export_template_cls
         self.reportset_cls = reportset_cls
         self.search_cls = search_cls                # store search class
+        # Import and set default ScenManager if not provided
+        if scen_cls is None:
+            self.scen_cls = ScenManager
+        else:
+            self.scen_cls = scen_cls
         # Will hold the ModelSearch instance once we've run a search
         self.searcher: Optional[ModelSearch] = None
         self.cms: Dict[str, CM] = {}               # existing CMs in this segment
@@ -145,6 +154,7 @@ class Segment:
             target=self.target,
             data_manager=self.dm,
             model_cls=self.model_cls,
+            scen_cls=self.scen_cls,
         )
         cm.build(specs, sample=sample)
         self.cms[cm_id] = cm
@@ -277,48 +287,81 @@ class Segment:
             scen_kwargs=scen_kwargs
         )
     
-    def explore_vars(
+    def plot_vars(
         self,
         vars_list: List[str],
-        plot_type: str = 'line'
+        plot_type: str = 'line',
+        sample: str = 'full',
+        date_range: Optional[Tuple[str, str]] = None
     ) -> None:
         """
-        Create exploratory plots comparing variables to the target.
+        Create exploratory plots comparing variables and their transformations to the target.
 
-        This method helps visualize relationships between potential predictor
-        variables and the target variable, useful for feature selection and
-        model specification.
+        This method generates all applicable transformations for each variable and creates
+        a separate figure for each variable showing all its transformed versions plotted
+        against the target. Each subplot includes correlation coefficient in the title.
 
         Parameters
         ----------
         vars_list : List[str]
-            List of variable names or transformation specifications to explore.
-            Each variable will be plotted against the target.
+            List of variable names to explore. For each variable, all applicable
+            transformations will be generated and plotted.
         plot_type : str, default 'line'
             Type of plot to create:
             - 'line': time series plot with dual y-axes
             - 'scatter': scatter plot of variable vs target
+        sample : str, default 'full'
+            Which sample to use for plotting and correlation calculation:
+            - 'in': use in-sample data only
+            - 'full': use full sample data (in-sample + out-sample)
+        date_range : Tuple[str, str], optional
+            Date range for zooming in, e.g., ('2020-05-31', '2022-02-28').
+            If provided, plots and correlations will be calculated only for this period.
 
         Example
         -------
         >>> # Explore basic variables with line plots
-        >>> segment.explore_vars(
-        ...     vars_list=["gdp", "inflation", "unemployment"]
+        >>> segment.plot_vars(
+        ...     vars_list=["GDP", "UNRATE", "CPI"]
         ... )
+        >>> # This creates 3 separate figures:
+        >>> # Figure 1: GDP and all its transformations vs target
+        >>> # Figure 2: UNRATE and all its transformations vs target  
+        >>> # Figure 3: CPI and all its transformations vs target
         >>> 
-        >>> # Create scatter plots for transformed variables
-        >>> segment.explore_vars(
-        ...     vars_list=[
-        ...         {"var": "gdp", "transform": "pct_change"},
-        ...         {"var": "cpi", "transform": "diff"}
-        ...     ],
-        ...     plot_type="scatter"
+        >>> # Create scatter plots for specific period
+        >>> segment.plot_vars(
+        ...     vars_list=["GDP", "UNRATE"],
+        ...     plot_type="scatter",
+        ...     date_range=("2020-01-01", "2022-12-31")
         ... )
         """
-        var_dfs = self.dm.build_search_vars(vars_list)
-        target_series = self.dm.internal_data[self.target]
+        # Generate transformations for each variable (no lags, no periods)
+        var_dfs = self.dm.build_search_vars(vars_list, max_lag=0, max_periods=1)
+        
+        # Get target data based on sample
+        if sample == 'in':
+            target_idx = self.dm.in_sample_idx
+        else:  # sample == 'full'
+            target_idx = self.dm.in_sample_idx.union(self.dm.out_sample_idx)
+        
+        target_series = self.dm.internal_data.loc[target_idx, self.target]
+        
+        # Apply date range filter to target if specified
+        if date_range:
+            start_date, end_date = date_range
+            start_date = pd.to_datetime(start_date)
+            end_date = pd.to_datetime(end_date)
+            
+            mask = (target_series.index >= start_date) & (target_series.index <= end_date)
+            target_series = target_series[mask]
 
         for var_name, df in var_dfs.items():
+            # Apply date range filter to variable data if specified
+            if date_range:
+                mask = (df.index >= start_date) & (df.index <= end_date)
+                df = df[mask]
+            
             # Align df and target to their common index
             common_idx = df.index.intersection(target_series.index)
             df_aligned = df.loc[common_idx]
@@ -326,20 +369,49 @@ class Segment:
 
             cols = df_aligned.columns.tolist()
             n = len(cols)
-            ncols = 3
+            
+            # Dynamic column adjustment based on number of transformations
+            if n == 1:
+                ncols = n  # Use 1 column for 1 transformation
+                fig_width = 7
+            elif n == 2:
+                ncols = n  # Use 2 columns for 2 transformations
+                fig_width = 15
+            else:
+                ncols = 3  # Use 3 columns for 3+ transformations
+                fig_width = 15
+
             nrows = math.ceil(n / ncols)
             fig, axes = plt.subplots(
                 nrows=nrows, ncols=ncols,
-                figsize=(5 * ncols, 4 * nrows), squeeze=False
+                figsize=(fig_width, 4 * nrows), squeeze=False
+                # figsize=(5 * ncols, 4 * nrows), squeeze=False
             )
-            fig.suptitle(f"{var_name} vs. {self.target}", fontsize=16)
+            
+            # Create title with date range info
+            title_parts = [f"{var_name} vs. {self.target}"]
+            if date_range:
+                title_parts.append(f"({start_date.strftime('%Y-%m-%d')}:{end_date.strftime('%Y-%m-%d')})")
+            fig.suptitle(" ".join(title_parts), fontsize=14)
 
             for idx, col in enumerate(cols):
                 row, col_idx = divmod(idx, ncols)
                 ax = axes[row][col_idx]
 
-                # set subplot title to the variable name
-                ax.set_title(col)
+                # Calculate correlation
+                var_series = df_aligned[col]
+                target_series_aligned = ts_aligned
+                
+                # Remove NaN values for correlation calculation
+                combined = pd.concat([var_series, target_series_aligned], axis=1).dropna()
+                if len(combined) > 1:
+                    corr = combined.iloc[:, 0].corr(combined.iloc[:, 1])
+                    corr_text = f"Corr: {corr:.2f}"
+                else:
+                    corr_text = "Corr: N/A"
+                
+                # Set subplot title with correlation
+                ax.set_title(f"{col} - {corr_text}")
 
                 if plot_type == 'line':
                     # primary vs secondary y-axis
@@ -347,14 +419,16 @@ class Segment:
                         ts_aligned.index,
                         ts_aligned,
                         color='tab:blue',
-                        label=self.target
+                        label=self.target,
+                        linewidth=2
                     )
                     ax2 = ax.twinx()
                     line2, = ax2.plot(
                         df_aligned.index,
                         df_aligned[col],
                         color='tab:orange',
-                        label=col
+                        label=col,
+                        linewidth=2
                     )
                     ax.legend(handles=[line1, line2], loc='best')
 
@@ -387,6 +461,130 @@ class Segment:
 
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             plt.show()
+
+    def explore_vars(
+        self,
+        vars_list: List[str],
+        max_lag: int = 3,
+        max_periods: int = 12,
+        sample: str = 'full',
+        plot_type: str = 'line',
+        date_range: Optional[Tuple[str, str]] = None
+    ) -> pd.DataFrame:
+        """
+        Explore variables by creating plots and returning correlation analysis.
+        
+        This method consolidates the functionality of plot_vars() and get_corr() methods.
+        It generates transformation specifications for variables, creates exploratory plots,
+        and returns a DataFrame with correlation rankings.
+
+        Parameters
+        ----------
+        vars_list : List[str]
+            List of variable names to analyze and transform.
+        max_lag : int, default 3
+            Maximum lag to consider in transformation specifications.
+        max_periods : int, default 12
+            Maximum number of periods to consider in transformations.
+        sample : str, default 'full'
+            Which sample to use:
+            - 'in': use in-sample data only  
+            - 'full': use full sample data (in-sample + out-sample)
+        plot_type : str, default 'line'
+            Type of plot to create ('line' or 'scatter').
+        date_range : Tuple[str, str], optional
+            Date range for zooming in, e.g., ('2020-05-31', '2022-02-28').
+            If provided, plots and correlations will be calculated only for this period.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with columns ['variable', 'corr', 'abs_corr'] sorted by absolute
+            correlation in descending order. Contains all possible transformations
+            for each variable.
+
+        Example
+        -------
+        >>> # Basic exploration
+        >>> corr_df = segment.explore_vars(
+        ...     vars_list=['GDP', 'UNRATE']
+        ... )
+        >>> print(corr_df.head())
+        >>> 
+        >>> # Explore specific period with scatter plots
+        >>> corr_df = segment.explore_vars(
+        ...     vars_list=['GDP', 'UNRATE'],
+        ...     plot_type='scatter',
+        ...     date_range=('2020-01-01', '2022-12-31')
+        ... )
+        """
+        # First create the plots
+        self.plot_vars(
+            vars_list=vars_list,
+            plot_type=plot_type,
+            sample=sample,
+            date_range=date_range
+        )
+        
+        # Adjust max_periods for quarterly data if needed
+        if self.dm.freq == 'Q' and max_periods <= 4:
+            max_periods = 4
+        
+        # Generate all possible transformations for each variable
+        var_dfs = self.dm.build_search_vars(vars_list, max_lag=max_lag, max_periods=max_periods)
+        
+        # Get target data based on sample
+        if sample == 'in':
+            target_idx = self.dm.in_sample_idx
+        else:  # sample == 'full'
+            target_idx = self.dm.in_sample_idx.union(self.dm.out_sample_idx)
+        
+        target_data = self.dm.internal_data.loc[target_idx, self.target]
+        
+        # Apply date range filter if specified
+        if date_range:
+            start_date, end_date = date_range
+            start_date = pd.to_datetime(start_date)
+            end_date = pd.to_datetime(end_date)
+            
+            mask = (target_data.index >= start_date) & (target_data.index <= end_date)
+            target_data = target_data[mask]
+        
+        # Calculate correlations for all transformations
+        corr_results = []
+        
+        for var_name, var_df in var_dfs.items():
+            # Apply same date range filter to variable data
+            if date_range:
+                mask = (var_df.index >= start_date) & (var_df.index <= end_date)
+                var_df = var_df[mask]
+            
+            # Align with target data
+            common_idx = var_df.index.intersection(target_data.index)
+            var_aligned = var_df.loc[common_idx]
+            target_aligned = target_data.loc[common_idx]
+            
+            for col in var_aligned.columns:
+                # Calculate correlation, handling NaN values
+                combined = pd.concat([var_aligned[col], target_aligned], axis=1).dropna()
+                if len(combined) > 1:
+                    corr = combined.iloc[:, 0].corr(combined.iloc[:, 1])
+                    if pd.isna(corr):
+                        corr = 0.0
+                else:
+                    corr = 0.0
+                
+                corr_results.append({
+                    'variable': col,
+                    'corr': corr,
+                    'abs_corr': abs(corr)
+                })
+        
+        # Create result DataFrame and sort by absolute correlation
+        result_df = pd.DataFrame(corr_results)
+        result_df = result_df.sort_values('abs_corr', ascending=False).reset_index(drop=True)
+        
+        return result_df
 
     def export(
         self,
@@ -462,6 +660,128 @@ class Segment:
         >>> segment.build_cm("new_model", new_specs)
         """
         self.cms.clear()
+
+    def get_corr(
+        self,
+        vars_list: List[str],
+        max_lag: int = 3,
+        max_periods: int = 12,
+        sample: str = 'full'
+    ) -> pd.DataFrame:
+        """
+        Rank variables and their transformations by correlation with the target variable.
+
+        This method generates all possible transformations for the specified variables
+        and ranks them by their correlation with the target variable. It's useful for
+        feature selection and understanding which transformations are most predictive.
+
+        Parameters
+        ----------
+        vars_list : List[str]
+            List of variable names to analyze and transform.
+        max_lag : int, default 3
+            Maximum lag to consider in transformation specifications.
+        max_periods : int, default 12
+            Maximum number of periods to consider in transformations.
+            For quarterly data, automatically adjusted to 4 if not specified > 4.
+        sample : str, default 'full'
+            Which sample to use for correlation calculation:
+            - 'in': in-sample period
+            - 'full': full sample period
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with columns:
+            - 'variable': Variable or transformation name
+            - 'corr': Correlation coefficient with target
+            - 'abs_corr': Absolute value of correlation
+            Sorted by absolute correlation in descending order with reset index.
+
+        Example
+        -------
+        >>> # Basic correlation ranking
+        >>> corr_df = segment.get_corr(['GDP', 'UNRATE', 'CPI'])
+        >>> print(corr_df.head())
+        >>>
+        >>> # With custom parameters for quarterly data
+        >>> corr_df = segment.get_corr(
+        ...     vars_list=['GDP', 'UNRATE'],
+        ...     max_lag=2,
+        ...     max_periods=8,  # Will be adjusted to 4 for quarterly data
+        ...     sample='in'
+        ... )
+        >>> 
+        >>> # Find top 10 most correlated features
+        >>> top_features = corr_df.head(10)['variable'].tolist()
+        """
+        if sample not in ['in', 'full']:
+            raise ValueError("sample must be 'in' or 'full'")
+
+        # Check if internal data is quarterly and adjust max_periods if needed
+        try:
+            internal_freq = pd.infer_freq(self.dm.internal_data.index)
+            if internal_freq and internal_freq.startswith('Q'):
+                # For quarterly data, if user didn't specify max_periods > 4, set to 4
+                if max_periods <= 4:
+                    max_periods = 4
+        except (AttributeError, TypeError):
+            # If frequency detection fails, use original max_periods
+            pass
+
+        # Build all possible transformations for the variables
+        var_dfs = self.dm.build_search_vars(
+            vars_list,
+            max_lag=max_lag,
+            max_periods=max_periods
+        )
+
+        # Get target variable for the specified sample using index properties
+        if sample == 'in':
+            target_idx = self.dm.in_sample_idx
+        else:  # sample == 'full'
+            # Combine in-sample and out-sample indices for full sample
+            target_idx = self.dm.in_sample_idx.union(self.dm.out_sample_idx)
+        
+        target_data = self.dm.internal_data.loc[target_idx, self.target]
+
+        # Calculate correlations for all variables/transformations
+        corr_results = []
+        
+        for var_name, var_df in var_dfs.items():
+            for col in var_df.columns:
+                # Align the feature and target data
+                common_idx = var_df.index.intersection(target_data.index)
+                if len(common_idx) == 0:
+                    continue
+                
+                feature_aligned = var_df.loc[common_idx, col]
+                target_aligned = target_data.loc[common_idx]
+                
+                # Calculate correlation, handling NaN values
+                corr = feature_aligned.corr(target_aligned)
+                
+                # Skip if correlation is NaN (e.g., constant feature)
+                if pd.isna(corr):
+                    continue
+                
+                corr_results.append({
+                    'variable': col,
+                    'corr': corr,
+                    'abs_corr': abs(corr)
+                })
+
+        # Create DataFrame and sort by absolute correlation
+        result_df = pd.DataFrame(corr_results)
+        
+        if result_df.empty:
+            # Return empty DataFrame with correct columns if no valid correlations
+            return pd.DataFrame(columns=['variable', 'corr', 'abs_corr'])
+        
+        # Sort by absolute correlation in descending order and reset index
+        result_df = result_df.sort_values('abs_corr', ascending=False).reset_index(drop=True)
+        
+        return result_df
 
     def search_cms(
         self,

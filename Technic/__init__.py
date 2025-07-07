@@ -24,7 +24,6 @@ from .internal import *
 from .mev import *
 from .data import *
 from .model import *
-from .model_test import *
 from .feature import *
 from .transform import *
 from .cm import *
@@ -34,6 +33,7 @@ from .segment import *
 # from .writer import *
 # from .template import *
 from .test import *
+from .testset import *
 from .condition import *
 from .scenario import *
 from .search import *

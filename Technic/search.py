@@ -3,6 +3,11 @@ import itertools
 import time
 import datetime
 from collections import defaultdict
+import warnings
+import sys
+import os
+from contextlib import redirect_stdout, redirect_stderr
+from io import StringIO
 
 import pandas as pd
 from tqdm import tqdm
@@ -150,7 +155,7 @@ class ModelSearch:
         uncategorized_constrained = []
 
         if constrained_items:
-            mev_map = self.dm.mev_map
+            mev_map = self.dm.var_map
             for item in constrained_items:
                 # Get variable name to look up category
                 if isinstance(item, str):
@@ -252,10 +257,13 @@ class ModelSearch:
                 # If frequency detection fails, use original max_periods
                 pass
         
-        tsfm_map = self.dm.build_tsfm_specs(
-            list(top_strings), max_lag=max_lag, max_periods=effective_max_periods,
-            exp_sign_map=exp_sign_map
-        )
+        # Suppress warnings during TSFM spec building
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tsfm_map = self.dm.build_tsfm_specs(
+                list(top_strings), max_lag=max_lag, max_periods=effective_max_periods,
+                exp_sign_map=exp_sign_map
+            )
 
         expanded: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
         for combo in combos:
@@ -281,7 +289,7 @@ class ModelSearch:
         sample: str = 'in',
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
         outlier_idx: Optional[List[Any]] = None
-    ) -> Union[CM, Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]]:
+    ) -> Union[CM, Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str], Dict[str, Dict[str, str]]]]:
         """
         Build and assess a single spec combo via CM.build(), reload tests, and TestSet.filter_pass().
 
@@ -305,15 +313,15 @@ class ModelSearch:
         -------
         CM
             The fitted CM instance if all active tests pass.
-        (specs, failed_tests)
-            Tuple of the input specs and list of failed test names if any test fails.
+        (specs, failed_tests, test_info)
+            Tuple of the input specs, list of failed test names, and test info dict if any test fails.
         """
         if sample not in {'in', 'full'}:
             raise ValueError("`sample` must be either 'in' or 'full'.")
 
         # Build the candidate model
-        cm = CM(model_id=model_id, target=self.target, model_cls=self.model_cls)
-        cm.build(specs, sample=sample, data_manager=self.dm, outlier_idx=outlier_idx)
+        cm = CM(model_id=model_id, target=self.target, model_cls=self.model_cls, data_manager=self.dm)
+        cm.build(specs, sample=sample, outlier_idx=outlier_idx)
         mdl = cm.model_in if sample == 'in' else cm.model_full
 
         # Reload testset, applying update if provided
@@ -323,7 +331,7 @@ class ModelSearch:
         passed, failed = mdl.testset.filter_pass()
         if passed:
             return cm
-        return specs, failed
+        return specs, failed, mdl.testset.filter_test_info
 
     def filter_specs(
         self,
@@ -331,7 +339,7 @@ class ModelSearch:
         sample: str = 'in',
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
         outlier_idx: Optional[List[Any]] = None
-    ) -> Tuple[List[CM], List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]]]:
+    ) -> Tuple[List[CM], List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]], List[Tuple[List[Any], str, str]]]:
         """
         Assess all built spec combos and separate passed and failed results,
         using multithreading and a single progress bar update.
@@ -356,48 +364,116 @@ class ModelSearch:
             CM instances that passed all active tests.
         failed_info : list of (specs, failed_tests)
             Spec combos and test names for combos that failed.
+        error_log : list of (specs, error_type, error_message)
+            Spec combos that raised errors during assessment.
         """
-        passed_cms: List[CM] = []
-        failed_info: List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]] = []
-        error_log: List[Tuple[List[Any], str, str]] = []
+        # Suppress all warnings and output for the entire filtering process
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            
+            passed_cms: List[CM] = []
+            failed_info: List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]] = []
+            error_log: List[Tuple[List[Any], str, str]] = []
 
-        total = len(self.all_specs)
-        start_time = time.time()
- 
-        # Sequential assessment with one tqdm bar
-        bar = tqdm(total=total, desc="Filtering Specs")
-        for i, specs in enumerate(self.all_specs):
-            model_id = f"{model_id_prefix}{i}"
-            try:
-                result = self.assess_spec(
-                    model_id,
-                    specs,
-                    sample,
-                    test_update_func,
-                    outlier_idx=outlier_idx
-                )
-                if isinstance(result, CM):
-                    passed_cms.append(result)
-                else:
-                    failed_info.append(result)
-            except Exception as e:
-                error_log.append((specs, type(e).__name__, str(e)))
- 
-            # ETA update
-            processed = bar.n + 1
-            elapsed = time.time() - start_time
-            progress = processed / total if total > 0 else 1
-            if progress > 0:
-                est_total = elapsed / progress
-                rem = est_total - elapsed
-                finish_dt = datetime.datetime.now() + datetime.timedelta(seconds=rem)
-                eta = finish_dt.strftime('%Y-%m-%d %H:%M:%S')
-            else:
-                eta = ''
-            bar.set_postfix(estimated_finish=eta)
-            bar.update(1)
-        bar.close()
-        return passed_cms, failed_info, error_log
+            # Test info tracking
+            seen_test_names: set = set()
+            test_info_header_printed = False
+            batch_filter_test_infos: Dict[str, Dict[str, str]] = {}  # Collect all filter_test_info in current batch
+            
+            total = len(self.all_specs)
+            start_time = time.time()
+            
+            # Print initial empty line for spacing
+            print("")
+            
+            for i, specs in enumerate(self.all_specs):
+                model_id = f"{model_id_prefix}{i}"
+                try:
+                    # Suppress all output during assessment
+                    with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                        result = self.assess_spec(
+                            model_id,
+                            specs,
+                            sample,
+                            test_update_func,
+                            outlier_idx=outlier_idx
+                        )
+                    
+                    if isinstance(result, CM):
+                        passed_cms.append(result)
+                        # Get filter test info from successful CM
+                        mdl = result.model_in if sample == 'in' else result.model_full
+                        filter_test_info = mdl.testset.filter_test_info
+                    else:
+                        # Extract specs, failed_tests, and filter_test_info from failed result
+                        specs_failed, failed_tests, filter_test_info = result
+                        failed_info.append((specs_failed, failed_tests))
+                    
+                    # Update batch filter_test_info (will overwrite duplicates)
+                    batch_filter_test_infos.update(filter_test_info)
+                    
+                    # Determine batch size based on progress
+                    batch_size = 100 if i < 10000 else 10000
+                    
+                    # Process batch based on dynamic batch size or on first run
+                    if (i + 1) % batch_size == 0 or i == 0:
+                        # Get all test names from the current batch
+                        batch_test_names = set(batch_filter_test_infos.keys())
+                        
+                        # Find new test names not seen before
+                        new_test_names = batch_test_names - seen_test_names
+                        seen_test_names.update(new_test_names)
+                        
+                        if new_test_names:
+                            # Clear current line completely
+                            print("\r" + " " * 120, end="\r")
+                            
+                            # Print header and empty lines only for the first batch
+                            if not test_info_header_printed:
+                                print("--- Active Tests of Filtering ---")
+                                test_info_header_printed = True
+                            
+                            # Print test info lines seamlessly
+                            for test_name in sorted(new_test_names):
+                                if test_name in batch_filter_test_infos:
+                                    test_info = batch_filter_test_infos[test_name]
+                                    print(f"- {test_name}: filter_mode: {test_info['filter_mode']} | desc: {test_info['desc']}")
+                            
+                            # Print empty line after test info
+                            # print("")  # Empty line after test info
+                        
+                        # Clear batch memory for next batch
+                        batch_filter_test_infos = {}
+                            
+                except Exception as e:
+                    error_log.append((specs, type(e).__name__, str(e)))
+     
+                # Progress and ETA update (only every 10 iterations to reduce interference)
+                if (i + 1) % 10 == 0 or i == 0 or i == len(self.all_specs) - 1:
+                    processed = i + 1
+                    elapsed = time.time() - start_time
+                    progress = processed / total if total > 0 else 1
+                    if progress > 0:
+                        est_total = elapsed / progress
+                        rem = est_total - elapsed
+                        finish_dt = datetime.datetime.now() + datetime.timedelta(seconds=rem)
+                        eta = finish_dt.strftime('%Y-%m-%d %H:%M:%S')
+                    else:
+                        eta = ''
+                        
+                    # Update progress display
+                    progress_pct = int(progress * 100)
+                    bar_width = 30
+                    filled_width = int(bar_width * progress)
+                    bar = '█' * filled_width + '-' * (bar_width - filled_width)
+                    processed_count = f"{processed}/{total}"
+                    speed = processed / elapsed if elapsed > 0 else 0
+                    progress_line = f"Filtering Specs: {progress_pct:3d}%|{bar}| {processed_count} [{elapsed:,.0f}s, {speed:.2f}it/s, estimated_finish={eta}]"
+                    print(f"\r{progress_line}", end='', flush=True)
+            
+            # Final newline after progress bar
+            print("")
+            return passed_cms, failed_info, error_log
 
     @staticmethod
     def rank_cms(
@@ -546,23 +622,15 @@ class ModelSearch:
         combos = self.build_spec_combos(forced, desired_pool, max_var_num, max_lag, max_periods, category_limit, exp_sign_map)
         print(f"Built {len(combos)} spec combinations.\n")
 
-        # 3. Example test info
-        if combos:
-            print("--- Example TestSet Info ---")
-            # Always build a fresh CM to display test info regardless of pass/fail
-            cm_example = CM(model_id="init_1", target=self.target, model_cls=self.model_cls)
-            cm_example.build(combos[0], sample=sample, data_manager=self.dm)
-            mdl_example = cm_example.model_in if sample == 'in' else cm_example.model_full
-            mdl_example.load_testset(test_update_func=test_update_func)
-            mdl_example.testset.print_test_info()
-            print()
-
-        # 4) Filter specs
+        # 3) Filter specs
         passed, failed, errors = self.filter_specs(
             sample=sample,
             test_update_func=test_update_func,
             outlier_idx=outlier_idx
         )
+        # Print empty line after test info
+        print("")  # Empty line after test info
+        
         self.passed_cms = passed
         self.failed_info = failed
         self.error_log = errors
@@ -572,7 +640,7 @@ class ModelSearch:
             return
         print(f"Passed {len(passed)} combos; Failed {len(failed)} combos; {len(errors)} errors.\n")
 
-        # 5. Rank models
+        # 4. Rank models
         df = ModelSearch.rank_cms(passed, sample, rank_weights)
         # Identify and store top cms
         ordered_ids = df['model_id'].tolist()
