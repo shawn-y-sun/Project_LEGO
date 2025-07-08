@@ -33,7 +33,7 @@ class ScenManager:
         Number of quarters to forecast after P0 (e.g., 9 or 12 quarters)
     target : str, optional
         Name of target series; defaults to model.y.name
-    agg_method : str, default='mean'
+    qtr_method : str, default='mean'
         Method to aggregate monthly results to quarterly frequency.
         Options: 'mean', 'sum', 'last', 'first'
 
@@ -52,7 +52,7 @@ class ScenManager:
     scen_mgr = ScenManager(dm, model, specs, horizon=9)
     
     # Create ScenManager with sum aggregation for quarterly reporting
-    scen_mgr = ScenManager(dm, model, specs, horizon=9, agg_method='sum')
+    scen_mgr = ScenManager(dm, model, specs, horizon=9, qtr_method='sum')
     
     # Access scenario forecasts
     forecasts = scen_mgr.y_scens
@@ -67,7 +67,7 @@ class ScenManager:
         specs: Any,
         horizon: int = 12,
         target: Optional[str] = None,
-        agg_method: str = 'mean'
+        qtr_method: str = 'mean'
     ):
         self.dm = dm
         self.model = model
@@ -78,11 +78,11 @@ class ScenManager:
             raise ValueError("horizon must be a positive integer")
         self.horizon = horizon
         
-        # Validate aggregation method
-        valid_agg_methods = ['mean', 'sum', 'last', 'first']
-        if agg_method not in valid_agg_methods:
-            raise ValueError(f"agg_method must be one of {valid_agg_methods}")
-        self.agg_method = agg_method
+        # Validate quarterly aggregation method
+        valid_qtr_methods = ['mean', 'sum', 'last', 'first']
+        if qtr_method not in valid_qtr_methods:
+            raise ValueError(f"qtr_method must be one of {valid_qtr_methods}")
+        self.qtr_method = qtr_method
         
         # Get P0 from DataManager's internal loader
         self.P0 = self.dm.scen_p0
@@ -382,7 +382,7 @@ class ScenManager:
         return results
 
     @property
-    def forecast_df_agg(self) -> Dict[str, pd.DataFrame]:
+    def forecast_df_qtr(self) -> Dict[str, pd.DataFrame]:
         """
         Organize scenario forecasting results into quarterly DataFrames with period indicators.
         
@@ -393,13 +393,13 @@ class ScenManager:
             Each DataFrame contains quarterly data with:
             - Index: Period indicators ('P0', 'P1', 'P2', etc. for P0+ periods; 
                     'YY-MM' format for Pre-P0 quarters like '21-03', '21-06')
-            - Fitted: In-sample fitted values aggregated to quarterly
+            - Fitted: In-sample fitted values in quarterly frequency
             - One column per scenario containing quarterly forecast values
             
         Notes
         -----
-        - All results are aggregated to quarterly frequency using self.agg_method
-        - For monthly data, aggregation is applied according to agg_method parameter
+        - All results are converted to quarterly frequency using self.qtr_method
+        - For monthly data, conversion is applied according to qtr_method parameter
         - For quarterly data, data is used as-is
         - Period indicators: P0, P1, P2, etc. for forecast periods; YY-MM for historical
         - YY-MM format uses quarter-end month (03, 06, 09, 12)
@@ -432,7 +432,7 @@ class ScenManager:
                 return f'P{quarters_diff}'
         
         # Function to aggregate data to quarterly
-        def aggregate_to_quarterly(series, agg_method):
+        def aggregate_to_quarterly(series, qtr_method):
             """Aggregate series to quarterly frequency."""
             if self.dm.freq == 'Q':
                 # Already quarterly, return as-is
@@ -445,16 +445,16 @@ class ScenManager:
             # Group by quarter and aggregate
             quarterly_grouped = series_copy.groupby(pd.Grouper(freq='Q'))
             
-            if agg_method == 'mean':
+            if qtr_method == 'mean':
                 result = quarterly_grouped.mean()
-            elif agg_method == 'sum':
+            elif qtr_method == 'sum':
                 result = quarterly_grouped.sum()
-            elif agg_method == 'last':
+            elif qtr_method == 'last':
                 result = quarterly_grouped.last()
-            elif agg_method == 'first':
+            elif qtr_method == 'first':
                 result = quarterly_grouped.first()
             else:
-                raise ValueError(f"Unsupported aggregation method: {agg_method}")
+                raise ValueError(f"Unsupported aggregation method: {qtr_method}")
             
             # Convert index to quarter-end dates
             result.index = result.index.to_period('Q').to_timestamp(how='end').normalize()
@@ -467,14 +467,14 @@ class ScenManager:
             
             # Process fitted values
             if fitted_values is not None:
-                fitted_quarterly = aggregate_to_quarterly(fitted_values, self.agg_method)
+                fitted_quarterly = aggregate_to_quarterly(fitted_values, self.qtr_method)
                 all_data['Fitted'] = fitted_quarterly
             
             # Process scenario forecasts
             for scen_name, scen_series in scen_dict.items():
                 # Normalize scenario series index
                 scen_series.index = pd.to_datetime(scen_series.index).normalize()
-                scen_quarterly = aggregate_to_quarterly(scen_series, self.agg_method)
+                scen_quarterly = aggregate_to_quarterly(scen_series, self.qtr_method)
                 all_data[scen_name] = scen_quarterly
             
             # Get all unique quarter-end dates
@@ -641,7 +641,7 @@ class ScenManager:
         style: Optional[Dict[str, Dict[str, Any]]] = None,
         title_prefix: str = "",
         save_path: Optional[str] = None,
-        show_agg: bool = True
+        show_qtr: bool = True
     ) -> plt.Figure:
         """
         Plot forecasting results for a single scenario set.
@@ -656,7 +656,7 @@ class ScenManager:
             Name of the scenario set being plotted
         forecast_data : pd.DataFrame, optional
             DataFrame containing forecast data. If None, will use either
-            forecast_df_agg or forecast_df based on show_agg parameter
+            forecast_df_qtr or forecast_df based on show_qtr parameter
         figsize : tuple, default=(8, 4)
             Figure size as (width, height)
         style : Dict[str, Dict[str, Any]], optional
@@ -669,8 +669,8 @@ class ScenManager:
             Prefix to add to plot titles
         save_path : str, optional
             If provided, saves plots to this directory path
-        show_agg : bool, default=True
-            If True, use quarterly aggregated data (forecast_df_agg).
+        show_qtr : bool, default=True
+            If True, use quarterly frequency data (forecast_df_qtr).
             If False, use original frequency data (forecast_df).
             Only used when forecast_data is None.
             
@@ -682,13 +682,13 @@ class ScenManager:
         Notes
         -----
         - Creates new figures without affecting existing plots
-        - Works with both aggregated quarterly data and original frequency data
+        - Works with both quarterly and original frequency data
         - Handles both YY-MM format and 'Pre-P0' period indicators
         """
         # Get forecast data if not provided
         if forecast_data is None:
-            if show_agg:
-                forecast_data = self.forecast_df_agg[scen_set]
+            if show_qtr:
+                forecast_data = self.forecast_df_qtr[scen_set]
             else:
                 forecast_data = self.forecast_df[scen_set]
         
@@ -1024,7 +1024,7 @@ class ScenManager:
         save_path: Optional[str] = None,
         subplot_width: float = 5.0,
         subplot_height: float = 3.5,
-        show_agg: bool = True
+        show_qtr: bool = True
     ) -> Dict[str, Dict[str, plt.Figure]]:
         """
         Plot both forecasts and scenario variables for all scenario sets.
@@ -1046,8 +1046,8 @@ class ScenManager:
             Standard width for each subplot in variable plots
         subplot_height : float, default=3.5
             Standard height for each subplot in variable plots
-        show_agg : bool, default=True
-            If True, use quarterly aggregated data (forecast_df_agg).
+        show_qtr : bool, default=True
+            If True, use quarterly frequency data (forecast_df_qtr).
             If False, use original frequency data (forecast_df).
             
         Returns
@@ -1063,7 +1063,7 @@ class ScenManager:
         - Uses consistent color schemes across all plots
         """
         # Get forecast DataFrames and scenario feature matrices
-        forecast_dfs = self.forecast_df_agg if show_agg else self.forecast_df
+        forecast_dfs = self.forecast_df_qtr if show_qtr else self.forecast_df
         X_scens = self.X_scens
         
         # Store all figures for return
@@ -1080,7 +1080,7 @@ class ScenManager:
                 style=style,
                 title_prefix=title_prefix,
                 save_path=save_path,
-                show_agg=show_agg
+                show_qtr=show_qtr
             )
             all_figures[scen_set]['forecasts'] = forecast_fig
             

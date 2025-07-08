@@ -374,6 +374,67 @@ class ModelBase(ABC):
         # Now report_cls must accept only model=self
         return self.report_cls(model=self)
 
+    @property
+    def in_perf_measures(self) -> pd.Series:
+        """
+        In-sample performance measures from testset results.
+        
+        Combines 'Fit Measures' and 'IS Error Measures' test results into a single Series.
+        
+        Returns
+        -------
+        pd.Series
+            Combined performance measures with metric names as index.
+        """
+        if self.testset is None:
+            return pd.Series(dtype=float)
+        
+        # Get test results from testset
+        all_results = self.testset.all_test_results
+        
+        # Combine Fit Measures and IS Error Measures
+        combined_series = pd.Series(dtype=float)
+        
+        # Add Fit Measures if available
+        if 'Fit Measures' in all_results:
+            fit_result = all_results['Fit Measures']
+            if isinstance(fit_result, pd.Series):
+                combined_series = pd.concat([combined_series, fit_result])
+        
+        # Add IS Error Measures if available
+        if 'IS Error Measures' in all_results:
+            error_result = all_results['IS Error Measures']
+            if isinstance(error_result, pd.Series):
+                combined_series = pd.concat([combined_series, error_result])
+        
+        return combined_series
+
+    @property
+    def out_perf_measures(self) -> pd.Series:
+        """
+        Out-of-sample performance measures from testset results.
+        
+        Returns 'OOS Error Measures' test result as a Series.
+        
+        Returns
+        -------
+        pd.Series
+            Out-of-sample performance measures, empty if no OOS data available.
+        """
+        if self.testset is None:
+            return pd.Series(dtype=float)
+        
+        # Get test results from testset
+        all_results = self.testset.all_test_results
+        
+        # Return OOS Error Measures if available
+        if 'OOS Error Measures' in all_results:
+            oos_result = all_results['OOS Error Measures']
+            if isinstance(oos_result, pd.Series):
+                return oos_result
+        
+        return pd.Series(dtype=float)
+
     def _create_scenario_manager(self) -> None:
         """
         Create ScenManager instance using scen_cls.
@@ -698,34 +759,6 @@ class OLS(ModelBase):
                 'std': float(self.bse.get(var, np.nan))
             }
             for var in self.params.index
-        }
-
-    @property
-    def in_perf_measures(self) -> Dict[str, Any]:
-        """
-        In-sample performance: R², adj-R², ME, MAE, RMSE.
-        """
-        errors = self.y - self.y_fitted_in
-        return {
-            'r2': float(self.rsquared),
-            'adj_r2': float(self.rsquared_adj),
-            'me': float(np.max(np.abs(errors))),
-            'mae': float(np.mean(np.abs(errors))),
-            'rmse': float(np.sqrt((errors ** 2).mean()))
-        }
-
-    @property
-    def out_perf_measures(self) -> Dict[str, Any]:
-        """
-        Out-of-sample performance using y_pred_out.
-        """
-        if self.X_out.empty or self.y_out.empty:
-            return {}
-        errors = self.y_out - self.y_pred_out
-        return {
-            'me': float(np.max(np.abs(errors))),
-            'mae': float(np.mean(np.abs(errors))),
-            'rmse': float(np.sqrt((errors ** 2).mean()))
         }
 
     def __repr__(self) -> str:

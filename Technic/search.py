@@ -615,7 +615,8 @@ class ModelSearch:
               f"Exp sign map    : {exp_sign_map}\n"
               f"Top N           : {top_n}\n"
               f"Rank weights    : {rank_weights}\n"
-              f"Test update func: {test_update_func}\n")
+              f"Test update func: {test_update_func}\n"
+              f"Outlier idx     : {outlier_idx}\n")
         print("==================================\n")
 
         # 2. Build specs

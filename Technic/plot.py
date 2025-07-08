@@ -72,8 +72,89 @@ def ols_model_perf_plot(
 
     # Create plot
     fig, ax1 = plt.subplots(figsize=figsize, **kwargs)
+    
+    # Plot actual values
     ax1.plot(y_full.index, y_full, label="Actual", color="black", linewidth=2)
-    ax1.plot(y_fitted.index, y_fitted, label="Fitted (IS)", color="tab:blue", linewidth=2)
+    
+    # Plot fitted values with potential gaps for outliers
+    # Check if there are gaps in the fitted data (indicating outliers)
+    if len(y_fitted) > 0:
+        # Simple approach: detect gaps by looking at consecutive fitted indices
+        fitted_idx_sorted = y_fitted.index.sort_values()
+        
+        # Find expected frequency from the original data
+        if len(y.index) > 1:
+            # Infer frequency from original data
+            freq = pd.infer_freq(y.index)
+            if freq is None:
+                # Fallback: calculate median difference
+                diffs = y.index.to_series().diff().dropna()
+                if len(diffs) > 0:
+                    typical_diff = diffs.median()
+                else:
+                    typical_diff = pd.Timedelta(days=30)  # Default fallback
+            else:
+                # Convert frequency to offset object
+                typical_diff = pd.tseries.frequencies.to_offset(freq)
+        else:
+            typical_diff = pd.Timedelta(days=30)  # Default fallback
+        
+        # Find gaps in fitted data
+        segments = []
+        current_segment = [fitted_idx_sorted[0]]
+        
+        for i in range(1, len(fitted_idx_sorted)):
+            prev_idx = fitted_idx_sorted[i-1]
+            curr_idx = fitted_idx_sorted[i]
+            
+            # Check if there's a gap larger than expected
+            time_gap = curr_idx - prev_idx
+            
+            # Convert typical_diff to Timedelta if it's an offset object for comparison
+            if hasattr(typical_diff, 'delta'):
+                # It's an offset object, get the underlying timedelta
+                typical_diff_td = typical_diff.delta
+            elif isinstance(typical_diff, pd.Timedelta):
+                typical_diff_td = typical_diff
+            else:
+                # Try to convert to timedelta
+                try:
+                    typical_diff_td = pd.Timedelta(typical_diff)
+                except:
+                    typical_diff_td = pd.Timedelta(days=30)  # Fallback
+            
+            if time_gap > typical_diff_td * 1.5:  # Allow some tolerance
+                # Gap detected, finish current segment and start new one
+                segments.append(current_segment)
+                current_segment = [curr_idx]
+            else:
+                # No gap, continue current segment
+                current_segment.append(curr_idx)
+        
+        # Add the last segment
+        if current_segment:
+            segments.append(current_segment)
+        
+        # Plot each segment separately
+        for i, segment in enumerate(segments):
+            if len(segment) > 0:
+                segment_data = y_fitted.loc[segment]
+                label = "Fitted (IS)" if i == 0 else None  # Only label first segment
+                
+                if len(segment) == 1:
+                    # Single point - plot as marker
+                    ax1.plot(segment_data.index, segment_data.values, 
+                            marker='o', markersize=2, color="tab:blue", 
+                            label=label, linestyle='None')
+                else:
+                    # Multiple points - plot as line
+                    ax1.plot(segment_data.index, segment_data.values, 
+                            label=label, color="tab:blue", linewidth=2)
+    else:
+        # No fitted data to plot
+        pass
+    
+    # Plot out-of-sample predictions
     if not y_pred.empty:
         ax1.plot(
             y_pred.index,
@@ -83,26 +164,35 @@ def ols_model_perf_plot(
             color="tab:blue",
             linewidth=2,
         )
+    
     ax1.set_ylabel("Value")
     ax1.set_title("Actual vs. Fitted/OOS")
     ax1.legend(loc="upper left")
 
-    # Plot absolute errors on secondary axis
+    # Plot absolute errors on secondary axis with improved width calculation
     ax2 = ax1.twinx()
-    # if len(abs_err) > 1:
-    #     width = (abs_err.index[1] - abs_err.index[0]) * 0.8
-    # else:
-    #     width = 0.8
+    
+    # Calculate bar width more robustly
     if len(abs_err) > 1:
-        # compute raw gap between first two x’s
-        delta = abs_err.index[1] - abs_err.index[0]
-        # if time‐based, convert timedelta to days as a float
-        if isinstance(delta, pd.Timedelta):
-            width = float(delta / pd.Timedelta(days=1)) * 0.8
+        # Calculate median time difference for more robust width estimation
+        time_diffs = []
+        abs_err_sorted = abs_err.sort_index()
+        for i in range(1, len(abs_err_sorted)):
+            delta = abs_err_sorted.index[i] - abs_err_sorted.index[i-1]
+            if isinstance(delta, pd.Timedelta):
+                time_diffs.append(float(delta / pd.Timedelta(days=1)))
+            else:
+                time_diffs.append(delta)
+        
+        # Use median difference for more robust width calculation
+        if time_diffs:
+            median_diff = np.median(time_diffs)
+            width = median_diff * 0.6  # Use 60% of median difference
         else:
-            width = delta * 0.8
+            width = 0.8
     else:
         width = 0.8
+    
     ax2.bar(abs_err.index, abs_err, width=width, alpha=0.2, color="grey", label="|Error|")
     ax2.set_ylabel("Absolute Error")
     ax2.legend(loc="upper right")
@@ -162,16 +252,95 @@ def ols_plot_perf_set(
 
     for idx, (mid, rpt) in enumerate(reports.items()):
         color = colors[idx % len(colors)] if colors else None
-        # In-sample fitted
+        
+        # In-sample fitted with gap handling
         y_in = rpt.model.y_fitted_in.sort_index()
-        ax.plot(
-            y_in.index,
-            y_in,
-            linestyle='-',  # solid for in-sample
-            label=f"{mid} (IS)",
-            color=color,
-            linewidth=2
-        )
+        
+        # Check for gaps in fitted data (indicating outliers)
+        if len(y_in) > 0:
+            # Simple approach: detect gaps by looking at consecutive fitted indices
+            fitted_idx_sorted = y_in.index.sort_values()
+            
+            # Find expected frequency from the original data
+            if len(rpt.model.y.index) > 1:
+                # Infer frequency from original data
+                freq = pd.infer_freq(rpt.model.y.index)
+                if freq is None:
+                    # Fallback: calculate median difference
+                    diffs = rpt.model.y.index.to_series().diff().dropna()
+                    if len(diffs) > 0:
+                        typical_diff = diffs.median()
+                    else:
+                        typical_diff = pd.Timedelta(days=30)  # Default fallback
+                else:
+                    typical_diff = pd.tseries.frequencies.to_offset(freq)
+            else:
+                typical_diff = pd.Timedelta(days=30)  # Default fallback
+            
+            # Find gaps in fitted data
+            segments = []
+            current_segment = [fitted_idx_sorted[0]]
+            
+            for i in range(1, len(fitted_idx_sorted)):
+                prev_idx = fitted_idx_sorted[i-1]
+                curr_idx = fitted_idx_sorted[i]
+                
+                # Check if there's a gap larger than expected
+                time_gap = curr_idx - prev_idx
+                
+                # Convert typical_diff to Timedelta if it's an offset object for comparison
+                if hasattr(typical_diff, 'delta'):
+                    # It's an offset object, get the underlying timedelta
+                    typical_diff_td = typical_diff.delta
+                elif isinstance(typical_diff, pd.Timedelta):
+                    typical_diff_td = typical_diff
+                else:
+                    # Try to convert to timedelta
+                    try:
+                        typical_diff_td = pd.Timedelta(typical_diff)
+                    except:
+                        typical_diff_td = pd.Timedelta(days=30)  # Fallback
+                
+                if time_gap > typical_diff_td * 1.5:  # Allow some tolerance
+                    # Gap detected, finish current segment and start new one
+                    segments.append(current_segment)
+                    current_segment = [curr_idx]
+                else:
+                    # No gap, continue current segment
+                    current_segment.append(curr_idx)
+            
+            # Add the last segment
+            if current_segment:
+                segments.append(current_segment)
+            
+            # Plot each segment separately
+            for i, segment in enumerate(segments):
+                if len(segment) > 0:
+                    segment_data = y_in.loc[segment]
+                    label = f"{mid} (IS)" if i == 0 else None  # Only label first segment
+                    
+                    if len(segment) == 1:
+                        # Single point - plot as marker
+                        ax.plot(
+                            segment_data.index,
+                            segment_data.values,
+                            marker='o', markersize=2, color=color,
+                            label=label, linestyle='None'
+                        )
+                    else:
+                        # Multiple points - plot as line
+                        ax.plot(
+                            segment_data.index,
+                            segment_data.values,
+                            linestyle='-',  # solid for in-sample
+                            label=label,
+                            color=color,
+                            linewidth=2
+                        )
+        else:
+            # No fitted data to plot
+            pass
+        
         # Out-of-sample predicted
         if (
             not full
