@@ -29,16 +29,6 @@ class ModelReportBase(ABC):
         # Optional performance-set plotting function
         self.perf_set_plot_fn = perf_set_plot_fn
 
-    @abstractmethod
-    def show_in_perf_tbl(self) -> DataFrame:
-        """Return in-sample performance measures as a DataFrame."""
-        ...
-
-    @abstractmethod
-    def show_out_perf_tbl(self) -> DataFrame:
-        """Return out-of-sample performance measures as a DataFrame."""
-        ...
-
     def show_test_tbl(self) -> None:
         """
         Print all test results from the model's TestSet in a reader-friendly format.
@@ -53,6 +43,39 @@ class ModelReportBase(ABC):
             else:
                 print(result)
             print()
+
+    def show_in_perf_tbl(self) -> DataFrame:
+        """
+        Return in-sample performance measures as a DataFrame.
+        
+        Converts the Series returned by model.in_perf_measures to a single-row DataFrame.
+        
+        Returns
+        -------
+        DataFrame
+            Single-row DataFrame with performance measures as columns.
+        """
+        perf_series = self.model.in_perf_measures
+        if perf_series.empty:
+            return pd.DataFrame()
+        return pd.DataFrame([perf_series])
+
+    def show_out_perf_tbl(self) -> DataFrame:
+        """
+        Return out-of-sample performance measures as a DataFrame.
+        
+        Converts the Series returned by model.out_perf_measures to a single-row DataFrame.
+        
+        Returns
+        -------
+        DataFrame
+            Single-row DataFrame with out-of-sample performance measures as columns.
+            Empty DataFrame if no out-of-sample data available.
+        """
+        perf_series = self.model.out_perf_measures
+        if perf_series.empty:
+            return pd.DataFrame()
+        return pd.DataFrame([perf_series])
 
     @abstractmethod
     def show_params_tbl(self) -> DataFrame:
@@ -154,13 +177,13 @@ class ReportSet:
         # 1) In-sample performance
         print("=== In-Sample Performance ===")
         df_in = self.show_in_perf_set(**perf_kwargs)
-        print(df_in.to_string())
+        print(df_in.to_string(float_format='{:.3f}'.format))
 
         # 2) Optional out-of-sample performance
         if show_out:
             print("\n=== Out-of-Sample Performance ===")
             df_out = self.show_out_perf_set(**perf_kwargs)
-            print(df_out.to_string())
+            print(df_out.to_string(float_format='{:.3f}'.format))
 
         # 3) Performance plot
         print("\n=== Performance Plot ===")
@@ -215,14 +238,7 @@ class OLS_ModelReport(ModelReportBase):
         self.perf_plot_fn = perf_plot_fn
         self.test_plot_fn = test_plot_fn
 
-    def show_in_perf_tbl(self) -> pd.DataFrame:
-        """Single-row DataFrame of in-sample metrics."""
-        return pd.DataFrame([self.model.in_perf_measures])
 
-    def show_out_perf_tbl(self) -> pd.DataFrame:
-        """Single-row DataFrame of out-of-sample metrics (empty if none)."""
-        out = self.model.out_perf_measures
-        return pd.DataFrame([out]) if out else pd.DataFrame()
 
     def show_params_tbl(self) -> pd.DataFrame:
         """Parameter table with columns: Variable, Coef, Pvalue, Sig, VIF, Std."""
@@ -271,15 +287,17 @@ class OLS_ModelReport(ModelReportBase):
         perf_kwargs = perf_kwargs or {}
         test_kwargs = test_kwargs or {}
 
-        if not getattr(self, 'out_perf_measures', None):
+        if self.model.out_perf_measures.empty:
             show_out = False
 
         print('=== In-Sample Performance ===')
-        print(self.show_in_perf_tbl().to_string(index=False))
+        in_perf_df = self.show_in_perf_tbl()
+        print(in_perf_df.to_string(index=False, float_format='{:.3f}'.format))
 
         if show_out:
             print('\n=== Out-of-Sample Performance ===')
-            print(self.show_out_perf_tbl().to_string(index=False))
+            out_perf_df = self.show_out_perf_tbl()
+            print(out_perf_df.to_string(index=False, float_format='{:.3f}'.format))
 
         # Parameters
         def fmt_coef(x):

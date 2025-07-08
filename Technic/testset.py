@@ -2,6 +2,16 @@
 # module: testset.py
 # Purpose: Test set builder functions for different model types
 # Dependencies: pandas, numpy, statsmodels, typing, .test module classes
+# 
+# TESTSET FUNCTION REQUIREMENTS:
+# ==============================
+# All testset functions should define these measure tests FIRST:
+# 1. 'Fit Measures' - FitMeasure for R² and Adj R² 
+# 2. 'IS Error Measures' - ErrorMeasure for in-sample ME, MAE, RMSE
+# 3. 'OOS Error Measures' - ErrorMeasure for out-of-sample ME, MAE, RMSE (if data available)
+# 
+# These are used by ModelBase.in_perf_measures and ModelBase.out_perf_measures
+# for model reporting and evaluation. Define these before other tests.
 # =============================================================================
 
 import pandas as pd
@@ -149,6 +159,19 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
     - Residual stationarity & normality
     - Target stationarity & cointegration
     - Sign checking for features with exp_sign
+    
+    GUIDANCE FOR TESTSET FUNCTIONS:
+    ===============================
+    All future testset functions should define the following measure tests FIRST,
+    before any other assumption and performance tests:
+    
+    1. 'Fit Measures' - FitMeasure test for R² and Adj R² metrics
+    2. 'IS Error Measures' - ErrorMeasure test for in-sample ME, MAE, RMSE
+    3. 'OOS Error Measures' - ErrorMeasure test for out-of-sample ME, MAE, RMSE (if applicable)
+    
+    These measures will be used by ModelBase.in_perf_measures and ModelBase.out_perf_measures
+    properties for model reporting and evaluation. The order matters as these are the 
+    foundation metrics that other tests may reference.
     """
     tests: Dict[str, ModelTestBase] = {}
 
