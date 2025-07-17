@@ -1099,8 +1099,6 @@ class DataManager:
 
             start_month = first_qtr.start_time + pd.offsets.MonthEnd(0)
             end_month = last_qtr.end_time
-            print(start_month)
-            print(end_month)
             monthly_index = pd.date_range(start=start_month, end=end_month, freq='M')
 
             # Convert dates to numeric for spline interpolation
@@ -1116,44 +1114,88 @@ class DataManager:
             # Process each column
             for col in df2.columns:
                 q_series = df2[col]
+                
+                # Skip if all values are NaN
                 if q_series.isna().all():
                     monthly_df[col] = np.nan
                     continue
-
-                # Fit cubic spline
-                spline = CubicSpline(
-                    quarterly_x,
-                    q_series.values,
-                    bc_type='natural'
-                )
-
-                # Evaluate spline at monthly points
-                monthly_y = spline(monthly_x)
-
-                # Create initial monthly series
-                m_series = pd.Series(monthly_y, index=monthly_index)
-
-                # Scale values to preserve quarterly averages
-                scaled_series = m_series.copy()
-
-                # Apply scaling for each quarter
-                for qtr_end in q_series.index:
-                    mask = month_to_qtr == qtr_end
-                    if not mask.any():
+                
+                # Handle non-finite values
+                if not np.isfinite(q_series).all():
+                    # First try to interpolate non-finite values
+                    q_series = q_series.interpolate(method='linear', limit_direction='both')
+                    
+                    # If still have non-finite values after interpolation, skip this column
+                    if not np.isfinite(q_series).all():
+                        warnings.warn(
+                            f"Column '{col}' contains non-finite values that couldn't be interpolated. "
+                            "Using linear interpolation for this column.",
+                            UserWarning
+                        )
+                        # Use simple linear interpolation for this column
+                        m_series = pd.Series(
+                            np.interp(
+                                monthly_x,
+                                quarterly_x,
+                                q_series.values
+                            ),
+                            index=monthly_index
+                        )
+                        monthly_df[col] = m_series
                         continue
 
-                    interpolated_avg = m_series[mask].mean()
-                    observed_value = q_series.loc[qtr_end]
+                # Fit cubic spline for clean data
+                try:
+                    spline = CubicSpline(
+                        quarterly_x,
+                        q_series.values,
+                        bc_type='natural'
+                    )
 
-                    # Handle zero or near-zero averages
-                    if np.isclose(interpolated_avg, 0):
-                        scale_factor = 1.0
-                    else:
-                        scale_factor = observed_value / interpolated_avg
+                    # Evaluate spline at monthly points
+                    monthly_y = spline(monthly_x)
 
-                    scaled_series.loc[mask] = m_series.loc[mask] * scale_factor
+                    # Create initial monthly series
+                    m_series = pd.Series(monthly_y, index=monthly_index)
 
-                monthly_df[col] = scaled_series
+                    # Scale values to preserve quarterly averages
+                    scaled_series = m_series.copy()
+
+                    # Apply scaling for each quarter
+                    for qtr_end in q_series.index:
+                        mask = month_to_qtr == qtr_end
+                        if not mask.any():
+                            continue
+
+                        interpolated_avg = m_series[mask].mean()
+                        observed_value = q_series.loc[qtr_end]
+
+                        # Handle zero or near-zero averages
+                        if np.isclose(interpolated_avg, 0):
+                            scale_factor = 1.0
+                        else:
+                            scale_factor = observed_value / interpolated_avg
+
+                        scaled_series.loc[mask] = m_series.loc[mask] * scale_factor
+
+                    monthly_df[col] = scaled_series
+                    
+                except Exception as e:
+                    warnings.warn(
+                        f"Failed to apply cubic spline interpolation for column '{col}': {str(e)}. "
+                        "Falling back to linear interpolation.",
+                        UserWarning
+                    )
+                    # Fallback to linear interpolation
+                    m_series = pd.Series(
+                        np.interp(
+                            monthly_x,
+                            quarterly_x,
+                            q_series.values
+                        ),
+                        index=monthly_index
+                    )
+                    monthly_df[col] = m_series
 
             # Normalize index to midnight
             monthly_df.index = monthly_df.index.normalize()
