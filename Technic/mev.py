@@ -14,7 +14,7 @@ from typing import Dict, Any, Tuple, Optional, Union, List, Set
 # Determine support directory relative to this module file using pathlib
 _BASE_DIR = Path(__file__).resolve().parent
 _SUPPORT_DIR = _BASE_DIR / 'support'
-_DEFAULT_MEV_MAP_PATH = _SUPPORT_DIR / 'mev_map.xlsx'
+_DEFAULT_MEV_MAP_PATH = _SUPPORT_DIR / 'mev_type.xlsx'
 _DEFAULT_TSFM_PATH = _SUPPORT_DIR / 'type_tsfm.yaml'
 
 def _process_quarterly_excel(workbook: str, sheet: Optional[str] = None) -> pd.DataFrame:
@@ -105,7 +105,7 @@ class MEVLoader:
     mev_map_path : str or Path, optional
         Path to Excel file containing MEV mappings.
         Must have columns: mev_code, type, description, and optionally category.
-        If None, uses default from support/mev_map.xlsx.
+        If None, uses default from support/mev_type.xlsx.
     tsfm_path : str or Path, optional
         Path to YAML file containing transform mappings.
         Must have a 'transforms' key mapping types to transform lists.
@@ -218,14 +218,23 @@ class MEVLoader:
     """
     def __init__(
         self,
-        mev_map: Optional[Dict[str, Dict[str, Optional[str]]]] = None,
-        tsfm_map: Optional[Dict[str, List[str]]] = None,
+        mev_codes: Optional[List[str]] = None,
         mev_map_path: Optional[Union[str, Path]] = None,
-        tsfm_path: Optional[Union[str, Path]] = None
-    ):
-        # Load or set mapping tables first
-        self._mev_map = self._load_mev_map(mev_map_path) if mev_map is None else mev_map
-        self._tsfm_map = self._load_tsfm_map(tsfm_path) if tsfm_map is None else tsfm_map
+        tsfm_path: Optional[Union[str, Path]] = None,
+    ) -> None:
+        """Initialize MEVLoader with optional MEV codes and mapping paths.
+
+        Args:
+            mev_codes: Optional list of MEV codes to validate.
+                If None, no initial validation is performed.
+            mev_map_path: Path to MEV type mapping file.
+                If None, uses default from support/mev_type.xlsx.
+            tsfm_path: Path to transformation mapping file.
+                If None, uses default from support/type_tsfm.yaml.
+        """
+        # Load mapping tables
+        self._mev_map = self._load_mev_map(mev_map_path) if mev_map_path else self._load_mev_map()
+        self._tsfm_map = self._load_tsfm_map(tsfm_path) if tsfm_path else self._load_tsfm_map()
         
         # Initialize empty data containers for model MEVs
         self._model_mev_qtr: Optional[pd.DataFrame] = None
@@ -235,8 +244,12 @@ class MEVLoader:
         self._scen_mev_qtr: Dict[str, Dict[str, pd.DataFrame]] = {}
         self._scen_mev_mth: Dict[str, Dict[str, pd.DataFrame]] = {}
         
-        # Track all MEV codes
-        self._mev_codes: Set[str] = set()
+        # Initialize MEV codes set
+        self._mev_codes: Set[str] = set(mev_codes) if mev_codes else set()
+        
+        # Validate initial MEV codes if provided
+        if mev_codes:
+            self._validate_mev_codes()
         
     def _load_mev_map(self, path: Optional[Union[str, Path]] = None) -> Dict[str, Dict[str, Optional[str]]]:
         """Load MEV mapping from Excel file."""
@@ -602,7 +615,7 @@ class MEVLoader:
         if missing_codes:
             warnings.warn(
                 f"The following MEV codes are not in MEV_MAP: {missing_codes}\n"
-                "Please add them to mev_map.xlsx with appropriate type and description.",
+                "Please add them to mev_type.xlsx with appropriate type and description.",
                 UserWarning
             )
             
