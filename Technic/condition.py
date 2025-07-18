@@ -175,3 +175,116 @@ def BO(
         result.loc[zero_positions] = 0
 
     return result
+
+
+def create_conditional_var(
+    dm,
+    main_var: str,
+    condition: Callable[[pd.Series], pd.Series],
+    cond_var: Optional[str] = None,
+    alias: Optional[str] = None,
+    add_to_data: bool = True
+) -> Optional[pd.Series]:
+    """
+    Create a conditional variable and optionally add it to all datasets.
+    
+    This is a user-friendly wrapper to create conditional variables and add them
+    to both internal and MEV data. The condition function should take a Series
+    and return a Series with the transformed values.
+    
+    Parameters
+    ----------
+    dm : DataManager
+        DataManager instance containing the data to modify
+    main_var : str
+        Name of the main variable to transform
+    condition : Callable[[pd.Series], pd.Series]
+        Function that takes a Series and returns a transformed Series.
+        This function defines how to transform the main_var based on conditions.
+    cond_var : str, optional
+        Name of the conditional variable if different from main_var.
+        If None, uses main_var as the condition variable.
+    alias : str, optional
+        Name for the new variable. If None, uses main_var + '_COND'
+    add_to_data : bool, default True
+        If True, adds the variable to all datasets in the DataManager.
+        If False, only returns the Series without modifying data.
+    
+    Returns
+    -------
+    Optional[pd.Series]
+        If add_to_data is False, returns the conditional Series.
+        If add_to_data is True, returns None (modifies data in place).
+    
+    Examples
+    --------
+    >>> # Create high unemployment regime (UNRATE > 10%)
+    >>> def high_unemp(series):
+    ...     return series.where(series > 0.10, other=0)
+    >>> 
+    >>> create_conditional_var(
+    ...     dm,
+    ...     main_var='UNRATE',
+    ...     condition=high_unemp,
+    ...     alias='UNEMP_REGIME'
+    ... )
+    >>> 
+    >>> # Create GDP growth regime based on unemployment
+    >>> def gdp_in_high_unemp(series, unrate):
+    ...     return series.where(unrate > 0.10, other=0)
+    >>> 
+    >>> create_conditional_var(
+    ...     dm,
+    ...     main_var='GDP',
+    ...     condition=lambda x: gdp_in_high_unemp(x, dm.model_mev['UNRATE']),
+    ...     alias='GDP_HIGH_UNEMP'
+    ... )
+    >>> 
+    >>> # Create conditional without adding to data
+    >>> def recession_gdp(series):
+    ...     return series.where(series < 0, other=0)
+    >>> 
+    >>> gdp_recession = create_conditional_var(
+    ...     dm,
+    ...     main_var='GDP',
+    ...     condition=recession_gdp,
+    ...     alias='GDP_RECESSION',
+    ...     add_to_data=False
+    ... )
+    
+    Notes
+    -----
+    - The condition function should handle any necessary data validation
+    - If add_to_data=True, the variable is added to:
+        - Internal data (dm.internal_data)
+        - Model MEV data (dm.model_mev)
+        - All scenario MEV data (dm.scen_mevs)
+    - The function preserves the original data structure and index
+    """
+    # Validate inputs
+    if not callable(condition):
+        raise TypeError("condition must be a callable function")
+    
+    # Set default names
+    cond_var = cond_var or main_var
+    alias = alias or f"{main_var}_COND"
+    
+    def add_conditional_var(df, internal_df=None):
+        """Inner function to add conditional variable to a DataFrame."""
+        if main_var not in df.columns:
+            return df
+            
+        # Apply the condition
+        df[alias] = condition(df[main_var])
+        return df
+    
+    if add_to_data:
+        # Add to all datasets
+        dm.apply_to_internal(add_conditional_var)
+        dm.apply_to_mevs(add_conditional_var)
+        return None
+    else:
+        # Just return the conditional series for model MEV
+        if main_var not in dm.model_mev.columns:
+            raise KeyError(f"Variable '{main_var}' not found in model MEV data")
+        return condition(dm.model_mev[main_var])
