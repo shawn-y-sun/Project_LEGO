@@ -1094,14 +1094,14 @@ class DataManager:
 
         # Normalize index to midnight UTC
         df2 = df.copy()
-        df2.index = pd.to_datetime(df2.index).normalize()
+        df2.index = pd.DatetimeIndex(pd.to_datetime(df2.index)).normalize()
         freq_mev = pd.infer_freq(df2.index)
         
         # Only interpolate Q -> M
         if freq_mev and freq_mev.startswith('Q'):
             # Get the first and last quarters for complete coverage
-            first_qtr = df2.index[0].to_period('Q')
-            last_qtr = df2.index[-1].to_period('Q')
+            first_qtr = pd.Period(df2.index[0], freq='Q')
+            last_qtr = pd.Period(df2.index[-1], freq='Q')
             
             # Create monthly index from first month of first quarter to last month of last quarter
             start_month = first_qtr.start_time
@@ -1116,27 +1116,24 @@ class DataManager:
                 q_series = df2[col]
                 
                 # Skip if all values are NA
-                if q_series.isna().all():
+                if q_series.isnull().all():
                     monthly_df[col] = np.nan
                     continue
                 
                 # Find continuous non-NA segments
-                non_na_mask = ~q_series.isna()
-                if not non_na_mask.any():
+                non_na_mask = ~q_series.isnull()
+                valid_indices = q_series.index[non_na_mask]
+                
+                if len(valid_indices) == 0:
                     monthly_df[col] = np.nan
                     continue
                 
                 # Get the first and last non-NA indices
-                first_valid_idx = non_na_mask.idxmin() if non_na_mask.any() else None
-                last_valid_idx = non_na_mask[::-1].idxmin() if non_na_mask.any() else None
-                
-                if first_valid_idx is None or last_valid_idx is None:
-                    monthly_df[col] = np.nan
-                    continue
+                first_valid_idx = valid_indices[0]
+                last_valid_idx = valid_indices[-1]
                 
                 # Get the non-NA segment
-                valid_series = q_series.loc[first_valid_idx:last_valid_idx]
-                valid_series = valid_series.dropna()
+                valid_series = q_series.loc[first_valid_idx:last_valid_idx].dropna()
                 
                 if len(valid_series) < 4:  # Need at least 4 points for cubic spline
                     # Use linear interpolation for short segments
@@ -1147,7 +1144,7 @@ class DataManager:
                 # Extend the valid series by 4 quarters
                 last_value = valid_series.iloc[-1]
                 extended_qtrs = pd.date_range(
-                    start=valid_series.index[-1] + pd.offsets.QuarterEnd(),
+                    start=pd.Period(valid_series.index[-1], freq='Q').end_time + pd.Timedelta(days=1),
                     periods=4,
                     freq='Q'
                 )
@@ -1162,8 +1159,8 @@ class DataManager:
                 spline = CubicSpline(x, y, bc_type='natural')
                 
                 # Get monthly points within the valid range
-                valid_start = valid_series.index[0].to_period('Q').start_time
-                valid_end = valid_series.index[-1].to_period('Q').end_time
+                valid_start = pd.Period(valid_series.index[0], freq='Q').start_time
+                valid_end = pd.Period(valid_series.index[-1], freq='Q').end_time
                 valid_months = pd.date_range(start=valid_start, end=valid_end, freq='M')
                 
                 # Evaluate spline at monthly points
@@ -1177,7 +1174,7 @@ class DataManager:
                 scaled_series = m_series.copy()
                 
                 # Map months to corresponding quarter ends for scaling
-                month_to_qtr = valid_months.to_period('Q').to_timestamp('Q')
+                month_to_qtr = pd.PeriodIndex(valid_months, freq='Q').end_time
                 
                 # Apply scaling for each quarter
                 for qtr_end in valid_series.index:
@@ -1200,16 +1197,17 @@ class DataManager:
                 monthly_df[col] = scaled_series
                 
                 # Preserve original NA values
-                na_qtrs = q_series[q_series.isna()].index
+                na_qtrs = q_series[q_series.isnull()].index
                 for qtr in na_qtrs:
-                    qtr_start = qtr.to_period('Q').start_time
-                    qtr_end = qtr.to_period('Q').end_time
+                    qtr_period = pd.Period(qtr, freq='Q')
+                    qtr_start = qtr_period.start_time
+                    qtr_end = qtr_period.end_time
                     na_months = monthly_df.loc[qtr_start:qtr_end].index
                     monthly_df.loc[na_months, col] = np.nan
             
             # Add month and quarter indicators
-            monthly_df['M'] = monthly_df.index.month
-            monthly_df['Q'] = monthly_df.index.quarter
+            monthly_df['M'] = pd.DatetimeIndex(monthly_df.index).month
+            monthly_df['Q'] = pd.DatetimeIndex(monthly_df.index).quarter
             
             return monthly_df
 
