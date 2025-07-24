@@ -211,7 +211,7 @@ Project_LEGO/
 │  ├─ writer.py            # Excel writer utilities
 │  └─ template.py          # Export templates
 ├─ support/                # Static support files
-│  ├─ mev_map.xlsx         # MEV code → type/category mapping
+│  ├─ mev_type.xlsx         # MEV code → type/category mapping
 │  └─ type_tsfm.yaml       # Type → TSFM mapping
 ├─ templates/              # Excel export templates
 ├─ requirements.txt        # Dependencies

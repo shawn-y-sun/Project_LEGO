@@ -659,6 +659,9 @@ class OLS(ModelBase):
         self.bse = None
         self.tvalues = None
         self.vif = None
+        self.fvalue = None
+        self.f_pvalue = None
+        self.llf = None  # Log-likelihood
         # track covariance type
         self.cov_type: str = 'OLS'
         self.is_fitted = False
@@ -683,6 +686,9 @@ class OLS(ModelBase):
         self.resid = res.resid
         self.bse = res.bse
         self.tvalues = res.tvalues
+        self.fvalue = res.fvalue
+        self.f_pvalue = res.f_pvalue
+        self.llf = res.llf  # Store log-likelihood
         # VIF
         self.vif = pd.Series({
             col: variance_inflation_factor(Xc.values, i)
@@ -726,6 +732,9 @@ class OLS(ModelBase):
             self.bse = pd.Series(robust.bse, index=idx)
             self.tvalues = pd.Series(robust.tvalues, index=idx)
             self.pvalues = pd.Series(robust.pvalues, index=idx)
+            self.fvalue = robust.fvalue
+            self.f_pvalue = robust.f_pvalue
+            self.llf = robust.llf  # Update log-likelihood after robust covariance estimation
         else:
             self.cov_type = 'NR'
         
@@ -746,6 +755,21 @@ class OLS(ModelBase):
         Xc_new = sm.add_constant(X_new, has_constant='add')
         return self.fitted.predict(Xc_new)
     
+    def conf_int(self, alpha: float = 0.05) -> pd.DataFrame:
+        """
+        Compute confidence intervals for the fitted parameters.
+        
+        Args:
+            alpha: The significance level for the confidence interval.
+                  Default is 0.05 for 95% confidence intervals.
+        
+        Returns:
+            DataFrame with confidence intervals for each parameter.
+        """
+        if not self.is_fitted or self.fitted is None:
+            raise RuntimeError("Model has not been fitted yet.")
+        return self.fitted.conf_int(alpha=alpha)
+    
     @property
     def param_measures(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -760,6 +784,20 @@ class OLS(ModelBase):
             }
             for var in self.params.index
         }
+
+    @property
+    def aic(self) -> float:
+        """Akaike Information Criterion"""
+        if self.fitted is None:
+            return None
+        return self.fitted.aic
+
+    @property
+    def bic(self) -> float:
+        """Bayesian Information Criterion"""
+        if self.fitted is None:
+            return None
+        return self.fitted.bic
 
     def __repr__(self) -> str:
         return f'OLS-{self.cov_type}'

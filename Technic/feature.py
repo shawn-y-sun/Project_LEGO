@@ -291,3 +291,196 @@ class DumVar(Feature):
     def __repr__(self) -> str:
         """Use the `name` property as the representation, prefixed with 'DumVar:'."""
         return f"DumVar:{self.name}"
+
+class Interaction(Feature):
+    """
+    Interaction term feature for combining multiple variables.
+    
+    Supports various interaction types:
+    - 'multiply': var1 * var2
+    - 'divide': var1 / var2  
+    - 'add': var1 + var2
+    - 'subtract': var1 - var2
+    - 'ratio': var1 / var2 (with safety checks)
+    - 'polynomial': var1^n * var2^m
+    
+    Parameters
+    ----------
+    vars : list of str or pandas.Series
+        List of variable names or Series to interact.
+    interaction_type : str, default 'multiply'
+        Type of interaction: 'multiply', 'divide', 'add', 'subtract', 'ratio', 'polynomial'
+    powers : list of int, optional
+        For polynomial interactions, powers for each variable [power1, power2, ...]
+    lag : int, default 0
+        Lag to apply to the second variable (useful for lead-lag interactions)
+    exp_sign : int, default 0
+        Expected coefficient sign for economic validation
+    alias : str, optional
+        Custom name for the output feature.
+        
+    Examples
+    --------
+    >>> # Simple multiplication
+    >>> gdp_unemp = Interaction(['GDP', 'UNRATE'])
+    >>> 
+    >>> # Ratio with lag
+    >>> gdp_lag_unemp = Interaction(
+    ...     ['GDP', 'UNRATE'],
+    ...     interaction_type='ratio',
+    ...     lag=1
+    ... )
+    >>> 
+    >>> # Polynomial interaction
+    >>> gdp_sq_unemp = Interaction(
+    ...     ['GDP', 'UNRATE'],
+    ...     interaction_type='polynomial',
+    ...     powers=[2, 1]  # GDP squared * UNRATE
+    ... )
+    """
+    def __init__(
+        self,
+        vars: List[Union[str, pd.Series]],
+        interaction_type: str = 'multiply',
+        powers: Optional[List[int]] = None,
+        lag: int = 0,
+        exp_sign: int = 0,
+        alias: Optional[str] = None
+    ):
+        # Initialize with first variable as the main var
+        super().__init__(var=vars[0], alias=alias)
+        
+        # Store additional variables
+        self.all_vars = vars
+        self.interaction_type = interaction_type.lower()
+        self.powers = powers if powers else [1] * len(vars)
+        self.lag = lag
+        self.exp_sign = exp_sign
+        
+        # Validate inputs
+        if len(vars) < 2:
+            raise ValueError("At least two variables required for interaction")
+        if interaction_type not in ['multiply', 'divide', 'add', 'subtract', 'ratio', 'polynomial']:
+            raise ValueError(f"Unknown interaction type: {interaction_type}")
+        if powers and len(powers) != len(vars):
+            raise ValueError("Number of powers must match number of variables")
+        
+        # Initialize series cache for additional variables
+        self.var_series_list: List[Optional[pd.Series]] = [None] * len(vars)
+
+    @property
+    def name(self) -> str:
+        """
+        Generate descriptive name for the interaction feature.
+        
+        Format: var1_var2_TYPE[_LAGn] or var1_var2_POW[n,m]
+        Examples:
+        - GDP_UNRATE_MUL
+        - GDP_UNRATE_DIV_LAG1
+        - GDP_UNRATE_POW2,1
+        """
+        if self.alias:
+            return self.alias
+            
+        # Get base variable names
+        var_names = []
+        for var in self.all_vars:
+            if isinstance(var, pd.Series):
+                var_names.append(var.name if var.name is not None else 'unnamed')
+            else:
+                var_names.append(str(var))
+        
+        # Build type suffix
+        if self.interaction_type == 'polynomial':
+            type_suffix = f"POW{','.join(map(str, self.powers))}"
+        else:
+            type_map = {
+                'multiply': 'MUL',
+                'divide': 'DIV',
+                'add': 'ADD',
+                'subtract': 'SUB',
+                'ratio': 'RATIO'
+            }
+            type_suffix = type_map[self.interaction_type]
+        
+        # Add lag suffix if needed
+        if self.lag > 0:
+            type_suffix = f"{type_suffix}_LAG{self.lag}"
+            
+        return "_".join(var_names + [type_suffix])
+
+    def lookup_map(self) -> Dict[str, str]:
+        """
+        Map all variables to their lookup names.
+        """
+        lookup_dict: Dict[str, str] = {}
+        for i, var in enumerate(self.all_vars):
+            if isinstance(var, str):
+                lookup_dict[f"var_{i}"] = var
+        return lookup_dict
+
+    def apply(self, *dfs: pd.DataFrame) -> pd.Series:
+        """
+        Apply the interaction transformation to the input variables.
+        
+        Parameters
+        ----------
+        *dfs : pandas.DataFrame
+            DataFrame sources for variable lookup.
+            
+        Returns
+        -------
+        pandas.Series
+            Transformed interaction series.
+        """
+        # Resolve all variables
+        series_list: List[pd.Series] = []
+        for i, var in enumerate(self.all_vars):
+            if isinstance(var, pd.Series):
+                series = var.copy()  # Make a copy to avoid modifying original
+            else:
+                # Use lookup to find the variable
+                for df in dfs:
+                    if df is not None and var in df.columns:
+                        series = df[var].copy()  # Make a copy
+                        break
+                else:
+                    raise KeyError(f"Variable '{var}' not found in any DataFrame")
+            
+            # Apply lag to second variable if specified
+            if i == 1 and self.lag > 0:
+                series = series.shift(self.lag)
+                
+            series_list.append(series)
+        
+        # Apply powers if specified
+        if self.powers:
+            series_list = [s.pow(p) for s, p in zip(series_list, self.powers)]
+        
+        # Perform the interaction
+        if self.interaction_type == 'multiply' or self.interaction_type == 'polynomial':
+            result = series_list[0].copy()
+            for s in series_list[1:]:
+                result = result * s
+        elif self.interaction_type == 'divide':
+            result = series_list[0] / series_list[1]
+        elif self.interaction_type == 'ratio':
+            # Add small constant to denominator to avoid division by zero
+            result = series_list[0] / (series_list[1] + 1e-10)
+        elif self.interaction_type == 'add':
+            result = pd.Series(0, index=series_list[0].index)
+            for s in series_list:
+                result = result + s
+        elif self.interaction_type == 'subtract':
+            result = series_list[0] - series_list[1]
+        else:
+            raise ValueError(f"Unsupported interaction type: {self.interaction_type}")
+        
+        # Set name and return
+        result.name = self.name
+        self.output_names = [self.name]
+        return result
+
+    def __repr__(self) -> str:
+        """Use the name property as the representation."""
+        return f"Interaction:{self.name}"

@@ -4,14 +4,24 @@ warnings.simplefilter(action="ignore", category=FutureWarning)
 import pandas as pd
 import matplotlib.pyplot as plt
 import math
-from typing import Type, Dict, List, Optional, Any, Union, Callable, Tuple
+from typing import Type, Dict, List, Optional, Any, Union, Callable, Tuple, Set
+from pathlib import Path
 
 from .cm import CM
-from .model import ModelBase
+from .model import ModelBase, OLS
 from .template import ExportTemplateBase
 from .report import ReportSet
-from .search import ModelSearch  # new import
+from .search import ModelSearch
 from .scenario import ScenManager
+from .export import (
+    EXPORT_CONTENT_TYPES,
+    ExportStrategy,
+    ExportFormatHandler,
+    OLSExportStrategy,
+    CSVFormatHandler,
+    OLSModelAdapter,
+    ExportManager
+)
 
 
 class Segment:
@@ -77,8 +87,8 @@ class Segment:
         model_cls: Type[ModelBase],
         export_template_cls: Optional[Type[ExportTemplateBase]] = None,
         reportset_cls: Type[ReportSet] = ReportSet,
-        search_cls: Type[ModelSearch] = ModelSearch,  # added parameter
-        scen_cls: Type = None  # new parameter for scenario manager class
+        search_cls: Type[ModelSearch] = ModelSearch,
+        scen_cls: Optional[Type[ScenManager]] = None
     ):
         self.segment_id = segment_id
         self.target = target
@@ -86,7 +96,7 @@ class Segment:
         self.model_cls = model_cls
         self.export_template_cls = export_template_cls
         self.reportset_cls = reportset_cls
-        self.search_cls = search_cls                # store search class
+        self.search_cls = search_cls
         # Import and set default ScenManager if not provided
         if scen_cls is None:
             self.scen_cls = ScenManager
@@ -588,51 +598,106 @@ class Segment:
 
     def export(
         self,
-        output_map: Dict[str, str],
-        *args,
-        **kwargs
+        model_ids: Optional[List[str]] = None,
+        output_dir: Union[str, Path] = Path.cwd(),
+        strategy_cls: Type[ExportStrategy] = OLSExportStrategy,
+        format_handler_cls: Type[ExportFormatHandler] = CSVFormatHandler,
+        content: Optional[List[str]] = None
     ) -> None:
         """
-        Export segment results to Excel files using the template class.
-
-        This method uses the configured export template class to write model
-        results, parameters, and diagnostics to Excel files in a standardized
-        format.
-
+        Export model results using the specified export strategy and format handler.
+        
         Parameters
         ----------
-        output_map : Dict[str, str]
-            Mapping from template file paths to output file paths.
-            Example: {"template.xlsx": "results.xlsx"}
-        *args, **kwargs
-            Additional arguments passed to the export template constructor.
-
-        Raises
-        ------
-        ValueError
-            If no export_template_cls was provided during segment initialization.
-
+        model_ids : List[str], optional
+            List of model IDs to export. If None, exports all models in the segment.
+        output_dir : Union[str, Path], default Path.cwd()
+            Directory to save exports. By default, uses current working directory.
+        strategy_cls : Type[ExportStrategy], default OLSExportStrategy
+            Export strategy class to use.
+        format_handler_cls : Type[ExportFormatHandler], default CSVFormatHandler
+            Format handler class to use.
+        content : List[str], optional
+            List of content types to export. If None, exports all content types.
+            Valid types are:
+            - 'timeseries_data': Combined modeling dataset and fit results
+            - 'staticStats': Model statistics and metrics
+            - 'scenario_testing': Scenario testing results
+        
         Example
         -------
-        >>> # Basic export using default template
-        >>> segment.export({
-        ...     "template.xlsx": "model_results.xlsx"
-        ... })
+        >>> # Export all content for all models to current directory
+        >>> segment.export()
         >>> 
-        >>> # Export with custom settings
+        >>> # Export only timeseries data and statistics for specific models to custom directory
         >>> segment.export(
-        ...     {
-        ...         "template.xlsx": "detailed_results.xlsx",
-        ...         "summary.xlsx": "summary_results.xlsx"
-        ...     },
-        ...     include_plots=True,
-        ...     sheet_name="Model Results"
+        ...     model_ids=['model1'],
+        ...     output_dir='my_exports',
+        ...     content=['timeseries_data', 'staticStats']
         ... )
         """
-        if not self.export_template_cls:
-            raise ValueError("No export_template_cls provided for exporting.")
-        exporter = self.export_template_cls(self.cms, *args, **kwargs)
-        exporter.export(output_map)
+        # Convert output_dir to Path object
+        output_dir = Path(output_dir)
+        
+        # Create output directory if it doesn't exist
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Get models to export
+        if model_ids is None:
+            models_to_export = [(cm_id, cm) for cm_id, cm in self.cms.items()]
+        else:
+            models_to_export = [
+                (model_id, self.cms[model_id])
+                for model_id in model_ids 
+                if model_id in self.cms
+            ]
+        
+        # Print export start message
+        print(f"\nStarting export for segment '{self.segment_id}':")
+        print(f"- Target variable: {self.target}")
+        print(f"- Number of models: {len(models_to_export)}")
+        print(f"- Output directory: {output_dir}")
+        
+        # Convert content list to set and validate
+        content_types_set = set(content) if content is not None else None
+        if content_types_set is not None:
+            invalid_types = content_types_set - set(EXPORT_CONTENT_TYPES.keys())
+            if invalid_types:
+                raise ValueError(f"Invalid content types: {invalid_types}. Valid types are: {list(EXPORT_CONTENT_TYPES.keys())}")
+            print(f"- Content types to export: {', '.join(content_types_set)}")
+        else:
+            print("- Content types to export: all")
+        print("\nPreparing export...")
+        
+        # Create format handler and strategy
+        format_handler = format_handler_cls()
+        strategy = strategy_cls(
+            format_handler=format_handler,
+            content_types=content_types_set
+        )
+        
+        # Create export manager
+        export_manager = ExportManager(
+            strategy=strategy,
+            format_handler=format_handler
+        )
+        
+        # Create exportable models
+        exportable_models = []
+        for model_id, cm in models_to_export:
+            if isinstance(cm.model_in, OLS):
+                adapter = OLSModelAdapter(cm.model_in, model_id)
+                exportable_models.append(adapter)
+            if isinstance(cm.model_full, OLS):
+                adapter = OLSModelAdapter(cm.model_full, model_id)
+                exportable_models.append(adapter)
+        
+        # Export models
+        export_manager.export_models(exportable_models, output_dir)
+        
+        # Print final success message
+        print(f"\nExport completed successfully for segment '{self.segment_id}'!")
+        print(f"Results have been saved to: {output_dir}")
 
     def clear_cms(self) -> None:
         """

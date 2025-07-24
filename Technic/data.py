@@ -11,6 +11,8 @@ import yaml
 import math
 import matplotlib.pyplot as plt
 from typing import Any, Dict, List, Optional, Callable, Union, Tuple
+import numpy as np
+from scipy.interpolate import CubicSpline
 
 from .internal import *
 from .mev import MEVLoader
@@ -1057,57 +1059,158 @@ class DataManager:
     @staticmethod
     def _interpolate_df(df: pd.DataFrame) -> pd.DataFrame:
         """
-        Interpolate quarterly MEV DataFrames to match monthly frequency.
+        Interpolate quarterly MEV DataFrames to match monthly frequency using cubic spline.
+        The interpolation ensures that quarterly averages of the monthly values match
+        the original quarterly values.
 
-        This method performs cubic interpolation on quarterly data to estimate
-        monthly values. If the input is not quarterly, it returns the original data.
-
-        For quarterly data with quarter-end dates (Mar, Jun, Sep, Dec), the values
-        are treated as quarterly averages and the index is shifted back by one month
-        (to Feb, May, Aug, Nov) before interpolation to properly represent the
-        quarterly periods.
+        The process:
+        1. Forward fills any NA values in the quarterly series
+        2. Extends the quarterly series by 4 quarters by holding the last value flat
+        3. Performs cubic spline interpolation on the extended series
+        4. Scales interpolated values to preserve quarterly averages
+        5. Returns only the original date range (removes the extended quarters)
 
         Parameters
         ----------
         df : pd.DataFrame
-            Input DataFrame with datetime index
+            Input DataFrame with datetime index. If not quarterly, returns original data.
 
         Returns
         -------
         pd.DataFrame
-            If input is quarterly: Interpolated monthly DataFrame
+            If input is quarterly: Interpolated monthly DataFrame with scaled values
             If input is not quarterly: Original DataFrame
 
         Notes
         -----
-        - Uses pandas' cubic interpolation
-        - Preserves the original column names and types
+        - Uses scipy's CubicSpline with natural boundary conditions
+        - Scales interpolated values to preserve quarterly averages
+        - Handles missing values by preserving them in output
         - Normalizes all dates to midnight UTC
-        - For quarterly data, creates a monthly date range from min to max date
-        - Quarter-end dates are shifted back by one month to represent quarterly averages
+        - For quarterly data, creates a monthly date range from first quarter start to last quarter end
         """
+        if df.empty:
+            return df
+
+        # Normalize index to midnight UTC
         df2 = df.copy()
-        df2.index = pd.to_datetime(df2.index).normalize()
+        df2.index = pd.DatetimeIndex(pd.to_datetime(df2.index)).normalize()
         freq_mev = pd.infer_freq(df2.index)
         
         # Only interpolate Q -> M
         if freq_mev and freq_mev.startswith('Q'):
-            # Check if dates are quarter-end (March, June, September, December)
-            quarter_end_months = {3, 6, 9, 12}
-            is_quarter_end = all(date.month in quarter_end_months for date in df2.index)
+            # Get the first and last quarters for complete coverage
+            first_qtr = pd.Period(df2.index[0], freq='Q')
+            last_qtr = pd.Period(df2.index[-1], freq='Q')
             
-            if is_quarter_end:
-                # Shift index back by one month to represent quarterly averages
-                # Mar -> Feb, Jun -> May, Sep -> Aug, Dec -> Nov
-                df2.index = df2.index - pd.DateOffset(months=1)
+            # Create monthly index from first month of first quarter to last month of last quarter
+            start_month = first_qtr.start_time
+            end_month = last_qtr.end_time
+            monthly_index = pd.date_range(start=start_month, end=end_month, freq='M')
             
-            start = df2.index.min()
-            end = df2.index.max()
-            target_idx = pd.date_range(start=start, end=end, freq='M')
-            df2 = df2.reindex(target_idx).astype(float)
-            df2 = df2.interpolate(method='cubic')
-            df2.index = df2.index.normalize()
-            return df2
+            # Initialize result DataFrame with NaN
+            monthly_df = pd.DataFrame(index=monthly_index)
+            
+            # Process each column separately
+            for col in df2.columns:
+                q_series = df2[col]
+                
+                # Skip if all values are NA
+                if q_series.isnull().all():
+                    monthly_df[col] = np.nan
+                    continue
+                
+                # Find continuous non-NA segments
+                non_na_mask = ~q_series.isnull()
+                valid_indices = q_series.index[non_na_mask]
+                
+                if len(valid_indices) == 0:
+                    monthly_df[col] = np.nan
+                    continue
+                
+                # Get the first and last non-NA indices
+                first_valid_idx = valid_indices[0]
+                last_valid_idx = valid_indices[-1]
+                
+                # Get the non-NA segment
+                valid_series = q_series.loc[first_valid_idx:last_valid_idx].dropna()
+                
+                if len(valid_series) < 4:  # Need at least 4 points for cubic spline
+                    # Use linear interpolation for short segments
+                    valid_series = valid_series.reindex(monthly_index, method='linear')
+                    monthly_df[col] = valid_series
+                    continue
+                
+                # Extend the valid series by 4 quarters
+                last_value = valid_series.iloc[-1]
+                extended_qtrs = pd.date_range(
+                    start=pd.Period(valid_series.index[-1], freq='Q').end_time + pd.Timedelta(days=1),
+                    periods=4,
+                    freq='Q'
+                )
+                extended_data = pd.Series([last_value] * 4, index=extended_qtrs)
+                extended_series = pd.concat([valid_series, extended_data])
+                
+                # Convert dates to numeric for spline interpolation
+                x = extended_series.index.map(pd.Timestamp.toordinal)
+                y = extended_series.values
+                
+                # Fit cubic spline
+                spline = CubicSpline(x, y, bc_type='natural')
+                
+                # Get monthly points within the valid range
+                valid_start = pd.Period(valid_series.index[0], freq='Q').start_time
+                valid_end = pd.Period(valid_series.index[-1], freq='Q').end_time
+                valid_months = pd.date_range(start=valid_start, end=valid_end, freq='M')
+                
+                # Evaluate spline at monthly points
+                monthly_x = valid_months.map(pd.Timestamp.toordinal)
+                monthly_y = spline(monthly_x)
+                
+                # Create initial monthly series
+                m_series = pd.Series(monthly_y, index=valid_months)
+                
+                # Scale values to preserve quarterly averages
+                scaled_series = m_series.copy()
+                
+                # Map months to corresponding quarter ends for scaling
+                month_to_qtr = pd.PeriodIndex(valid_months, freq='Q').end_time
+                
+                # Apply scaling for each quarter
+                for qtr_end in valid_series.index:
+                    mask = month_to_qtr == qtr_end
+                    if not mask.any():
+                        continue
+                    
+                    interpolated_avg = m_series[mask].mean()
+                    observed_value = valid_series.loc[qtr_end]
+                    
+                    # Handle zero or near-zero averages
+                    if np.isclose(interpolated_avg, 0):
+                        scale_factor = 1.0
+                    else:
+                        scale_factor = observed_value / interpolated_avg
+                    
+                    scaled_series.loc[mask] = m_series.loc[mask] * scale_factor
+                
+                # Assign the scaled values to the result DataFrame
+                monthly_df[col] = scaled_series
+                
+                # Preserve original NA values
+                na_qtrs = q_series[q_series.isnull()].index
+                for qtr in na_qtrs:
+                    qtr_period = pd.Period(qtr, freq='Q')
+                    qtr_start = qtr_period.start_time
+                    qtr_end = qtr_period.end_time
+                    na_months = monthly_df.loc[qtr_start:qtr_end].index
+                    monthly_df.loc[na_months, col] = np.nan
+            
+            # Add month and quarter indicators
+            monthly_df['M'] = pd.DatetimeIndex(monthly_df.index).month
+            monthly_df['Q'] = pd.DatetimeIndex(monthly_df.index).quarter
+            
+            return monthly_df
+
         return df
     
     def apply_to_mevs(
@@ -1471,4 +1574,3 @@ class DataManager:
         # Delegate to the MEVLoader's update_mev_map method
         # This updates the mapping without affecting cached data
         self._mev_loader.update_mev_map(updates)
-
