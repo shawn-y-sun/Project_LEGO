@@ -8,8 +8,9 @@ from statsmodels.stats.stattools import jarque_bera
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 def ols_model_perf_plot(
-    X: pd.DataFrame,
-    y: pd.Series,
+    model: Optional['OLS'] = None,
+    X: Optional[pd.DataFrame] = None,
+    y: Optional[pd.Series] = None,
     X_out: Optional[pd.DataFrame] = None,
     y_out: Optional[pd.Series] = None,
     y_fitted_in: Optional[pd.Series] = None,
@@ -23,23 +24,42 @@ def ols_model_perf_plot(
 
     Parameters
     ----------
-    X : pd.DataFrame
-        In-sample feature DataFrame used for fitting.
-    y : pd.Series
-        In-sample target values.
+    model : OLS, optional
+        Fitted OLS model instance. If provided, data will be extracted from this model.
+    X : pd.DataFrame, optional
+        In-sample feature DataFrame used for fitting. Ignored if model is provided.
+    y : pd.Series, optional
+        In-sample target values. Ignored if model is provided.
     X_out : pd.DataFrame, optional
-        Out-of-sample feature DataFrame for predictions.
+        Out-of-sample feature DataFrame for predictions. Ignored if model is provided.
     y_out : pd.Series, optional
-        Actual target values for out-of-sample.
-    y_fitted_in : pd.Series
-        Fitted in-sample values (must be provided).
+        Actual target values for out-of-sample. Ignored if model is provided.
+    y_fitted_in : pd.Series, optional
+        Fitted in-sample values. Ignored if model is provided.
     y_pred_out : pd.Series, optional
-        Predicted out-of-sample values (must be provided if X_out is given).
+        Predicted out-of-sample values. Ignored if model is provided.
     figsize : tuple, default (8,4)
         Figure size.
     **kwargs
         Additional kwargs passed to plt.subplots().
     """
+    # Extract data from model if provided
+    if model is not None:
+        if not hasattr(model, 'is_fitted') or not model.is_fitted:
+            raise ValueError("Model must be fitted before plotting")
+        
+        # Extract data from model
+        X = model.X
+        y = model.y
+        X_out = model.X_out if hasattr(model, 'X_out') else None
+        y_out = model.y_out if hasattr(model, 'y_out') else None
+        y_fitted_in = model.y_fitted_in if hasattr(model, 'y_fitted_in') else None
+        y_pred_out = model.y_pred_out if hasattr(model, 'y_pred_out') else None
+    
+    # Validate required parameters
+    if X is None or y is None:
+        raise ValueError("Either model or X and y must be provided")
+    
     # Determine full index for actual values
     if X_out is not None:
         X_full = pd.concat([X, X_out]).sort_index()
@@ -70,9 +90,10 @@ def ols_model_perf_plot(
     # Compute absolute errors
     abs_err = (y_full - y_pred_full).abs()
 
-    # Create plot
-    fig, ax1 = plt.subplots(figsize=figsize, **kwargs)
+    # Create subplots for side-by-side comparison
+    fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(figsize[0]*2, figsize[1]), **kwargs)
     
+    # Left plot: Target variable (original functionality)
     # Plot actual values
     ax1.plot(y_full.index, y_full, label="Actual", color="black", linewidth=2)
     
@@ -166,7 +187,7 @@ def ols_model_perf_plot(
         )
     
     ax1.set_ylabel("Value")
-    ax1.set_title("Actual vs. Fitted/OOS")
+    ax1.set_title("Target Variable: Actual vs. Fitted/OOS")
     ax1.legend(loc="upper left")
 
     # Plot absolute errors on secondary axis with improved width calculation
@@ -196,6 +217,121 @@ def ols_model_perf_plot(
     ax2.bar(abs_err.index, abs_err, width=width, alpha=0.2, color="grey", label="|Error|")
     ax2.set_ylabel("Absolute Error")
     ax2.legend(loc="upper right")
+
+    # Right plot: Base variable (new functionality)
+    if model is not None and hasattr(model, 'y_base_full') and not model.y_base_full.empty:
+        # Get base variable data
+        y_base_full = model.y_base_full
+        y_base_fitted_in = model.y_base_fitted_in if hasattr(model, 'y_base_fitted_in') else None
+        y_base_pred_out = model.y_base_pred_out if hasattr(model, 'y_base_pred_out') else None
+        
+        # Plot actual base values
+        ax3.plot(y_base_full.index, y_base_full, label="Actual", color="black", linewidth=2)
+        
+        # Combine fitted and predicted base values
+        y_base_pred_full = pd.Series(dtype=float)
+        if y_base_fitted_in is not None and not y_base_fitted_in.empty:
+            y_base_pred_full = pd.concat([y_base_pred_full, y_base_fitted_in])
+        if y_base_pred_out is not None and not y_base_pred_out.empty:
+            y_base_pred_full = pd.concat([y_base_pred_full, y_base_pred_out])
+        
+        # Plot base predictions with gap handling (similar to target variable)
+        if not y_base_pred_full.empty:
+            y_base_pred_full = y_base_pred_full.sort_index()
+            
+            # Check for gaps in base fitted data
+            if y_base_fitted_in is not None and not y_base_fitted_in.empty:
+                fitted_base_idx_sorted = y_base_fitted_in.index.sort_values()
+                
+                # Find gaps in base fitted data (similar logic to target)
+                base_segments = []
+                if len(fitted_base_idx_sorted) > 0:
+                    current_base_segment = [fitted_base_idx_sorted[0]]
+                    
+                    for i in range(1, len(fitted_base_idx_sorted)):
+                        prev_idx = fitted_base_idx_sorted[i-1]
+                        curr_idx = fitted_base_idx_sorted[i]
+                        
+                        # Check if there's a gap larger than expected
+                        time_gap = curr_idx - prev_idx
+                        
+                        if time_gap > typical_diff_td * 1.5:  # Allow some tolerance
+                            # Gap detected, finish current segment and start new one
+                            base_segments.append(current_base_segment)
+                            current_base_segment = [curr_idx]
+                        else:
+                            # No gap, continue current segment
+                            current_base_segment.append(curr_idx)
+                    
+                    # Add the last segment
+                    if current_base_segment:
+                        base_segments.append(current_base_segment)
+                    
+                    # Plot each segment separately
+                    for i, segment in enumerate(base_segments):
+                        if len(segment) > 0:
+                            segment_data = y_base_fitted_in.loc[segment]
+                            label = "Fitted (IS)" if i == 0 else None  # Only label first segment
+                            
+                            if len(segment) == 1:
+                                # Single point - plot as marker
+                                ax3.plot(segment_data.index, segment_data.values, 
+                                        marker='o', markersize=2, color="tab:orange", 
+                                        label=label, linestyle='None')
+                            else:
+                                # Multiple points - plot as line
+                                ax3.plot(segment_data.index, segment_data.values, 
+                                        label=label, color="tab:orange", linewidth=2)
+            
+            # Plot out-of-sample base predictions
+            if y_base_pred_out is not None and not y_base_pred_out.empty:
+                ax3.plot(
+                    y_base_pred_out.index,
+                    y_base_pred_out,
+                    linestyle="--",
+                    label="Predicted (OOS)",
+                    color="tab:orange",
+                    linewidth=2,
+                )
+        
+        # Calculate and plot absolute errors for base variable
+        if not y_base_pred_full.empty:
+            abs_err_base = (y_base_full - y_base_pred_full).abs()
+            
+            # Plot absolute errors on secondary axis
+            ax4 = ax3.twinx()
+            
+            # Calculate bar width for base variable
+            if len(abs_err_base) > 1:
+                time_diffs_base = []
+                abs_err_base_sorted = abs_err_base.sort_index()
+                for i in range(1, len(abs_err_base_sorted)):
+                    delta = abs_err_base_sorted.index[i] - abs_err_base_sorted.index[i-1]
+                    if isinstance(delta, pd.Timedelta):
+                        time_diffs_base.append(float(delta / pd.Timedelta(days=1)))
+                    else:
+                        time_diffs_base.append(delta)
+                
+                if time_diffs_base:
+                    median_diff_base = np.median(time_diffs_base)
+                    width_base = median_diff_base * 0.6
+                else:
+                    width_base = 0.8
+            else:
+                width_base = 0.8
+            
+            ax4.bar(abs_err_base.index, abs_err_base, width=width_base, alpha=0.2, color="grey", label="|Error|")
+            ax4.set_ylabel("Absolute Error")
+            ax4.legend(loc="upper right")
+        
+        ax3.set_ylabel("Value")
+        ax3.set_title("Base Variable: Actual vs. Fitted/OOS")
+        ax3.legend(loc="upper left")
+    else:
+        # No base variable data available
+        ax3.text(0.5, 0.5, "No base variable data available", 
+                ha='center', va='center', transform=ax3.transAxes)
+        ax3.set_title("Base Variable: Actual vs. Fitted/OOS")
 
     fig.tight_layout()
     return fig
@@ -231,7 +367,7 @@ def ols_plot_perf_set(
     **kwargs
         Passed to plt.subplots().
     """
-    # Determine the actual series
+    # Determine the actual series for the target variable (top row)
     first_report = next(iter(reports.values()))
     model = first_report.model
     if (
@@ -244,83 +380,58 @@ def ols_plot_perf_set(
     else:
         actual = model.y.sort_index()
 
-    fig, ax = plt.subplots(figsize=figsize, **kwargs)
-    ax.plot(actual.index, actual, label='Actual', color='black', linewidth=2)
+    # Prepare for two rows: top for target, bottom for base variable
+    fig, (ax, ax_base) = plt.subplots(2, 1, figsize=(figsize[0], figsize[1]*2), sharex=False, **kwargs)
 
-    # Color cycle for model lines
+    # --- Top row: Target variable performance (as before) ---
+    ax.plot(actual.index, actual, label='Actual', color='black', linewidth=2)
     colors = plt.rcParams['axes.prop_cycle'].by_key().get('color', [])
 
     for idx, (mid, rpt) in enumerate(reports.items()):
         color = colors[idx % len(colors)] if colors else None
-        
-        # In-sample fitted with gap handling
         y_in = rpt.model.y_fitted_in.sort_index()
-        
-        # Check for gaps in fitted data (indicating outliers)
+        # Gap handling for in-sample fitted
         if len(y_in) > 0:
-            # Simple approach: detect gaps by looking at consecutive fitted indices
             fitted_idx_sorted = y_in.index.sort_values()
-            
-            # Find expected frequency from the original data
             if len(rpt.model.y.index) > 1:
-                # Infer frequency from original data
                 freq = pd.infer_freq(rpt.model.y.index)
                 if freq is None:
-                    # Fallback: calculate median difference
                     diffs = rpt.model.y.index.to_series().diff().dropna()
                     if len(diffs) > 0:
                         typical_diff = diffs.median()
                     else:
-                        typical_diff = pd.Timedelta(days=30)  # Default fallback
+                        typical_diff = pd.Timedelta(days=30)
                 else:
                     typical_diff = pd.tseries.frequencies.to_offset(freq)
             else:
-                typical_diff = pd.Timedelta(days=30)  # Default fallback
-            
-            # Find gaps in fitted data
+                typical_diff = pd.Timedelta(days=30)
             segments = []
             current_segment = [fitted_idx_sorted[0]]
-            
             for i in range(1, len(fitted_idx_sorted)):
                 prev_idx = fitted_idx_sorted[i-1]
                 curr_idx = fitted_idx_sorted[i]
-                
-                # Check if there's a gap larger than expected
                 time_gap = curr_idx - prev_idx
-                
-                # Convert typical_diff to Timedelta if it's an offset object for comparison
                 if hasattr(typical_diff, 'delta'):
-                    # It's an offset object, get the underlying timedelta
                     typical_diff_td = typical_diff.delta
                 elif isinstance(typical_diff, pd.Timedelta):
                     typical_diff_td = typical_diff
                 else:
-                    # Try to convert to timedelta
                     try:
                         typical_diff_td = pd.Timedelta(typical_diff)
                     except:
-                        typical_diff_td = pd.Timedelta(days=30)  # Fallback
-                
-                if time_gap > typical_diff_td * 1.5:  # Allow some tolerance
-                    # Gap detected, finish current segment and start new one
+                        typical_diff_td = pd.Timedelta(days=30)
+                if time_gap > typical_diff_td * 1.5:
                     segments.append(current_segment)
                     current_segment = [curr_idx]
                 else:
-                    # No gap, continue current segment
                     current_segment.append(curr_idx)
-            
-            # Add the last segment
             if current_segment:
                 segments.append(current_segment)
-            
-            # Plot each segment separately
             for i, segment in enumerate(segments):
                 if len(segment) > 0:
                     segment_data = y_in.loc[segment]
-                    label = f"{mid} (IS)" if i == 0 else None  # Only label first segment
-                    
+                    label = f"{mid} (IS)" if i == 0 else None
                     if len(segment) == 1:
-                        # Single point - plot as marker
                         ax.plot(
                             segment_data.index,
                             segment_data.values,
@@ -328,19 +439,14 @@ def ols_plot_perf_set(
                             label=label, linestyle='None'
                         )
                     else:
-                        # Multiple points - plot as line
                         ax.plot(
                             segment_data.index,
                             segment_data.values,
-                            linestyle='-',  # solid for in-sample
+                            linestyle='-',
                             label=label,
                             color=color,
                             linewidth=2
                         )
-        else:
-            # No fitted data to plot
-            pass
-        
         # Out-of-sample predicted
         if (
             not full
@@ -352,14 +458,91 @@ def ols_plot_perf_set(
             ax.plot(
                 y_out.index,
                 y_out,
-                linestyle='--',  # dashed for out-of-sample
+                linestyle='--',
                 label=None,
                 color=color,
                 linewidth=2
             )
-
-    ax.set_title('Model Performance Comparison')
+    ax.set_title('Model Performance Comparison (Target Variable)')
     ax.set_ylabel('Value')
     ax.legend(loc='best')
+
+    # --- Bottom row: Base variable performance ---
+    # Plot actual base variable (if available) and predictions for each model
+    base_plotted = False
+    for idx, (mid, rpt) in enumerate(reports.items()):
+        color = colors[idx % len(colors)] if colors else None
+        model = rpt.model
+        if hasattr(model, 'y_base_full') and model.y_base_full is not None and not model.y_base_full.empty:
+            y_base_full = model.y_base_full.sort_index()
+            ax_base.plot(y_base_full.index, y_base_full, label='Actual', color='black', linewidth=2) if not base_plotted else None
+            base_plotted = True
+            # Fitted and predicted base
+            y_base_fitted_in = getattr(model, 'y_base_fitted_in', None)
+            y_base_pred_out = getattr(model, 'y_base_pred_out', None)
+            y_base_pred_full = pd.Series(dtype=float)
+            if y_base_fitted_in is not None and not y_base_fitted_in.empty:
+                y_base_pred_full = pd.concat([y_base_pred_full, y_base_fitted_in])
+            if y_base_pred_out is not None and not y_base_pred_out.empty:
+                y_base_pred_full = pd.concat([y_base_pred_full, y_base_pred_out])
+            y_base_pred_full = y_base_pred_full.sort_index()
+            # Gap handling for in-sample fitted base
+            if y_base_fitted_in is not None and not y_base_fitted_in.empty:
+                fitted_base_idx_sorted = y_base_fitted_in.index.sort_values()
+                if len(fitted_base_idx_sorted) > 1:
+                    diffs = fitted_base_idx_sorted.to_series().diff().dropna()
+                    typical_diff = diffs.median() if len(diffs) > 0 else pd.Timedelta(days=30)
+                else:
+                    typical_diff = pd.Timedelta(days=30)
+                base_segments = []
+                current_base_segment = [fitted_base_idx_sorted[0]]
+                for i in range(1, len(fitted_base_idx_sorted)):
+                    prev_idx = fitted_base_idx_sorted[i-1]
+                    curr_idx = fitted_base_idx_sorted[i]
+                    time_gap = curr_idx - prev_idx
+                    if time_gap > typical_diff * 1.5:
+                        base_segments.append(current_base_segment)
+                        current_base_segment = [curr_idx]
+                    else:
+                        current_base_segment.append(curr_idx)
+                if current_base_segment:
+                    base_segments.append(current_base_segment)
+                for i, segment in enumerate(base_segments):
+                    if len(segment) > 0:
+                        segment_data = y_base_fitted_in.loc[segment]
+                        label = f"{mid} (IS)" if i == 0 else None
+                        if len(segment) == 1:
+                            ax_base.plot(
+                                segment_data.index,
+                                segment_data.values,
+                                marker='o', markersize=2, color=color,
+                                label=label, linestyle='None'
+                            )
+                        else:
+                            ax_base.plot(
+                                segment_data.index,
+                                segment_data.values,
+                                linestyle='-',
+                                label=label,
+                                color=color,
+                                linewidth=2
+                            )
+            # Out-of-sample predicted base
+            if y_base_pred_out is not None and not y_base_pred_out.empty:
+                ax_base.plot(
+                    y_base_pred_out.index,
+                    y_base_pred_out,
+                    linestyle='--',
+                    label=None,
+                    color=color,
+                    linewidth=2
+                )
+        else:
+            # No base variable data for this model
+            ax_base.text(0.5, 0.5, f"No base variable for {mid}",
+                         ha='center', va='center', transform=ax_base.transAxes)
+    ax_base.set_title('Model Performance Comparison (Base Variable)')
+    ax_base.set_ylabel('Value')
+    ax_base.legend(loc='best')
     fig.tight_layout()
     return fig

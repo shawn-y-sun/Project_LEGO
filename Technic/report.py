@@ -82,10 +82,9 @@ class ModelReportBase(ABC):
         """Return parameter measures as a DataFrame."""
         ...
 
-    @abstractmethod
     def plot_perf(self, **kwargs) -> Any:
         """Plot performance metrics for this model."""
-        ...
+        return ols_model_perf_plot(model=self.model, **kwargs)
 
 class ReportSet:
     """
@@ -257,17 +256,7 @@ class OLS_ModelReport(ModelReportBase):
         cols_existing = [c for c in cols if c in df.columns]
         return df[cols_existing]
 
-    def plot_perf(self, **kwargs) -> Any:
-        """Plot actual vs fitted/in-sample and predicted/out-of-sample values."""
-        return self.perf_plot_fn(
-            self.model.X,
-            self.model.y,
-            X_out=self.model.X_out,
-            y_out=self.model.y_out,
-            y_fitted_in=self.model.y_fitted_in,
-            y_pred_out=self.model.y_pred_out,
-            **kwargs
-        )
+
 
     def show_report(
         self,

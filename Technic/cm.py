@@ -58,7 +58,10 @@ class CM:
         self,
         model_id: str,
         target: str,
-        model_cls: Type[ModelBase],
+        model_type: Optional[Any] = None,
+        target_base: Optional[str] = None,
+        target_exposure: Optional[str] = None,
+        model_cls: Type[ModelBase] = None,
         data_manager: Any = None,
         scen_cls: Type = None,
     ):
@@ -71,6 +74,10 @@ class CM:
             Unique identifier for this candidate model.
         target : str
             Name of the target column in the DataManager's internal_data.
+        target_base : str, optional
+            Name of the base variable of interest (highly recommended if available).
+        target_exposure : str, optional
+            Name of the exposure variable (required for Ratio model types).
         model_cls : Type[ModelBase]
             A class that extends ModelBase, to be used for fitting.
         data_manager : Any, optional
@@ -80,6 +87,9 @@ class CM:
         """
         self.model_id = model_id
         self.target = target
+        self.model_type = model_type
+        self.target_base = target_base
+        self.target_exposure = target_exposure
         self.model_cls = model_cls
         self.dm = data_manager
         
@@ -144,6 +154,9 @@ class CM:
                 sample='in',
                 outlier_idx=outlier_idx,
                 target=self.target,
+                model_type=self.model_type,
+                target_base=self.target_base,
+                target_exposure=self.target_exposure,
                 scen_cls=self.scen_cls
             ).fit()
 
@@ -155,6 +168,9 @@ class CM:
                 sample='full',
                 outlier_idx=outlier_idx,
                 target=self.target,
+                model_type=self.model_type,
+                target_base=self.target_base,
+                target_exposure=self.target_exposure,
                 scen_cls=self.scen_cls
             ).fit()
 

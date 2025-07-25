@@ -827,6 +827,60 @@ class TimeSeriesLoader(DataLoader):
 
         return df.sort_index()
 
+    @property
+    def p0(self) -> Optional[pd.Timestamp]:
+        """
+        Get the date index just ahead of in_sample_start.
+        
+        Returns
+        -------
+        pd.Timestamp or None
+            Date index just ahead of in_sample_start, or None if 
+            in_sample_start is the earliest record or not specified.
+            
+        Example
+        -------
+        >>> loader = TimeSeriesLoader(in_sample_start="2020-02-01")
+        >>> loader.load("data.csv", date_col="date")
+        >>> # If data starts from 2020-01-31, p0 would be 2020-01-31
+        >>> # If data starts from 2020-02-01 or later, p0 would be None
+        >>> p0_date = loader.p0
+        """
+        if self.in_sample_start is None or self._internal_data is None:
+            return None
+            
+        # Get dates before in_sample_start
+        available_dates = self._internal_data.index
+        dates_before = available_dates[available_dates < self.in_sample_start]
+        
+        if dates_before.empty:
+            # in_sample_start is the earliest record
+            return None
+        else:
+            # Return the latest date before in_sample_start
+            return dates_before.max()
+
+    @property
+    def out_p0(self) -> Optional[pd.Timestamp]:
+        """
+        Get the date index of in_sample_end.
+        
+        Returns
+        -------
+        pd.Timestamp or None
+            Date index of in_sample_end if specified, None otherwise.
+            
+        Example
+        -------
+        >>> loader = TimeSeriesLoader(
+        ...     in_sample_start="2020-01-01",
+        ...     in_sample_end="2022-12-31"
+        ... )
+        >>> loader.load("data.csv", date_col="date")
+        >>> out_p0_date = loader.out_p0  # Returns 2022-12-31
+        """
+        return self.in_sample_end
+
 
 class PanelLoader(DataLoader):
     """

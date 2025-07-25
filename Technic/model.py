@@ -46,6 +46,12 @@ class ModelBase(ABC):
         Class for aggregating ModelTestBase instances into a TestSet.
     scen_cls : type, optional
         Class to use for scenario management. If None, defaults to ScenManager.
+    model_type : type, optional
+        ModelType subclass for converting predictions to base variables.
+    target_base : str, optional
+        Name of the base variable of interest (highly recommended if available).
+    target_exposure : str, optional
+        Name of the exposure variable (required for Ratio model types).
     report_cls : type, optional
         Class for generating model reports.
     X : DataFrame, optional
@@ -61,6 +67,8 @@ class ModelBase(ABC):
     ----------
     scen_manager : Any, optional
         Scenario manager instance created using scen_cls.
+    base_predictor : Any, optional
+        Model type instance for converting predictions to base variables.
     """
     def __init__(
         self,
@@ -73,6 +81,9 @@ class ModelBase(ABC):
         test_update_func: Optional[Callable[['ModelBase'], Dict[str, Any]]] = None,
         testset_cls: Type = TestSet,
         scen_cls: Optional[Type] = None,
+        model_type: Optional[Type] = None,
+        target_base: Optional[str] = None,
+        target_exposure: Optional[str] = None,
         report_cls: Optional[Type] = None,
         X: Optional[pd.DataFrame] = None,
         y: Optional[pd.Series] = None,
@@ -85,6 +96,8 @@ class ModelBase(ABC):
         self.sample = sample
         self.outlier_idx = outlier_idx or []
         self.target = target
+        self.target_base = target_base
+        self.target_exposure = target_exposure
         
         # Validation
         if sample not in {'in', 'full'}:
@@ -120,6 +133,32 @@ class ModelBase(ABC):
         else:
             self.scen_cls = scen_cls
         self.scen_manager: Optional[Any] = None
+        
+        # Model type and base prediction
+        self.model_type = model_type
+        self.base_predictor: Optional[Any] = None
+        if model_type is not None:
+            # Validate that model_type is a subclass of ModelType
+            from .modeltype import ModelType
+            if not issubclass(model_type, ModelType):
+                raise ValueError("model_type must be a subclass of ModelType")
+            
+            # Create base predictor instance
+            if self.dm is not None:
+                # Only pass target_exposure if it's not None
+                if self.target_exposure is not None:
+                    self.base_predictor = model_type(
+                        dm=self.dm,
+                        target=self.target,
+                        target_base=self.target_base,
+                        target_exposure=self.target_exposure
+                    )
+                else:
+                    self.base_predictor = model_type(
+                        dm=self.dm,
+                        target=self.target,
+                        target_base=self.target_base
+                    )
         
         # Reporting configuration
         self.report_cls = report_cls
@@ -363,6 +402,160 @@ class ModelBase(ABC):
             return pd.Series(dtype=float)
         self._y_pred_out = self.predict(self.X_out)
         return self._y_pred_out
+
+    @property
+    def y_base_full(self) -> pd.Series:
+        """
+        Get full-sample target base series.
+        
+        Returns
+        -------
+        pd.Series
+            Full-sample target base series including p0, in-sample, and out-sample indices.
+        """
+        if self.target_base is None:
+            return pd.Series(dtype=float)
+        
+        # Get the union of p0, in-sample and out-of-sample indices
+        idx = self.dm.in_sample_idx.union(self.dm.out_sample_idx)
+        if self.dm.p0 is not None:
+            idx = idx.union([self.dm.p0])
+        
+        # Extract target base
+        y_base_full = self.dm.internal_data[self.target_base].copy()
+        
+        # Align to index
+        y_base_full = y_base_full.reindex(idx).astype(float)
+        
+        return y_base_full
+
+    @property
+    def y_base_in(self) -> pd.Series:
+        """
+        Get in-sample target base series including p0.
+        
+        Returns
+        -------
+        pd.Series
+            In-sample target base series including p0 if available.
+        """
+        if self.target_base is None:
+            return pd.Series(dtype=float)
+        
+        # Get in-sample indices and add p0 if available
+        idx = self.dm.in_sample_idx
+        if self.dm.p0 is not None:
+            idx = idx.union([self.dm.p0])
+        
+        return self.y_base_full.reindex(idx)
+
+    @property
+    def y_base_out(self) -> pd.Series:
+        """
+        Get out-of-sample target base series including out_p0.
+        
+        Returns
+        -------
+        pd.Series
+            Out-of-sample target base series including out_p0 if available.
+        """
+        if self.target_base is None:
+            return pd.Series(dtype=float)
+        
+        # Get out-of-sample indices and add p0 if available
+        idx = self.dm.out_sample_idx
+        if self.dm.out_p0 is not None:
+            idx = idx.union([self.dm.out_p0])
+        
+        return self.y_base_full.reindex(idx)
+
+    @property
+    def y_exposure_full(self) -> pd.Series:
+        """
+        Get full-sample target exposure series.
+        
+        Returns
+        -------
+        pd.Series
+            Full-sample target exposure series for in-sample and out-sample indices.
+        """
+        if self.target_exposure is None:
+            return pd.Series(dtype=float)
+        
+        # Get the union of in-sample and out-of-sample indices
+        idx = self.dm.in_sample_idx.union(self.dm.out_sample_idx)
+        
+        # Extract target exposure
+        y_exposure_full = self.dm.internal_data[self.target_exposure].copy()
+        
+        # Align to index
+        y_exposure_full = y_exposure_full.reindex(idx).astype(float)
+        
+        return y_exposure_full
+
+    @property
+    def y_base_fitted_in(self) -> Optional[pd.Series]:
+        """
+        Get in-sample fitted base predictions using base predictor.
+        
+        Returns
+        -------
+        Optional[pd.Series]
+            In-sample fitted base predictions excluding p0, None if there are outliers 
+            or no base predictor available.
+        """
+        # Return None if there are outliers (outlier_idx is not None and not empty)
+        if self.outlier_idx:
+            return None
+            
+        if self.base_predictor is None or not hasattr(self, 'y_fitted_in') or self.y_fitted_in is None:
+            return pd.Series(dtype=float)
+        
+        if self.dm.p0 is None:
+            return pd.Series(dtype=float)
+        
+        try:
+            base_predictions = self.base_predictor.predict_base(self.y_fitted_in, self.dm.p0)
+            # Exclude p0 from the result
+            if self.dm.p0 in base_predictions.index:
+                base_predictions = base_predictions.drop(self.dm.p0)
+            return base_predictions
+        except Exception:
+            # Return empty series if conversion fails
+            return pd.Series(dtype=float)
+
+    @property 
+    def y_base_pred_out(self) -> Optional[pd.Series]:
+        """
+        Get out-of-sample base predictions using base predictor.
+        
+        Returns
+        -------
+        Optional[pd.Series]
+            Out-of-sample base predictions excluding out_p0, None if there are outliers
+            or no base predictor available.
+        """
+        # Return None if there are outliers (outlier_idx is not None and not empty)
+        if self.outlier_idx:
+            return None
+            
+        if self.base_predictor is None or self.dm.out_p0 is None:
+            return pd.Series(dtype=float)
+        
+        # Get out-of-sample predictions
+        y_pred_out = self.y_pred_out
+        if y_pred_out.empty:
+            return pd.Series(dtype=float)
+        
+        try:
+            base_predictions = self.base_predictor.predict_base(y_pred_out, self.dm.out_p0)
+            # Exclude out_p0 from the result
+            if self.dm.out_p0 in base_predictions.index:
+                base_predictions = base_predictions.drop(self.dm.out_p0)
+            return base_predictions
+        except Exception:
+            # Return empty series if conversion fails
+            return pd.Series(dtype=float)
 
     @property
     def report(self) -> ModelReportBase:
@@ -626,6 +819,9 @@ class OLS(ModelBase):
         test_update_func: Optional[Callable[['ModelBase'], Dict[str, Any]]] = None,
         testset_cls: Type = TestSet,
         scen_cls: Optional[Type] = None,
+        model_type: Optional[Type] = None,
+        target_base: Optional[str] = None,
+        target_exposure: Optional[str] = None,
         report_cls: Type = OLS_ModelReport,
         X: Optional[pd.DataFrame] = None,
         y: Optional[pd.Series] = None,
@@ -642,6 +838,9 @@ class OLS(ModelBase):
             test_update_func=test_update_func,
             testset_cls=testset_cls,
             scen_cls=scen_cls,
+            model_type=model_type,
+            target_base=target_base,
+            target_exposure=target_exposure,
             report_cls=report_cls,
             X=X,
             y=y,
