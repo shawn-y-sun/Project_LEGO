@@ -1,5 +1,5 @@
 import pandas as pd
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Tuple
 import warnings
 import matplotlib.pyplot as plt
 import os
@@ -939,7 +939,7 @@ class ScenManager:
     def plot_forecasts(
         self,
         scen_set: str,
-        forecast_data: Optional[pd.DataFrame] = None,
+        forecast_data: Optional[Union[pd.DataFrame, Tuple[pd.DataFrame, pd.DataFrame]]] = None,
         figsize: tuple = (8, 4),
         style: Optional[Dict[str, Dict[str, Any]]] = None,
         title_prefix: str = "",
@@ -957,11 +957,12 @@ class ScenManager:
         ----------
         scen_set : str
             Name of the scenario set being plotted
-        forecast_data : pd.DataFrame, optional
-            DataFrame containing forecast data. If None, will use either
-            forecast_y_qtr_df or forecast_y_df based on show_qtr parameter
+        forecast_data : Union[pd.DataFrame, Tuple[pd.DataFrame, pd.DataFrame]], optional
+            DataFrame containing forecast data, or tuple of (target_df, base_df) for side-by-side plots.
+            If None, will use either forecast_y_qtr_df or forecast_y_df based on show_qtr parameter.
+            If tuple is provided, creates side-by-side plots: left for target variable, right for base variable.
         figsize : tuple, default=(8, 4)
-            Figure size as (width, height)
+            Figure size as (width, height). For side-by-side plots, width is automatically doubled.
         style : Dict[str, Dict[str, Any]], optional
             Styling options for each scenario. Format:
             {scenario_name: {style_param: value}}
@@ -987,137 +988,162 @@ class ScenManager:
         - Creates new figures without affecting existing plots
         - Works with both quarterly and original frequency data
         - Handles both YY-MM format and 'Pre-P0' period indicators
+        - Supports side-by-side plotting when forecast_data is a tuple
         """
+        # Determine if we have single or dual plotting
+        is_dual_plot = isinstance(forecast_data, tuple)
+        
         # Get forecast data if not provided
         if forecast_data is None:
             if show_qtr:
-                forecast_data = self.forecast_y_qtr_df[scen_set]
+                target_df = self.forecast_y_qtr_df[scen_set]
+                base_df = self.forecast_y_base_qtr_df.get(scen_set) if hasattr(self, 'forecast_y_base_qtr_df') else None
             else:
-                forecast_data = self.forecast_y_df[scen_set]
+                target_df = self.forecast_y_df[scen_set]
+                base_df = self.forecast_y_base_df.get(scen_set) if hasattr(self, 'forecast_y_base_df') else None
+            
+            # Create tuple if base data is available
+            if base_df is not None and not base_df.empty:
+                forecast_data = (target_df, base_df)
+                is_dual_plot = True
+            else:
+                forecast_data = target_df
+                is_dual_plot = False
         
-        df = forecast_data.copy()
-        
-        # Create new figure
-        fig = plt.figure(figsize=figsize)
-        ax = fig.add_subplot(111)
-        
-        # Handle different data structures
-        if 'Period' not in df.columns:
-            # Aggregated data with period labels as index
-            period_labels = df.index.tolist()
-            x_positions = list(range(len(period_labels)))
-            
-            # Get scenario names and sort for consistent ordering
-            scenarios = sorted([col for col in df.columns if col != 'Fitted'])
-            
-            # Identify historical periods and forecast periods
-            p0_position = None
-            if 'P0' in period_labels:
-                p0_position = period_labels.index('P0')
-            
-            # Plot fitted values for historical periods and P0
-            if 'Fitted' in df.columns:
-                fitted_data = df['Fitted'].dropna()
-                if not fitted_data.empty:
-                    fitted_x = []
-                    fitted_y = []
-                    for i, (period, value) in enumerate(fitted_data.items()):
-                        if not pd.isna(value) and (not period.startswith('P') or period == 'P0'):
-                            fitted_x.append(x_positions[period_labels.index(period)])
-                            fitted_y.append(value)
-                    
-                    if fitted_x:
-                        ax.plot(fitted_x, fitted_y, color='black', linestyle='-', 
-                               label='Fitted', linewidth=2)
-            
-            # Plot each scenario (forecast periods only)
-            for i, scenario in enumerate(scenarios):
-                # Get style for this scenario
-                if style and scenario in style:
-                    scen_style = style[scenario]
-                    if 'linewidth' not in scen_style:
-                        scen_style['linewidth'] = 2
-                else:
-                    color = self.scenario_colors[i % len(self.scenario_colors)]
-                    scen_style = {
-                        'color': color,
-                        'linestyle': '-',
-                        'label': scenario,
-                        'linewidth': 2
-                    }
-                
-                # Plot scenario data for forecast periods
-                scenario_data = df[scenario].dropna()
-                if not scenario_data.empty:
-                    forecast_x = []
-                    forecast_y = []
-                    for period, value in scenario_data.items():
-                        if not pd.isna(value) and period.startswith('P'):
-                            forecast_x.append(x_positions[period_labels.index(period)])
-                            forecast_y.append(value)
-                    
-                    if forecast_x:
-                        ax.plot(forecast_x, forecast_y, **scen_style)
-            
-            # Add vertical line at P0
-            if p0_position is not None:
-                ax.axvline(x=p0_position, color='gray', linestyle='--', alpha=0.7)
-                ax.text(p0_position, ax.get_ylim()[1], 'P0',
-                       rotation=0, ha='center', va='bottom', fontsize=8)
-            
-            # Set x-axis ticks and labels
-            ax.set_xticks(x_positions)
-            ax.set_xticklabels(period_labels, rotation=45, ha='right', fontsize=8)
-            
+        # Set up figure and axes
+        if is_dual_plot:
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(figsize[0] * 2, figsize[1]))
+            target_df, base_df = forecast_data
+            axes_data = [(ax1, target_df.copy(), "Target Variable"), (ax2, base_df.copy(), "Base Variable")]
         else:
-            # Original frequency data with DatetimeIndex and Period column
-            scenarios = sorted([col for col in df.columns if col not in ['Period', 'Fitted']])
-            
-            # Plot fitted values for Pre-P0 and P0 periods
-            if 'Fitted' in df.columns:
-                fitted_mask = df['Period'].isin(['Pre-P0', 'P0'])
-                fitted_data = df[fitted_mask]['Fitted'].dropna()
-                if not fitted_data.empty:
-                    ax.plot(fitted_data.index, fitted_data.values, color='black', 
-                           linestyle='-', label='Fitted', linewidth=2)
-            
-            # Plot each scenario (P0 and forecast periods)
-            for i, scenario in enumerate(scenarios):
-                if style and scenario in style:
-                    scen_style = style[scenario]
-                    if 'linewidth' not in scen_style:
-                        scen_style['linewidth'] = 2
-                else:
-                    color = self.scenario_colors[i % len(self.scenario_colors)]
-                    scen_style = {
-                        'color': color,
-                        'linestyle': '-',
-                        'label': scenario,
-                        'linewidth': 2
-                    }
-                
-                # Plot scenario data for forecast periods
-                forecast_mask = df['Period'].str.startswith('P')
-                scenario_data = df[forecast_mask][scenario].dropna()
-                if not scenario_data.empty:
-                    ax.plot(scenario_data.index, scenario_data.values, **scen_style)
-            
-            # Add vertical line at P0
-            p0_date = df[df['Period'] == 'P0'].index
-            if len(p0_date) > 0:
-                ax.axvline(x=p0_date[0], color='gray', linestyle='--', alpha=0.7)
-                ax.text(p0_date[0], ax.get_ylim()[1], 'P0',
-                       rotation=0, ha='center', va='bottom', fontsize=8)
-            
-            # Format x-axis for dates
-            ax.xaxis.set_major_formatter(DateFormatter('%Y-%m'))
-            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=8)
+            fig = plt.figure(figsize=figsize)
+            ax1 = fig.add_subplot(111)
+            df = forecast_data.copy()
+            axes_data = [(ax1, df, "")]
         
-        # Customize plot
-        title = f"{title_prefix}Scenario Forecast - {scen_set}" if title_prefix else f"Scenario Forecast - {scen_set}"
-        ax.set_title(title, fontsize=10)
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3)
+        # Plot each subplot
+        for ax, df, subplot_title in axes_data:
+            # Handle different data structures
+            if 'Period' not in df.columns:
+                # Aggregated data with period labels as index
+                period_labels = df.index.tolist()
+                x_positions = list(range(len(period_labels)))
+                
+                # Get scenario names and sort for consistent ordering
+                scenarios = sorted([col for col in df.columns if col != 'Fitted'])
+                
+                # Identify historical periods and forecast periods
+                p0_position = None
+                if 'P0' in period_labels:
+                    p0_position = period_labels.index('P0')
+                
+                # Plot fitted values for historical periods and P0
+                if 'Fitted' in df.columns:
+                    fitted_data = df['Fitted'].dropna()
+                    if not fitted_data.empty:
+                        fitted_x = []
+                        fitted_y = []
+                        for i, (period, value) in enumerate(fitted_data.items()):
+                            if not pd.isna(value) and (not period.startswith('P') or period == 'P0'):
+                                fitted_x.append(x_positions[period_labels.index(period)])
+                                fitted_y.append(value)
+                        
+                        if fitted_x:
+                            ax.plot(fitted_x, fitted_y, color='black', linestyle='-', 
+                                   label='Fitted', linewidth=2)
+                
+                # Plot each scenario (forecast periods only)
+                for i, scenario in enumerate(scenarios):
+                    # Get style for this scenario
+                    if style and scenario in style:
+                        scen_style = style[scenario]
+                        if 'linewidth' not in scen_style:
+                            scen_style['linewidth'] = 2
+                    else:
+                        color = self.scenario_colors[i % len(self.scenario_colors)]
+                        scen_style = {
+                            'color': color,
+                            'linestyle': '-',
+                            'label': scenario,
+                            'linewidth': 2
+                        }
+                    
+                    # Plot scenario data for forecast periods
+                    scenario_data = df[scenario].dropna()
+                    if not scenario_data.empty:
+                        forecast_x = []
+                        forecast_y = []
+                        for period, value in scenario_data.items():
+                            if not pd.isna(value) and period.startswith('P'):
+                                forecast_x.append(x_positions[period_labels.index(period)])
+                                forecast_y.append(value)
+                        
+                        if forecast_x:
+                            ax.plot(forecast_x, forecast_y, **scen_style)
+                
+                # Add vertical line at P0 (without label)
+                if p0_position is not None:
+                    ax.axvline(x=p0_position, color='gray', linestyle='--', alpha=0.7)
+                
+                # Set x-axis ticks and labels
+                ax.set_xticks(x_positions)
+                ax.set_xticklabels(period_labels, rotation=45, ha='right', fontsize=8)
+                
+            else:
+                # Original frequency data with DatetimeIndex and Period column
+                scenarios = sorted([col for col in df.columns if col not in ['Period', 'Fitted']])
+                
+                # Plot fitted values for Pre-P0 and P0 periods
+                if 'Fitted' in df.columns:
+                    fitted_mask = df['Period'].isin(['Pre-P0', 'P0'])
+                    fitted_data = df[fitted_mask]['Fitted'].dropna()
+                    if not fitted_data.empty:
+                        ax.plot(fitted_data.index, fitted_data.values, color='black', 
+                               linestyle='-', label='Fitted', linewidth=2)
+                
+                # Plot each scenario (P0 and forecast periods)
+                for i, scenario in enumerate(scenarios):
+                    if style and scenario in style:
+                        scen_style = style[scenario]
+                        if 'linewidth' not in scen_style:
+                            scen_style['linewidth'] = 2
+                    else:
+                        color = self.scenario_colors[i % len(self.scenario_colors)]
+                        scen_style = {
+                            'color': color,
+                            'linestyle': '-',
+                            'label': scenario,
+                            'linewidth': 2
+                        }
+                    
+                    # Plot scenario data for forecast periods
+                    forecast_mask = df['Period'].str.startswith('P')
+                    scenario_data = df[forecast_mask][scenario].dropna()
+                    if not scenario_data.empty:
+                        ax.plot(scenario_data.index, scenario_data.values, **scen_style)
+                
+                # Add vertical line at P0 (without label)
+                p0_date = df[df['Period'] == 'P0'].index
+                if len(p0_date) > 0:
+                    ax.axvline(x=p0_date[0], color='gray', linestyle='--', alpha=0.7)
+                
+                # Format x-axis for dates
+                ax.xaxis.set_major_formatter(DateFormatter('%Y-%m'))
+                plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=8)
+            
+            # Customize subplot
+            if is_dual_plot:
+                title = f"{subplot_title}"
+            else:
+                title = f"{title_prefix}Scenario Forecast - {scen_set}" if title_prefix else f"Scenario Forecast - {scen_set}"
+            ax.set_title(title, fontsize=10)
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
+        
+        # Set overall title for dual plots
+        if is_dual_plot:
+            overall_title = f"{title_prefix}Scenario Forecast - {scen_set}" if title_prefix else f"Scenario Forecast - {scen_set}"
+            fig.suptitle(overall_title, fontsize=12)
         
         # Adjust layout to prevent label cutoff
         plt.tight_layout()
@@ -1367,6 +1393,7 @@ class ScenManager:
         """
         # Get forecast DataFrames and scenario feature matrices
         forecast_dfs = self.forecast_y_qtr_df if show_qtr else self.forecast_y_df
+        base_forecast_dfs = self.forecast_y_base_qtr_df if show_qtr else self.forecast_y_base_df
         X_scens = self.X_scens
         
         # Store all figures for return
@@ -1375,10 +1402,19 @@ class ScenManager:
         for scen_set in forecast_dfs.keys():
             all_figures[scen_set] = {}
             
+            # Prepare forecast data - combine target and base if available
+            target_df = forecast_dfs[scen_set]
+            base_df = base_forecast_dfs.get(scen_set) if base_forecast_dfs else None
+            
+            if base_df is not None and not base_df.empty:
+                forecast_data = (target_df, base_df)
+            else:
+                forecast_data = target_df
+            
             # Create forecast plot
             forecast_fig = self.plot_forecasts(
                 scen_set=scen_set,
-                forecast_data=forecast_dfs[scen_set],
+                forecast_data=forecast_data,
                 figsize=figsize,
                 style=style,
                 title_prefix=title_prefix,
