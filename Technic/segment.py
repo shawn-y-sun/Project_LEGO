@@ -973,7 +973,14 @@ class Segment:
         """
         # 1) Reuse existing searcher if present, else create & store one
         if self.searcher is None:
-            self.searcher = self.search_cls(self.dm, self.target, self.model_cls)
+            self.searcher = self.search_cls(
+                self.dm, 
+                self.target, 
+                self.model_cls,
+                model_type=self.model_type,
+                target_base=self.target_base,
+                target_exposure=self.target_exposure
+            )
         searcher = self.searcher
 
         # 2) Run the search (populates searcher.top_cms; no return value)
