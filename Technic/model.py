@@ -14,6 +14,7 @@ from statsmodels.stats.outliers_influence import variance_inflation_factor
 from .test import *
 from .report import ModelReportBase, OLS_ModelReport
 from .testset import ppnr_ols_testset_func, TestSet
+from .modeltype import RateLevel, BalanceLevel
 
 class ModelBase(ABC):
     """
@@ -38,6 +39,12 @@ class ModelBase(ABC):
         from the data. Each label must exist within the sample period.
     target : str
         Name of the target column in the DataManager's internal_data.
+    model_type : type, optional
+        ModelType subclass for converting predictions to base variables.
+    target_base : str, optional
+        Name of the base variable of interest (highly recommended if available).
+    target_exposure : str, optional
+        Name of the exposure variable (required for Ratio model types).
     testset_func : callable, optional
         Builds initial mapping of tests.
     test_update_func : callable, optional
@@ -46,12 +53,6 @@ class ModelBase(ABC):
         Class for aggregating ModelTestBase instances into a TestSet.
     scen_cls : type, optional
         Class to use for scenario management. If None, defaults to ScenManager.
-    model_type : type, optional
-        ModelType subclass for converting predictions to base variables.
-    target_base : str, optional
-        Name of the base variable of interest (highly recommended if available).
-    target_exposure : str, optional
-        Name of the exposure variable (required for Ratio model types).
     report_cls : type, optional
         Class for generating model reports.
     X : DataFrame, optional
@@ -77,13 +78,13 @@ class ModelBase(ABC):
         sample: str = 'in',
         outlier_idx: Optional[List[Any]] = None,
         target: str = None,
+        model_type: Optional[Type] = None,
+        target_base: Optional[str] = None,
+        target_exposure: Optional[str] = None,
         testset_func: Optional[Callable[['ModelBase'], Dict[str, ModelTestBase]]] = None,
         test_update_func: Optional[Callable[['ModelBase'], Dict[str, Any]]] = None,
         testset_cls: Type = TestSet,
         scen_cls: Optional[Type] = None,
-        model_type: Optional[Type] = None,
-        target_base: Optional[str] = None,
-        target_exposure: Optional[str] = None,
         report_cls: Optional[Type] = None,
         X: Optional[pd.DataFrame] = None,
         y: Optional[pd.Series] = None,
@@ -391,6 +392,149 @@ class ModelBase(ABC):
         """
         ...
 
+    def lookback_predict(
+        self,
+        df_internal: pd.DataFrame,
+        df_mev: pd.DataFrame,
+        y: Optional[pd.Series] = None,
+        time_frame: Tuple[str, str] = None
+    ) -> pd.Series:
+        """
+        Generate iterative predictions with lookback handling for conditional variables.
+        
+        This method is designed for scenario prediction where conditional variables (like BO)
+        need to be updated iteratively based on predicted target values. It's primarily used
+        when predicting on scenario data (dm.scen_internal_data and dm.scen_mevs) rather than
+        modeling data, since scenario variables haven't been pre-adjusted for conditional effects.
+        
+        The method performs iterative prediction:
+        1. Builds features for the entire time frame
+        2. Predicts one period at a time
+        3. Updates the target series with each prediction
+        4. Rebuilds features to capture conditional variable effects
+        5. Continues until all periods are predicted
+        
+        Parameters
+        ----------
+        df_internal : pd.DataFrame
+            Internal data DataFrame, ideally from dm.scen_internal_data.
+            Should contain the target variable for historical periods.
+        df_mev : pd.DataFrame
+            MEV data DataFrame, ideally from dm.scen_mevs.
+            Should have the same scenario set and scenario name as df_internal.
+        y : pd.Series, optional
+            Historical target values before prediction period. If None, uses self.y_full.
+        time_frame : tuple of str
+            Start and end dates for prediction horizon, e.g., ('2025-01-31', '2025-06-30').
+            Dates should be in a format pandas can parse.
+            
+        Returns
+        -------
+        tuple
+            (predicted_series, X_new) where:
+            - predicted_series: pd.Series of predicted target values for the specified time frame
+            - X_new: pd.DataFrame of the latest feature matrix after all predictions
+            
+        Raises
+        ------
+        ValueError
+            If no lookback variables found, insufficient historical data, or invalid time_frame.
+        RuntimeError
+            If model is not fitted.
+            
+        Example
+        -------
+        >>> # Get scenario data
+        >>> scen_internal = dm.scen_internal_data['EWST2024']['Base']
+        >>> scen_mev = dm.scen_mevs['EWST2024']['Base']
+        >>> 
+        >>> # Predict with lookback handling for scenario
+        >>> predictions, X_final = model.lookback_predict(
+        ...     df_internal=scen_internal,
+        ...     df_mev=scen_mev,
+        ...     time_frame=('2025-01-31', '2025-06-30')
+        ... )
+        """
+        if not self.is_fitted:
+            raise RuntimeError("Model must be fitted before making predictions.")
+        
+        if time_frame is None:
+            raise ValueError("time_frame must be specified as (start_date, end_date)")
+        
+        # Parse time frame dates
+        start_date = pd.to_datetime(time_frame[0])
+        end_date = pd.to_datetime(time_frame[1])
+        
+        if start_date >= end_date:
+            raise ValueError("Start date must be before end date")
+        
+        # Get lookback variables from spec_map
+        lookback_vars = self.spec_map.get('lookback_var', [])
+        
+        if not lookback_vars:
+            # No lookback variables, use standard feature building and prediction
+            X_full = self.dm.build_features(self.specs, df_internal, df_mev)
+            X_new = X_full[(X_full.index >= start_date) & (X_full.index <= end_date)]
+            return self.predict(X_new)
+        
+        # Get the maximum lookback_n required
+        max_lookback_n = max(var.lookback_n for var in lookback_vars)
+        
+        # Get historical target values
+        if y is None:
+            y = self.y_full
+        
+        # Ensure we have enough historical data
+        if len(y) < max_lookback_n:
+            raise ValueError(
+                f"Insufficient historical data. Need at least {max_lookback_n} periods, "
+                f"but only have {len(y)} periods."
+            )
+        
+        # Get the latest lookback_n periods of target values before start date
+        y_lookback = y[y.index < start_date].tail(max_lookback_n)
+        
+        if len(y_lookback) < max_lookback_n:
+            raise ValueError(
+                f"Insufficient historical data before {start_date}. "
+                f"Need at least {max_lookback_n} periods, but only have {len(y_lookback)}."
+            )
+        
+        # Create a copy of df_internal and replace target series with lookback data
+        df_internal_lb = df_internal.copy()
+        
+        # Replace entire target series with lookback data
+        df_internal_lb[self.target] = y_lookback
+        
+        # Build initial features
+        X_full = self.dm.build_features(self.specs, df_internal_lb, df_mev)
+        X_new = X_full[(X_full.index >= start_date) & (X_full.index <= end_date)]
+        
+        if X_new.empty:
+            raise ValueError(f"No data found in time frame {time_frame}")
+        
+        # Get all indices for iteration
+        prediction_indices = X_new.index.tolist()
+        
+        # Iterative prediction
+        for idx in prediction_indices:
+            # Predict for current index only
+            X_current = X_new.loc[[idx]]
+            y_hat = self.predict(X_current).iloc[0]
+            
+            # Update target series in df_internal_lb
+            df_internal_lb.loc[idx, self.target] = y_hat
+            
+            # Rebuild features with updated target series
+            X_full = self.dm.build_features(self.specs, df_internal_lb, df_mev)
+            X_new = X_full[(X_full.index >= start_date) & (X_full.index <= end_date)]
+        
+        # Return the predicted target series from the time frame and the latest X_new
+        predicted_series = df_internal_lb.loc[prediction_indices, self.target].copy()
+        predicted_series.name = self.target
+        
+        return predicted_series, X_new
+
     @property
     def y_pred_out(self) -> pd.Series:
         """
@@ -496,7 +640,10 @@ class ModelBase(ABC):
     @property
     def y_base_fitted_in(self) -> Optional[pd.Series]:
         """
-        Get in-sample fitted base predictions using base predictor.
+        Get in-sample fitted base predictions.
+        
+        For level models (RateLevel, BalanceLevel), directly returns y_fitted_in.
+        For other models, uses base predictor to convert predictions to base variable.
         
         Returns
         -------
@@ -508,6 +655,14 @@ class ModelBase(ABC):
         if self.outlier_idx:
             return None
             
+        # For level models (RateLevel, BalanceLevel), return fitted values directly
+        if self.model_type is not None:
+            if self.model_type in {RateLevel, BalanceLevel}:
+                if not hasattr(self, 'y_fitted_in') or self.y_fitted_in is None:
+                    return pd.Series(dtype=float)
+                return self.y_fitted_in
+        
+        # For other models, use base predictor
         if self.base_predictor is None or not hasattr(self, 'y_fitted_in') or self.y_fitted_in is None:
             return pd.Series(dtype=float)
         
@@ -527,7 +682,10 @@ class ModelBase(ABC):
     @property 
     def y_base_pred_out(self) -> Optional[pd.Series]:
         """
-        Get out-of-sample base predictions using base predictor.
+        Get out-of-sample base predictions.
+        
+        For level models (RateLevel, BalanceLevel), directly returns y_pred_out.
+        For other models, uses base predictor to convert predictions to base variable.
         
         Returns
         -------
@@ -539,6 +697,15 @@ class ModelBase(ABC):
         if self.outlier_idx:
             return None
             
+        # For level models (RateLevel, BalanceLevel), return predicted values directly
+        if self.model_type is not None:
+            if self.model_type in {RateLevel, BalanceLevel}:
+                y_pred_out = self.y_pred_out
+                if y_pred_out.empty:
+                    return pd.Series(dtype=float)
+                return y_pred_out
+        
+        # For other models, use base predictor
         if self.base_predictor is None or self.dm.out_p0 is None:
             return pd.Series(dtype=float)
         
@@ -652,13 +819,15 @@ class ModelBase(ABC):
             - 'GroupTest': tuples of variable names for group F-tests (only full monthly/quarterly dummies)
             - 'StationarityTest': variable names applicable for stationarity tests
             - 'SignCheck': Feature instances with exp_sign attribute
+            - 'lookback_var': CondVar objects with lookback_n > 0
         """
         if self.specs is None:
             return {
                 'CoefTest': [],
                 'GroupTest': [],
                 'StationarityTest': [],
-                'SignCheck': []
+                'SignCheck': [],
+                'lookback_var': []
             }
         
         # Import here to avoid circular imports
@@ -668,6 +837,7 @@ class ModelBase(ABC):
         group_test_vars: List[Tuple[str, ...]] = []
         stationarity_test_vars: List[str] = []
         sign_check_features: List[Feature] = []
+        lookback_vars: List[Any] = []
 
         def _flatten(items):
             """Recursively flatten nested lists but leave tuples intact."""
@@ -760,6 +930,10 @@ class ModelBase(ABC):
                     # Check for SignCheck eligibility (Features with exp_sign attribute)
                     if hasattr(spec, 'exp_sign'):
                         sign_check_features.append(spec)
+                    
+                    # Check for lookback_var eligibility (CondVar objects with lookback_n > 0)
+                    if hasattr(spec, 'lookback_n') and spec.lookback_n > 0:
+                        lookback_vars.append(spec)
                         
                 else:
                     # String specifications
@@ -770,7 +944,8 @@ class ModelBase(ABC):
             'CoefTest': coef_test_vars,
             'GroupTest': group_test_vars,
             'StationarityTest': stationarity_test_vars,
-            'SignCheck': sign_check_features
+            'SignCheck': sign_check_features,
+            'lookback_var': lookback_vars
         }
 
     def load_testset(
@@ -864,6 +1039,11 @@ class OLS(ModelBase):
         # track covariance type
         self.cov_type: str = 'OLS'
         self.is_fitted = False
+        # Additional attributes for conf_int, AIC, BIC
+        self.conf_int_alpha: float = 0.05
+        self.conf_int_df: Optional[pd.DataFrame] = None
+        self.aic: Optional[float] = None
+        self.bic: Optional[float] = None
 
     def fit(self) -> 'OLS':
         """
@@ -884,6 +1064,7 @@ class OLS(ModelBase):
         self.y_fitted_in = res.fittedvalues
         self.resid = res.resid
         self.bse = res.bse
+        self.se = self.bse
         self.tvalues = res.tvalues
         self.fvalue = res.fvalue
         self.f_pvalue = res.f_pvalue
@@ -894,6 +1075,15 @@ class OLS(ModelBase):
             for i, col in enumerate(Xc.columns)
         })
         self.is_fitted = True
+
+        # Set initial conf_int, AIC, BIC
+        self.conf_int_df = pd.DataFrame(
+            self.fitted.conf_int(alpha=self.conf_int_alpha),
+            index=self.params.index,
+            columns=[0, 1]
+        )
+        self.aic = self.fitted.aic
+        self.bic = self.fitted.bic
 
         # Residual diagnostics
         ac_test = AutocorrTest(
@@ -929,11 +1119,20 @@ class OLS(ModelBase):
             # ensure pandas Series for consistency
             idx = self.params.index
             self.bse = pd.Series(robust.bse, index=idx)
+            self.se = self.bse
             self.tvalues = pd.Series(robust.tvalues, index=idx)
             self.pvalues = pd.Series(robust.pvalues, index=idx)
             self.fvalue = robust.fvalue
             self.f_pvalue = robust.f_pvalue
             self.llf = robust.llf  # Update log-likelihood after robust covariance estimation
+            # Update conf_int, AIC, BIC after robust covariance estimation
+            self.conf_int_df = pd.DataFrame(
+                self.fitted.conf_int(alpha=self.conf_int_alpha),
+                index=self.params.index,
+                columns=[0, 1]
+            )
+            self.aic = self.fitted.aic
+            self.bic = self.fitted.bic
         else:
             self.cov_type = 'NR'
         
@@ -954,6 +1153,103 @@ class OLS(ModelBase):
         Xc_new = sm.add_constant(X_new, has_constant='add')
         return self.fitted.predict(Xc_new)
     
+    def predict_param_sensitivity(self, X_new: pd.DataFrame, param: str, shock: int) -> pd.Series:
+        """
+        Predict with parameter sensitivity testing by applying standard error shocks to coefficients.
+        
+        This method adjusts a specific parameter's coefficient by adding a multiple of its 
+        standard error, then uses the adjusted coefficients to make predictions.
+        
+        Parameters
+        ----------
+        X_new : pd.DataFrame
+            Independent variables on which to make predictions.
+        param : str
+            Name of the parameter whose coefficient will be shocked.
+        shock : int
+            Number of standard errors to apply (e.g., 1, 2, -1, -2).
+            Positive values increase the coefficient, negative values decrease it.
+        
+        Returns
+        -------
+        pd.Series
+            Predictions using the shocked parameter coefficients.
+        
+        Example
+        -------
+        >>> # Predict with +1 standard error shock to 'GDP' parameter
+        >>> predictions = model.predict_sensitivity(X_new, 'GDP', 1)
+        >>> 
+        >>> # Predict with -2 standard error shock to 'UNRATE' parameter  
+        >>> predictions = model.predict_sensitivity(X_new, 'UNRATE', -2)
+        """
+        if not self.is_fitted or self.fitted is None:
+            raise RuntimeError("Model has not been fitted yet.")
+        
+        if param not in self.params.index:
+            raise ValueError(f"Parameter '{param}' not found in model parameters.")
+        
+        # Get current coefficients and create a copy
+        coeffs = self.params.copy()
+        
+        # Adjust the specified parameter's coefficient
+        coeffs[param] = coeffs[param] + shock * self.se[param]
+        
+        # Add constant to X_new
+        Xc_new = sm.add_constant(X_new, has_constant='add')
+        
+        # Make predictions using the adjusted coefficients
+        predictions = Xc_new.dot(coeffs)
+        
+        return predictions
+    
+    def predict_input_sensitivity(self, X_new: pd.DataFrame, param: str, shock: int, std: float) -> pd.Series:
+        """
+        Predict with input sensitivity testing by applying standard deviation shocks to independent variable values.
+        
+        This method adjusts a specific independent variable's values by adding a multiple of its 
+        standard deviation, then uses the adjusted input data to make predictions.
+        
+        Parameters
+        ----------
+        X_new : pd.DataFrame
+            Independent variables on which to make predictions.
+        param : str
+            Name of the independent variable whose values will be shocked.
+        shock : int
+            Number of standard deviations to apply (e.g., 1, 2, -1, -2).
+            Positive values increase the input values, negative values decrease them.
+        std : float
+            Standard deviation of the parameter's input history.
+        
+        Returns
+        -------
+        pd.Series
+            Predictions using the shocked input values.
+        
+        Example
+        -------
+        >>> # Predict with +1 standard deviation shock to 'GDP' input values
+        >>> predictions = model.predict_input_sensitivity(X_new, 'GDP', 1, 0.5)
+        >>> 
+        >>> # Predict with -2 standard deviation shock to 'UNRATE' input values  
+        >>> predictions = model.predict_input_sensitivity(X_new, 'UNRATE', -2, 0.3)
+        """
+        if not self.is_fitted or self.fitted is None:
+            raise RuntimeError("Model has not been fitted yet.")
+        
+        if param not in X_new.columns:
+            raise ValueError(f"Parameter '{param}' not found in X_new columns.")
+        
+        # Create a copy of X_new to avoid modifying the original
+        X_new_adjusted = X_new.copy()
+        
+        # Adjust the specified parameter's input values
+        X_new_adjusted[param] = X_new_adjusted[param] + shock * std
+        
+        # Use the standard predict method with adjusted input
+        return self.predict(X_new_adjusted)
+    
     def conf_int(self, alpha: float = 0.05) -> pd.DataFrame:
         """
         Compute confidence intervals for the fitted parameters.
@@ -967,36 +1263,57 @@ class OLS(ModelBase):
         """
         if not self.is_fitted or self.fitted is None:
             raise RuntimeError("Model has not been fitted yet.")
-        return self.fitted.conf_int(alpha=alpha)
+        
+        # Update stored alpha and confidence intervals if different
+        if alpha != self.conf_int_alpha:
+            self.conf_int_alpha = alpha
+            self.conf_int_df = pd.DataFrame(
+                self.fitted.conf_int(alpha=alpha),
+                index=self.params.index,
+                columns=[0, 1]
+            )
+        
+        return self.conf_int_df
     
     @property
-    def param_measures(self) -> Dict[str, Dict[str, Any]]:
+    def param_measures(self) -> pd.DataFrame:
         """
-        Parameter measures: coefficient, pvalue, VIF, and standard error for each term.
+        Parameter measures: coefficient, pvalue, VIF, standard error, and confidence intervals.
+        
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with parameter measures including coef, pvalue, vif, se, CI_2_5, 
+            and CI_97_5.
         """
-        return {
-            var: {
+        if not self.is_fitted or self.fitted is None:
+            return pd.DataFrame()
+        
+        # Create base parameter measures
+        param_data = []
+        for var in self.params.index:
+            param_dict = {
+                'variable': var,
                 'coef': float(self.params[var]),
                 'pvalue': float(self.pvalues[var]),
-                'vif': float(self.vif.get(var, np.nan)),
-                'std': float(self.bse.get(var, np.nan))
+                'vif': float(self.vif.get(var, np.nan)) if var != 'const' else np.nan,
+                'se': float(self.bse.get(var, np.nan))
             }
-            for var in self.params.index
-        }
-
-    @property
-    def aic(self) -> float:
-        """Akaike Information Criterion"""
-        if self.fitted is None:
-            return None
-        return self.fitted.aic
-
-    @property
-    def bic(self) -> float:
-        """Bayesian Information Criterion"""
-        if self.fitted is None:
-            return None
-        return self.fitted.bic
+            
+            # Add confidence intervals if available
+            if self.conf_int_df is not None and var in self.conf_int_df.index:
+                param_dict['CI_2_5'] = float(self.conf_int_df.loc[var, 0])
+                param_dict['CI_97_5'] = float(self.conf_int_df.loc[var, 1])
+            else:
+                param_dict['CI_2_5'] = np.nan
+                param_dict['CI_97_5'] = np.nan
+            
+            param_data.append(param_dict)
+        
+        # Create DataFrame
+        df = pd.DataFrame(param_data)
+        
+        return df
 
     def __repr__(self) -> str:
         return f'OLS-{self.cov_type}'
