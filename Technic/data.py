@@ -1673,11 +1673,14 @@ class DataManager:
             copied_mev_loader = copy.deepcopy(self._mev_loader)
             
             # Create new DataManager with copied loaders
-            poos_dm = DataManager(
-                internal_loader=copied_internal_loader,
-                mev_loader=copied_mev_loader,
-                poos_periods=self._poos_periods
-            )
+            # Suppress warnings since these are just copies for Walk Forward Testing
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                poos_dm = DataManager(
+                    internal_loader=copied_internal_loader,
+                    mev_loader=copied_mev_loader,
+                    poos_periods=self._poos_periods
+                )
             
             # Copy all cached data to preserve modifications
             if self._internal_data_cache is not None:

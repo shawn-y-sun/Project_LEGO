@@ -1281,7 +1281,13 @@ class OLS(ModelBase):
         if not self.is_fitted or self.fitted is None:
             raise RuntimeError("Model has not been fitted yet.")
         Xc_new = sm.add_constant(X_new, has_constant='add')
-        return self.fitted.predict(Xc_new)
+        predictions = self.fitted.predict(Xc_new)
+        
+        # Convert to pandas Series if it's a numpy array
+        if not isinstance(predictions, pd.Series):
+            predictions = pd.Series(predictions, index=X_new.index, name=self.target)
+        
+        return predictions
     
     def predict_param_shock(self, X_new: pd.DataFrame, param: str, shock: int) -> pd.Series:
         """
@@ -1330,6 +1336,10 @@ class OLS(ModelBase):
         
         # Make predictions using the adjusted coefficients
         predictions = Xc_new.dot(coeffs)
+        
+        # Convert to pandas Series if it's not already
+        if not isinstance(predictions, pd.Series):
+            predictions = pd.Series(predictions, index=X_new.index, name=self.target)
         
         return predictions
     
