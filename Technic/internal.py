@@ -71,8 +71,8 @@ class DataLoader(ABC):
         if freq is not None and freq not in ['M', 'Q']:
             raise ValueError("freq must be either 'M' (monthly) or 'Q' (quarterly)")
         self.freq = freq
-        self.full_sample_start = pd.to_datetime(full_sample_start).normalize() if full_sample_start else None
-        self.full_sample_end = pd.to_datetime(full_sample_end).normalize() if full_sample_end else None
+        self._full_sample_start = pd.to_datetime(full_sample_start).normalize() if full_sample_start else None
+        self._full_sample_end = pd.to_datetime(full_sample_end).normalize() if full_sample_end else None
         
         # Handle scen_p0 (scenario jumpoff date)
         if scen_p0 is not None:
@@ -185,6 +185,62 @@ class DataLoader(ABC):
         if self._internal_data is None:
             raise ValueError("Internal data not loaded. Call `load()` first.")
         return self._internal_data
+
+    @property
+    def full_sample_start(self) -> Optional[pd.Timestamp]:
+        """
+        Get the full sample start date.
+        
+        Returns
+        -------
+        Optional[pd.Timestamp]
+            Start date for full sample period, or None if not set.
+        """
+        return self._full_sample_start
+    
+    @full_sample_start.setter
+    def full_sample_start(self, value: Optional[Union[str, pd.Timestamp]]) -> None:
+        """
+        Set the full sample start date and recalculate indices if applicable.
+        
+        Parameters
+        ----------
+        value : str, pd.Timestamp, or None
+            Start date for full sample period (YYYY-MM-DD format if string).
+        """
+        self._full_sample_start = pd.to_datetime(value).normalize() if value else None
+        
+        # For TimeSeriesLoader subclass, recalculate indices
+        if hasattr(self, '_recalculate_sample_indices'):
+            self._recalculate_sample_indices()
+
+    @property
+    def full_sample_end(self) -> Optional[pd.Timestamp]:
+        """
+        Get the full sample end date.
+        
+        Returns
+        -------
+        Optional[pd.Timestamp]
+            End date for full sample period, or None if not set.
+        """
+        return self._full_sample_end
+    
+    @full_sample_end.setter
+    def full_sample_end(self, value: Optional[Union[str, pd.Timestamp]]) -> None:
+        """
+        Set the full sample end date and recalculate indices if applicable.
+        
+        Parameters
+        ----------
+        value : str, pd.Timestamp, or None
+            End date for full sample period (YYYY-MM-DD format if string).
+        """
+        self._full_sample_end = pd.to_datetime(value).normalize() if value else None
+        
+        # For TimeSeriesLoader subclass, recalculate indices
+        if hasattr(self, '_recalculate_sample_indices'):
+            self._recalculate_sample_indices()
 
     @property
     def in_sample_idx(self) -> pd.Index:
@@ -677,10 +733,10 @@ class TimeSeriesLoader(DataLoader):
             full_sample_end=full_sample_end,
             scen_p0=scen_p0
         )
-        self.in_sample_start = pd.to_datetime(in_sample_start).normalize() if in_sample_start else None
-        self.in_sample_end = pd.to_datetime(in_sample_end).normalize() if in_sample_end else None
+        self._in_sample_start = pd.to_datetime(in_sample_start).normalize() if in_sample_start else None
+        self._in_sample_end = pd.to_datetime(in_sample_end).normalize() if in_sample_end else None
         
-        if self.in_sample_start and self.in_sample_end and self.in_sample_start > self.in_sample_end:
+        if self._in_sample_start and self._in_sample_end and self._in_sample_start > self._in_sample_end:
             raise ValueError("in_sample_start must be before in_sample_end")
 
     def load(
@@ -742,21 +798,7 @@ class TimeSeriesLoader(DataLoader):
         df = self._standardize_index(df, date_col)
         
         # Set sample indices based on time cutoff
-        if self.in_sample_start and self.in_sample_end:
-            self._in_sample_idx = df[
-                (df.index >= self.in_sample_start) & 
-                (df.index <= self.in_sample_end)
-            ].index
-            
-            # Out-of-sample is data after in_sample_end up to full_sample_end
-            out_mask = df.index > self.in_sample_end
-            if self.full_sample_end:
-                out_mask &= df.index <= self.full_sample_end
-            self._out_sample_idx = df[out_mask].index
-        else:
-            self._in_sample_idx = df.index
-            self._out_sample_idx = pd.Index([])
-
+        self._recalculate_sample_indices(df)
         self._internal_data = df
 
     def _standardize_index(self, df: pd.DataFrame, date_col: Optional[str] = None) -> pd.DataFrame:
@@ -826,6 +868,112 @@ class TimeSeriesLoader(DataLoader):
             df.drop(columns=[date_col], inplace=True)
 
         return df.sort_index()
+
+    def _recalculate_sample_indices(self, df: Optional[pd.DataFrame] = None) -> None:
+        """
+        Recalculate in-sample and out-of-sample indices based on current sample period settings.
+        
+        Parameters
+        ----------
+        df : pd.DataFrame, optional
+            DataFrame to use for index calculation. If None, uses self._internal_data.
+            
+        Notes
+        -----
+        This method is called automatically when sample period properties are changed
+        or when data is loaded. It ensures indices are always consistent with the
+        current sample period settings.
+        """
+        if df is None:
+            if self._internal_data is None:
+                return  # No data loaded yet
+            df = self._internal_data
+        
+        # Set sample indices based on time cutoff
+        if self._in_sample_start and self._in_sample_end:
+            self._in_sample_idx = df[
+                (df.index >= self._in_sample_start) & 
+                (df.index <= self._in_sample_end)
+            ].index
+            
+            # Out-of-sample is data after in_sample_end up to full_sample_end
+            out_mask = df.index > self._in_sample_end
+            if self.full_sample_end:
+                out_mask &= df.index <= self.full_sample_end
+            self._out_sample_idx = df[out_mask].index
+        else:
+            self._in_sample_idx = df.index
+            self._out_sample_idx = pd.Index([])
+
+    @property
+    def in_sample_start(self) -> Optional[pd.Timestamp]:
+        """
+        Get the in-sample start date.
+        
+        Returns
+        -------
+        Optional[pd.Timestamp]
+            Start date for in-sample period, or None if not set.
+        """
+        return self._in_sample_start
+    
+    @in_sample_start.setter
+    def in_sample_start(self, value: Optional[Union[str, pd.Timestamp]]) -> None:
+        """
+        Set the in-sample start date and recalculate indices.
+        
+        Parameters
+        ----------
+        value : str, pd.Timestamp, or None
+            Start date for in-sample period (YYYY-MM-DD format if string).
+            
+        Raises
+        ------
+        ValueError
+            If in_sample_start is after in_sample_end.
+        """
+        self._in_sample_start = pd.to_datetime(value).normalize() if value else None
+        
+        if self._in_sample_start and self._in_sample_end and self._in_sample_start > self._in_sample_end:
+            raise ValueError("in_sample_start must be before in_sample_end")
+        
+        # Recalculate indices if data is loaded
+        self._recalculate_sample_indices()
+
+    @property
+    def in_sample_end(self) -> Optional[pd.Timestamp]:
+        """
+        Get the in-sample end date.
+        
+        Returns
+        -------
+        Optional[pd.Timestamp]
+            End date for in-sample period, or None if not set.
+        """
+        return self._in_sample_end
+    
+    @in_sample_end.setter
+    def in_sample_end(self, value: Optional[Union[str, pd.Timestamp]]) -> None:
+        """
+        Set the in-sample end date and recalculate indices.
+        
+        Parameters
+        ----------
+        value : str, pd.Timestamp, or None
+            End date for in-sample period (YYYY-MM-DD format if string).
+            
+        Raises
+        ------
+        ValueError
+            If in_sample_start is after in_sample_end.
+        """
+        self._in_sample_end = pd.to_datetime(value).normalize() if value else None
+        
+        if self._in_sample_start and self._in_sample_end and self._in_sample_start > self._in_sample_end:
+            raise ValueError("in_sample_start must be before in_sample_end")
+        
+        # Recalculate indices if data is loaded
+        self._recalculate_sample_indices()
 
     @property
     def p0(self) -> Optional[pd.Timestamp]:

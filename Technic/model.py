@@ -55,6 +55,8 @@ class ModelBase(ABC):
         Class to use for scenario management. If None, defaults to ScenManager.
     report_cls : type, optional
         Class for generating model reports.
+    stability_test_cls : type, optional
+        Class for model stability testing. If None, defaults to WalkForwardTest.
     X : DataFrame, optional
         Pre-built in-sample features. If provided, overrides feature building.
     y : Series, optional
@@ -86,6 +88,7 @@ class ModelBase(ABC):
         testset_cls: Type = TestSet,
         scen_cls: Optional[Type] = None,
         report_cls: Optional[Type] = None,
+        stability_test_cls: Optional[Type] = None,
         X: Optional[pd.DataFrame] = None,
         y: Optional[pd.Series] = None,
         X_out: Optional[pd.DataFrame] = None,
@@ -163,6 +166,9 @@ class ModelBase(ABC):
         
         # Reporting configuration
         self.report_cls = report_cls
+        
+        # Stability testing configuration
+        self.stability_test_cls = stability_test_cls
         
         # Model metadata
         self.coefs_ = None
@@ -769,6 +775,79 @@ class ModelBase(ABC):
         return self.report_cls(model=self)
 
     @property
+    def stability_test(self) -> Any:
+        """
+        Build and return the stability test instance using stability_test_cls.
+        
+        Creates a stability test instance (e.g., WalkForwardTest) using
+        the model's configuration parameters. This enables model stability analysis
+        through various testing methodologies.
+        
+        Returns
+        -------
+        ModelStabilityTest instance
+            Stability test instance configured with this model's parameters.
+            
+        Raises
+        ------
+        ValueError
+            If no stability_test_cls is provided or required parameters are not available.
+            
+        Example
+        -------
+        >>> # Create model and access stability test
+        >>> model = OLS(dm=dm, specs=['GDP', 'UNRATE'], target='balance')
+        >>> wft = model.stability_test
+        >>> 
+        >>> # Get stability metrics
+        >>> stability_metrics = wft.get_stability_metrics()
+        >>> print(f"R² stability: {stability_metrics['r_squared_stability']}")
+        """
+        if not self.stability_test_cls:
+            raise ValueError("No stability_test_cls provided for building stability test.")
+        
+        # Check that required parameters are available
+        if self.dm is None:
+            raise ValueError("DataManager (dm) is required for stability testing.")
+        if self.specs is None:
+            raise ValueError("Feature specs are required for stability testing.")
+        if self.target is None:
+            raise ValueError("Target variable is required for stability testing.")
+        
+        # Extract model kwargs from current instance
+        model_kwargs = {
+            'sample': getattr(self, 'sample', 'in'),
+            'outlier_idx': getattr(self, 'outlier_idx', []),
+        }
+        
+        # Add optional parameters if they exist
+        if hasattr(self, 'model_type') and self.model_type is not None:
+            model_kwargs['model_type'] = self.model_type
+        if hasattr(self, 'target_base') and self.target_base is not None:
+            model_kwargs['target_base'] = self.target_base
+        if hasattr(self, 'target_exposure') and self.target_exposure is not None:
+            model_kwargs['target_exposure'] = self.target_exposure
+        if hasattr(self, 'testset_func') and self.testset_func is not None:
+            model_kwargs['testset_func'] = self.testset_func
+        if hasattr(self, 'test_update_func') and self.test_update_func is not None:
+            model_kwargs['test_update_func'] = self.test_update_func
+        if hasattr(self, 'testset_cls') and self.testset_cls is not None:
+            model_kwargs['testset_cls'] = self.testset_cls
+        if hasattr(self, 'scen_cls') and self.scen_cls is not None:
+            model_kwargs['scen_cls'] = self.scen_cls
+        if hasattr(self, 'report_cls') and self.report_cls is not None:
+            model_kwargs['report_cls'] = self.report_cls
+        
+        # Create stability test instance
+        return self.stability_test_cls(
+            model_cls=type(self),
+            dm=self.dm,
+            specs=self.specs,
+            target=self.target,
+            model_kwargs=model_kwargs
+        )
+
+    @property
     def in_perf_measures(self) -> pd.Series:
         """
         In-sample performance measures from testset results.
@@ -1042,11 +1121,17 @@ class OLS(ModelBase):
         target_base: Optional[str] = None,
         target_exposure: Optional[str] = None,
         report_cls: Type = OLS_ModelReport,
+        stability_test_cls: Optional[Type] = None,
         X: Optional[pd.DataFrame] = None,
         y: Optional[pd.Series] = None,
         X_out: Optional[pd.DataFrame] = None,
         y_out: Optional[pd.Series] = None
     ):
+        # Set default stability test class if not provided
+        if stability_test_cls is None:
+            from .stability import WalkForwardTest
+            stability_test_cls = WalkForwardTest
+            
         super().__init__(
             dm=dm,
             specs=specs,
@@ -1061,6 +1146,7 @@ class OLS(ModelBase):
             target_base=target_base,
             target_exposure=target_exposure,
             report_cls=report_cls,
+            stability_test_cls=stability_test_cls,
             X=X,
             y=y,
             X_out=X_out,

@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from typing import Any, Dict, List, Optional, Callable, Union, Tuple
 import numpy as np
 from scipy.interpolate import CubicSpline
+import copy
 
 from .internal import *
 from .mev import MEVLoader
@@ -50,6 +51,11 @@ class DataManager:
     mev_loader : MEVLoader
         Pre-loaded MEVLoader instance with MEV data. This loader should already have
         both model and scenario MEV data loaded.
+    poos_periods : List[int], optional
+        List of integers specifying pseudo-out-of-sample period lengths for Walk Forward Test.
+        Each number represents how many periods to use as pseudo out-of-sample ending at
+        the original in-sample end date. If None, defaults to [4, 9, 12] for quarterly 
+        data or [3, 6, 12] for monthly data.
 
     Examples
     --------
@@ -113,6 +119,23 @@ class DataManager:
     >>> # GDP: [GDP, diff(GDP), diff(GDP,2), lag(GDP,1), lag(GDP,2)]
     >>> # UNRATE: [UNRATE, pct_change(UNRATE), lag(UNRATE,1), lag(UNRATE,2)]
 
+    Walk Forward Testing:
+    >>> # Create DataManager with custom POOS periods
+    >>> dm = DataManager(internal_loader, mev_loader, poos_periods=[3, 6, 9])
+    >>> 
+    >>> # Access pseudo-out-of-sample DataManagers for model stability testing
+    >>> poos_dms = dm.poos_dms
+    >>> print(poos_dms.keys())  # dict_keys(['poos_dm_3', 'poos_dm_6', 'poos_dm_9'])
+    >>> 
+    >>> # Each POOS DataManager has adjusted sample splits
+    >>> dm_3 = poos_dms['poos_dm_3']
+    >>> print(f"Original in-sample end: {dm.in_sample_end}")
+    >>> print(f"POOS 3-period in-sample end: {dm_3.in_sample_end}")
+    >>> 
+    >>> # Use for model training and testing
+    >>> train_features = dm_3.build_features(['GDP', 'UNRATE'])  # Adjusted in-sample
+    >>> test_features = dm_3.internal_out  # Last 3 periods as pseudo out-of-sample
+
     Notes
     -----
     - The DataManager maintains caches for all data to improve performance and isolation
@@ -131,10 +154,14 @@ class DataManager:
         self,
         internal_loader: DataLoader,
         mev_loader: MEVLoader,
+        poos_periods: Optional[List[int]] = None,
     ):
         # Store loaders
         self._internal_loader = internal_loader
         self._mev_loader = mev_loader
+        
+        # Store pseudo-out-of-sample periods for Walk Forward Test
+        self._poos_periods = poos_periods
 
         # Cache for interpolated MEV data
         self._mev_cache: Dict[str, pd.DataFrame] = {}
@@ -295,6 +322,36 @@ class DataManager:
                 # Default to monthly if unable to determine
                 self._freq_cache = "M"
         return self._freq_cache
+
+    @property
+    def poos_periods(self) -> List[int]:
+        """
+        Get the pseudo-out-of-sample periods for Walk Forward Test.
+        
+        Returns frequency-based defaults if not specified at initialization:
+        - For quarterly data (freq='Q'): [4, 9, 12] 
+        - For monthly data (freq='M'): [3, 6, 12]
+        
+        Returns
+        -------
+        List[int]
+            List of integers representing the length of pseudo-out-of-sample periods.
+            Each number represents how many periods to use as pseudo out-of-sample 
+            ending at the original in-sample end date.
+        
+        Example
+        -------
+        >>> periods = dm.poos_periods
+        >>> print(f"POOS periods: {periods}")  # [3, 6, 12] for monthly or [4, 9, 12] for quarterly
+        """
+        if self._poos_periods is not None:
+            return self._poos_periods
+        
+        # Return frequency-based defaults
+        if self.freq == 'Q':
+            return [4, 9, 12]
+        else:  # 'M'
+            return [3, 6, 12]
 
     def _combine_mevs(self, qtr_data: pd.DataFrame, mth_data: pd.DataFrame) -> pd.DataFrame:
         """
@@ -1516,6 +1573,144 @@ class DataManager:
             Index of scenario out-of-sample observations, or None if not available.
         """
         return self._internal_loader.scen_out_sample_idx
+
+    @property
+    def poos_dms(self) -> Dict[str, 'DataManager']:
+        """
+        Get a dictionary of DataManager instances with adjusted sample periods for Walk Forward Test.
+        
+        Creates copies of the current DataManager with modified in-sample and out-of-sample scopes
+        for pseudo-out-of-sample testing. Each copy preserves all cached data and applied modifications.
+        
+        For each period in poos_periods:
+        - The last 'n' periods of the original in-sample become pseudo out-of-sample
+        - The remaining original in-sample periods become the new in-sample
+        - The new full_sample_end equals the original in_sample_end
+        
+        Returns
+        -------
+        Dict[str, DataManager]
+            Dictionary mapping period names to DataManager instances.
+            Keys are formatted as 'poos_dm_{period}' (e.g., 'poos_dm_3', 'poos_dm_6').
+            Each DataManager has adjusted sample splits but preserves all data modifications.
+        
+        Examples
+        --------
+        >>> # For monthly data with default poos_periods [3, 6, 12]
+        >>> poos_dms = dm.poos_dms
+        >>> print(poos_dms.keys())  # dict_keys(['poos_dm_3', 'poos_dm_6', 'poos_dm_12'])
+        >>> 
+        >>> # Access a specific pseudo out-of-sample DataManager
+        >>> dm_6 = poos_dms['poos_dm_6']
+        >>> print(f"Original in-sample end: {dm.in_sample_end}")
+        >>> print(f"POOS 6-period in-sample end: {dm_6.in_sample_end}")
+        >>> 
+        >>> # Each POOS DataManager preserves applied modifications
+        >>> assert dm_6.model_mev.columns.equals(dm.model_mev.columns)
+        >>> assert dm_6.internal_data.columns.equals(dm.internal_data.columns)
+        
+        Notes
+        -----
+        - All cached data (model_mev, internal_data, scenarios) are copied to preserve modifications
+        - Original DataManager and its loaders remain unchanged
+        - Only works with TimeSeriesLoader-based internal loaders
+        - Each copy maintains the same MEV data and variable mappings
+        - Sample period adjustments respect the original data frequency
+        
+        Raises
+        ------
+        ValueError
+            If the internal_loader doesn't support sample period adjustments
+        """
+        poos_dms_dict = {}
+        
+        # Only works with TimeSeriesLoader that has adjustable sample periods
+        if not hasattr(self._internal_loader, 'in_sample_end'):
+            raise ValueError(
+                "poos_dms property requires an internal_loader with adjustable sample periods "
+                "(e.g., TimeSeriesLoader). Current loader type does not support this functionality."
+            )
+        
+        original_in_sample_end = self._internal_loader.in_sample_end
+        if original_in_sample_end is None:
+            raise ValueError(
+                "Cannot create POOS DataManagers: original in_sample_end is not set in internal_loader."
+            )
+        
+        # Get the internal data index to calculate new sample periods
+        internal_index = self.internal_data.index
+        original_in_sample_idx = self._internal_loader.in_sample_idx
+        
+        for period in self.poos_periods:
+            # Find the index position of the original in_sample_end
+            try:
+                end_pos = internal_index.get_loc(original_in_sample_end)
+            except KeyError:
+                # If exact match not found, find the closest date before in_sample_end
+                mask = internal_index <= original_in_sample_end
+                if not mask.any():
+                    continue  # Skip this period if no valid dates
+                end_pos = mask.sum() - 1
+            
+            # Calculate new in_sample_end (period steps back from original end)
+            new_in_sample_pos = end_pos - period
+            if new_in_sample_pos < 0:
+                continue  # Skip if not enough data for this period
+            
+            new_in_sample_end = internal_index[new_in_sample_pos]
+            
+            # Create a copy of the internal loader with adjusted sample periods
+            copied_internal_loader = copy.deepcopy(self._internal_loader)
+            
+            # Adjust the sample periods (indices will be automatically recalculated by property setters)
+            copied_internal_loader.in_sample_end = new_in_sample_end
+            copied_internal_loader.full_sample_end = original_in_sample_end
+            
+            # Clear cached scenario indices
+            copied_internal_loader._clear_cached_indices()
+            
+            # Create a copy of the MEV loader
+            copied_mev_loader = copy.deepcopy(self._mev_loader)
+            
+            # Create new DataManager with copied loaders
+            poos_dm = DataManager(
+                internal_loader=copied_internal_loader,
+                mev_loader=copied_mev_loader,
+                poos_periods=self._poos_periods
+            )
+            
+            # Copy all cached data to preserve modifications
+            if self._internal_data_cache is not None:
+                poos_dm._internal_data_cache = self._internal_data_cache.copy()
+            
+            if self._scen_internal_data_cache is not None:
+                poos_dm._scen_internal_data_cache = {}
+                for set_name, scen_dict in self._scen_internal_data_cache.items():
+                    poos_dm._scen_internal_data_cache[set_name] = {}
+                    for scen_name, df in scen_dict.items():
+                        poos_dm._scen_internal_data_cache[set_name][scen_name] = df.copy()
+            
+            if self._model_mev_cache is not None:
+                poos_dm._model_mev_cache = self._model_mev_cache.copy()
+            
+            if self._scen_mevs_cache is not None:
+                poos_dm._scen_mevs_cache = {}
+                for set_name, scen_dict in self._scen_mevs_cache.items():
+                    poos_dm._scen_mevs_cache[set_name] = {}
+                    for scen_name, df in scen_dict.items():
+                        poos_dm._scen_mevs_cache[set_name][scen_name] = df.copy()
+            
+            # Copy other caches
+            poos_dm._mev_cache = self._mev_cache.copy()
+            poos_dm._scen_cache = {}
+            for key, value in self._scen_cache.items():
+                poos_dm._scen_cache[key] = value.copy()
+            
+            poos_dm._freq_cache = self._freq_cache
+            
+            poos_dms_dict[f'poos_dm_{period}'] = poos_dm
+        
+        return poos_dms_dict
 
     def update_var_map(self, updates: Dict[str, Dict[str, Optional[str]]]) -> None:
         """
