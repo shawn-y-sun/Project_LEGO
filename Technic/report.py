@@ -82,10 +82,9 @@ class ModelReportBase(ABC):
         """Return parameter measures as a DataFrame."""
         ...
 
-    @abstractmethod
     def plot_perf(self, **kwargs) -> Any:
         """Plot performance metrics for this model."""
-        ...
+        return ols_model_perf_plot(model=self.model, **kwargs)
 
 class ReportSet:
     """
@@ -241,33 +240,43 @@ class OLS_ModelReport(ModelReportBase):
 
 
     def show_params_tbl(self) -> pd.DataFrame:
-        """Parameter table with columns: Variable, Coef, Pvalue, Sig, VIF, Std."""
-        pm = self.model.param_measures
-        df = pd.DataFrame.from_dict(pm, orient='index')
-        df.index.name = 'Variable'
-        df = df.reset_index()
-        df = df.rename(columns={
+        """
+        Parameter table with columns: Variable, Coef, Pvalue, VIF, SE, CI_2_5, CI_97_5.
+        
+        Returns
+        -------
+        pd.DataFrame
+            Parameter table with all available measures.
+        """
+        # Get the param_measures DataFrame
+        df = self.model.param_measures
+        
+        if df.empty:
+            return pd.DataFrame()
+        
+        # Rename columns for display
+        column_mapping = {
+            'variable': 'Variable',
             'coef': 'Coef',
             'pvalue': 'Pvalue',
-            'sig': 'Sig',
             'vif': 'VIF',
-            'std': 'Std'
-        })
-        cols = ['Variable', 'Coef', 'Pvalue', 'Sig', 'VIF', 'Std']
-        cols_existing = [c for c in cols if c in df.columns]
-        return df[cols_existing]
+            'se': 'SE',
+            'CI_2_5': 'CI_2_5',
+            'CI_97_5': 'CI_97_5'
+        }
+        
+        # Apply column mapping for existing columns
+        df = df.rename(columns=column_mapping)
+        
+        # Define the order of columns to display
+        display_cols = ['Variable', 'Coef', 'Pvalue', 'VIF', 'SE', 'CI_2_5', 'CI_97_5']
+        
+        # Select only existing columns
+        existing_cols = [col for col in display_cols if col in df.columns]
+        
+        return df[existing_cols]
 
-    def plot_perf(self, **kwargs) -> Any:
-        """Plot actual vs fitted/in-sample and predicted/out-of-sample values."""
-        return self.perf_plot_fn(
-            self.model.X,
-            self.model.y,
-            X_out=self.model.X_out,
-            y_out=self.model.y_out,
-            y_fitted_in=self.model.y_fitted_in,
-            y_pred_out=self.model.y_pred_out,
-            **kwargs
-        )
+
 
     def show_report(
         self,
@@ -318,17 +327,37 @@ class OLS_ModelReport(ModelReportBase):
                 return f"{val:.4e}"
             return f"{val:.4f}"
 
+        def fmt_conf_int(x):
+            try:
+                val = float(x)
+            except:
+                return str(x)
+            if pd.isna(val):
+                return "nan"
+            if abs(val) >= 1e5 or (abs(val) > 0 and abs(val) < 1e-3):
+                return f"{val:.4e}"
+            return f"{val:.4f}"
+
         print("\n=== Model Parameters ===")
         params_df = self.show_params_tbl()
+        
+        # Create formatters dictionary with all possible columns
+        formatters = {
+            'Coef': fmt_coef,
+            'Pvalue': '{:.3f}'.format,
+            'VIF': '{:.2f}'.format,
+            'SE': fmt_std,
+            'CI_2_5': '{:.4f}'.format,
+            'CI_97_5': '{:.4f}'.format
+        }
+        
+        # Filter formatters to only include columns that exist in the DataFrame
+        existing_formatters = {col: formatters[col] for col in formatters if col in params_df.columns}
+        
         print(
             params_df.to_string(
                 index=False,
-                formatters={
-                    'Coef':   fmt_coef,
-                    'Pvalue': '{:.3f}'.format,
-                    'VIF':    '{:.2f}'.format,
-                    'Std':    fmt_std
-                }
+                formatters=existing_formatters
             )
         )
 

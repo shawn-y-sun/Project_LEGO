@@ -38,6 +38,10 @@ class Segment:
         Unique identifier for this Segment.
     target : str
         Name of the target variable to be modeled.
+    target_base : str, optional
+        Name of the base variable of interest (highly recommended if available).
+    target_exposure : str, optional
+        Name of the exposure variable (required for Ratio model types).
     data_manager : Any
         DataManager instance containing the data to be used.
     model_cls : Type[ModelBase]
@@ -83,8 +87,11 @@ class Segment:
         self,
         segment_id: str,
         target: str,
-        data_manager: Any,
-        model_cls: Type[ModelBase],
+        model_type: Optional[Any] = None,
+        target_base: Optional[str] = None,
+        target_exposure: Optional[str] = None,
+        data_manager: Any = None,
+        model_cls: Type[ModelBase] = None,
         export_template_cls: Optional[Type[ExportTemplateBase]] = None,
         reportset_cls: Type[ReportSet] = ReportSet,
         search_cls: Type[ModelSearch] = ModelSearch,
@@ -92,6 +99,9 @@ class Segment:
     ):
         self.segment_id = segment_id
         self.target = target
+        self.model_type = model_type
+        self.target_base = target_base
+        self.target_exposure = target_exposure
         self.dm = data_manager
         self.model_cls = model_cls
         self.export_template_cls = export_template_cls
@@ -162,6 +172,9 @@ class Segment:
         cm = CM(
             model_id=cm_id,
             target=self.target,
+            model_type=self.model_type,
+            target_base=self.target_base,
+            target_exposure=self.target_exposure,
             data_manager=self.dm,
             model_cls=self.model_cls,
             scen_cls=self.scen_cls,
@@ -960,7 +973,14 @@ class Segment:
         """
         # 1) Reuse existing searcher if present, else create & store one
         if self.searcher is None:
-            self.searcher = self.search_cls(self.dm, self.target, self.model_cls)
+            self.searcher = self.search_cls(
+                self.dm, 
+                self.target, 
+                self.model_cls,
+                model_type=self.model_type,
+                target_base=self.target_base,
+                target_exposure=self.target_exposure
+            )
         searcher = self.searcher
 
         # 2) Run the search (populates searcher.top_cms; no return value)

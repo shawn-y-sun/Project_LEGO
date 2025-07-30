@@ -1,5 +1,5 @@
 import pandas as pd
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Tuple
 import warnings
 import matplotlib.pyplot as plt
 import os
@@ -7,7 +7,6 @@ import os
 from .internal import TimeSeriesLoader, PanelLoader
 from .data import DataManager
 from .model import ModelBase
-from .condition import CondVar
 from .feature import DumVar
 
 import matplotlib.dates as mdates
@@ -23,22 +22,18 @@ class ScenManager:
 
     Parameters
     ----------
-    dm : DataManager
-        DataManager instance (must have scen_mevs loaded and internal loader with scen_p0 set)
     model : ModelBase
-        Fitted ModelBase instance (with .predict)
-    specs : Any
-        Feature specs (str, TSFM, CondVar, etc.) as in CM
+        Fitted ModelBase instance (with .predict, dm, specs, and target attributes)
     horizon : int, default=12
         Number of quarters to forecast after P0 (e.g., 9 or 12 quarters)
-    target : str, optional
-        Name of target series; defaults to model.y.name
     qtr_method : str, default='mean'
         Method to aggregate monthly results to quarterly frequency.
         Options: 'mean', 'sum', 'last', 'first'
 
     Attributes
     ----------
+    horizon_frame : Tuple[pd.Timestamp, pd.Timestamp]
+        Prediction horizon time frame as (start_date, end_date) tuple
     y_scens : Dict[str, Dict[str, pd.Series]]
         Nested forecast results for all scenarios
     scenarios : List[str]
@@ -49,10 +44,10 @@ class ScenManager:
     Example
     -------
     # Create ScenManager for a fitted model with 9-quarter forecast horizon
-    scen_mgr = ScenManager(dm, model, specs, horizon=9)
+    scen_mgr = ScenManager(model, horizon=9)
     
     # Create ScenManager with sum aggregation for quarterly reporting
-    scen_mgr = ScenManager(dm, model, specs, horizon=9, qtr_method='sum')
+    scen_mgr = ScenManager(model, horizon=9, qtr_method='sum')
     
     # Access scenario forecasts
     forecasts = scen_mgr.y_scens
@@ -62,16 +57,15 @@ class ScenManager:
     scenario_colors = ['orange', 'grey', 'dodgerblue', 'purple', 'brown', 'pink', 'olive', 'cyan']
     def __init__(
         self,
-        dm: DataManager,
         model: ModelBase,
-        specs: Any,
         horizon: int = 12,
-        target: Optional[str] = None,
         qtr_method: str = 'mean'
     ):
-        self.dm = dm
+        # Reference parameters from ModelBase
         self.model = model
-        self.specs = specs
+        self.dm = self.model.dm
+        self.specs = self.model.specs
+        self.target = self.model.target
         
         # Validate forecast horizon
         if not isinstance(horizon, int) or horizon <= 0:
@@ -91,32 +85,80 @@ class ScenManager:
             
         # Calculate horizon end date (P0 + horizon quarters)
         self.horizon_end = self.P0 + pd.offsets.QuarterEnd(self.horizon)
-            
-        # Resolve target
-        if target:
-            self.target = target
-        elif hasattr(model, 'y') and model.y is not None:
-            self.target = model.y.name
-        else:
-            raise ValueError("Target name could not be inferred; please specify explicitly.")
-        # Detect conditional specs globally
-        specs_list = self.specs if isinstance(self.specs, list) else [self.specs]
-        self.cond_specs: List[CondVar] = [
-            spec for spec in specs_list
-            if isinstance(spec, CondVar)
-            and any(
-                (cv == self.target) if isinstance(cv, str)
-                else (cv.name == self.target)
-                for cv in spec.cond_var
-            )
-        ]
-        self._has_cond = bool(self.cond_specs)
+
+    @property
+    def horizon_frame(self) -> Tuple[pd.Timestamp, pd.Timestamp]:
+        """
+        Get the prediction horizon time frame as a tuple of start and end dates.
+        
+        The start date is the first available date after P0 from scenario MEV data,
+        and the end date is the cutoff date after enough quarters are included 
+        as specified by self.horizon.
+        
+        Returns
+        -------
+        Tuple[pd.Timestamp, pd.Timestamp]
+            (start_date, end_date) where:
+            - start_date: First available date after P0 from scenario data
+            - end_date: Cutoff date after horizon quarters from P0
+        """
+        # Get the first scenario MEV dataframe to determine available date range
+        if not self.dm.scen_mevs:
+            raise ValueError("No scenario MEV data available to determine horizon frame.")
+        
+        # Get the first scenario set and first scenario
+        first_scen_set = list(self.dm.scen_mevs.keys())[0]
+        first_scen_name = list(self.dm.scen_mevs[first_scen_set].keys())[0]
+        first_mev_df = self.dm.scen_mevs[first_scen_set][first_scen_name]
+        
+        # Determine start date based on data structure
+        if isinstance(self.dm._internal_loader, PanelLoader):
+            # For panel data, get dates from date column
+            date_col = self.dm._internal_loader.date_col
+            if date_col in first_mev_df.columns:
+                available_dates = pd.to_datetime(first_mev_df[date_col])
+            else:
+                # Fallback to theoretical calculation
+                start_date = self.P0 + pd.Timedelta(days=1)
+                end_date = self.horizon_end
+                return (start_date, end_date)
+        else:  # TimeSeriesLoader
+            # For time series, get dates from index
+            if isinstance(first_mev_df.index, pd.DatetimeIndex):
+                available_dates = first_mev_df.index
+            else:
+                # Fallback to theoretical calculation
+                start_date = self.P0 + pd.Timedelta(days=1)
+                end_date = self.horizon_end
+                return (start_date, end_date)
+        
+        # Filter to dates after P0
+        dates_after_p0 = available_dates[available_dates > self.P0]
+        
+        if dates_after_p0.empty:
+            raise ValueError(f"No dates after P0 ({self.P0}) found in scenario data.")
+        
+        # Start date is the first available date after P0
+        start_date = dates_after_p0.min()
+        
+        # End date is the horizon end date (theoretical calculation)
+        end_date = self.horizon_end
+        
+        # Ensure end date doesn't exceed available data
+        if dates_after_p0.max() < end_date:
+            end_date = dates_after_p0.max()
+        
+        return (start_date, end_date)
 
     @property
     def X_scens(self) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
         Build and return scenario feature matrices on demand.
         
+        For models with lookback variables, uses rolling_predict() to generate
+        features that account for conditional variable effects. For models without
+        lookback variables, builds features using MEVs and internal data.
+
         Returns
         -------
         Dict[str, Dict[str, pd.DataFrame]]
@@ -129,214 +171,499 @@ class ScenManager:
         """
         X_scens: Dict[str, Dict[str, pd.DataFrame]] = {}
         
-        # Get scenario sets from MEVs
-        for scen_set, scen_map in self.dm.scen_mevs.items():
-            X_scens[scen_set] = {}
-            
-            # Check if we have internal data for this scenario set
-            has_internal = bool(self.dm.scen_internal_data)
-            if has_internal and scen_set not in self.dm.scen_internal_data:
-                raise ValueError(
-                    f"Scenario set '{scen_set}' found in MEVs but not in internal data. "
-                    "Please provide corresponding internal data or clean scen_internal_data."
-                )
-            
-            for scen_name, df_mev in scen_map.items():
-                # If we have internal data, validate scenario exists
-                if has_internal:
-                    if scen_name not in self.dm.scen_internal_data[scen_set]:
-                        raise ValueError(
-                            f"Scenario '{scen_name}' found in MEVs but not in internal data "
-                            f"for set '{scen_set}'. Please provide corresponding internal data "
-                            "or clean scen_internal_data."
-                        )
-                    internal_df = self.dm.scen_internal_data[scen_set][scen_name]
-                else:
-                    internal_df = pd.DataFrame()
+        # If model has lookback variables, use rolling_predict for all scenarios
+        if self.model.has_lookback_var:
+            # Get scenario sets from MEVs
+            for scen_set, scen_map in self.dm.scen_mevs.items():
+                X_scens[scen_set] = {}
                 
-                # Build features using both MEVs and internal data if available
-                try:
-                    X_full = self.dm.build_features(
-                        self.specs,
-                        internal_df=internal_df,
-                        mev_df=df_mev
+                # Check if we have internal data for this scenario set
+                has_internal = bool(self.dm.scen_internal_data)
+                if has_internal and scen_set not in self.dm.scen_internal_data:
+                    raise ValueError(
+                        f"Scenario set '{scen_set}' found in MEVs but not in internal data. "
+                        "Please provide corresponding internal data or clean scen_internal_data."
                     )
-                except KeyError as e:
-                    # Extract the missing variable name from the error message
-                    missing_var = str(e).strip("'")
-                    if internal_df is not None and internal_df.empty:
-                        raise ValueError(
-                            f"Scenario '{scen_name}' in set '{scen_set}' has empty internal data. "
-                            "Please ensure all scenario internal data is populated with the necessary variables."
-                        ) from e
-                    else:
-                        raise ValueError(
-                            f"Variable '{missing_var}' not found in scenario '{scen_name}' internal data (set: '{scen_set}'). "
-                            "Please ensure all required internal variables are available in the scenario data."
-                        ) from e
                 
-                # Filter to forecast period (from P0 onwards and within horizon)
-                if isinstance(self.dm._internal_loader, PanelLoader):
-                    # For panel data, filter based on date column
-                    date_col = self.dm._internal_loader.date_col
-                    if date_col in X_full.columns:
-                        X_filtered = X_full[
-                            (X_full[date_col] >= self.P0) & 
-                            (X_full[date_col] <= self.horizon_end)
-                        ].copy()
+                for scen_name, df_mev in scen_map.items():
+                    # If we have internal data, validate scenario exists
+                    if has_internal:
+                        if scen_name not in self.dm.scen_internal_data[scen_set]:
+                            raise ValueError(
+                                f"Scenario '{scen_name}' found in MEVs but not in internal data "
+                                f"for set '{scen_set}'. Please provide corresponding internal data "
+                                "or clean scen_internal_data."
+                            )
+                        internal_df = self.dm.scen_internal_data[scen_set][scen_name]
                     else:
-                        X_filtered = X_full.copy()
-                else:  # TimeSeriesLoader
-                    # For time series, filter based on DatetimeIndex
-                    if isinstance(X_full.index, pd.DatetimeIndex):
-                        X_filtered = X_full[
-                            (X_full.index >= self.P0) & 
-                            (X_full.index <= self.horizon_end)
-                        ].copy()
-                    else:
-                        X_filtered = X_full.copy()
+                        internal_df = pd.DataFrame()
                     
-                X_scens[scen_set][scen_name] = X_filtered.astype(float)
+                    # Use rolling_predict to get features for models with lookback variables
+                    _, X_features = self.model.rolling_predict(
+                        df_internal=internal_df,
+                        df_mev=df_mev,
+                        y=self.model.y_full,
+                        time_frame=self.horizon_frame
+                    )
+                    
+                    X_scens[scen_set][scen_name] = X_features.astype(float)
+        else:
+            # Original logic for models without lookback variables
+            # Get scenario sets from MEVs
+            for scen_set, scen_map in self.dm.scen_mevs.items():
+                X_scens[scen_set] = {}
+                
+                # Check if we have internal data for this scenario set
+                has_internal = bool(self.dm.scen_internal_data)
+                if has_internal and scen_set not in self.dm.scen_internal_data:
+                    raise ValueError(
+                        f"Scenario set '{scen_set}' found in MEVs but not in internal data. "
+                        "Please provide corresponding internal data or clean scen_internal_data."
+                    )
+                
+                for scen_name, df_mev in scen_map.items():
+                    # If we have internal data, validate scenario exists
+                    if has_internal:
+                        if scen_name not in self.dm.scen_internal_data[scen_set]:
+                            raise ValueError(
+                                f"Scenario '{scen_name}' found in MEVs but not in internal data "
+                                f"for set '{scen_set}'. Please provide corresponding internal data "
+                                "or clean scen_internal_data."
+                            )
+                        internal_df = self.dm.scen_internal_data[scen_set][scen_name]
+                    else:
+                        internal_df = pd.DataFrame()
+                    
+                    # Build features using both MEVs and internal data if available
+                    try:
+                        X_full = self.dm.build_features(
+                            self.specs,
+                            internal_df=internal_df,
+                            mev_df=df_mev
+                        )
+                    except KeyError as e:
+                        # Extract the missing variable name from the error message
+                        missing_var = str(e).strip("'")
+                        if internal_df is not None and internal_df.empty:
+                            raise ValueError(
+                                f"Scenario '{scen_name}' in set '{scen_set}' has empty internal data. "
+                                "Please ensure all scenario internal data is populated with the necessary variables."
+                            ) from e
+                        else:
+                            raise ValueError(
+                                f"Variable '{missing_var}' not found in scenario '{scen_name}' internal data (set: '{scen_set}'). "
+                                "Please ensure all required internal variables are available in the scenario data."
+                            ) from e
+                    
+                    # Filter to forecast period using horizon_frame
+                    start_date, end_date = self.horizon_frame
+                    
+                    if isinstance(self.dm._internal_loader, PanelLoader):
+                        # For panel data, filter based on date column
+                        date_col = self.dm._internal_loader.date_col
+                        if date_col in X_full.columns:
+                            X_filtered = X_full[
+                                (X_full[date_col] >= start_date) & 
+                                (X_full[date_col] <= end_date)
+                            ].copy()
+                        else:
+                            X_filtered = X_full.copy()
+                    else:  # TimeSeriesLoader
+                        # For time series, filter based on DatetimeIndex
+                        if isinstance(X_full.index, pd.DatetimeIndex):
+                            X_filtered = X_full[
+                                (X_full.index >= start_date) & 
+                                (X_full.index <= end_date)
+                            ].copy()
+                        else:
+                            X_filtered = X_full.copy()
+                        
+                    X_scens[scen_set][scen_name] = X_filtered.astype(float)
                 
         return X_scens
 
-    def simple_forecast(self, X: pd.DataFrame) -> pd.Series:
-        """
-        Predict target for a single scenario feature table X.
-
-        Parameters
-        ----------
-        X : pd.DataFrame
-            Feature DataFrame (e.g. from X_scens)
-
-        Returns
-        -------
-        pd.Series
-            Series of predicted values indexed like X, truncated to horizon and after P0
-        """
-        # Get predictions
-        preds = self.model.predict(X)
-        
-        # Filter to forecast period (after P0 and within horizon) based on data structure
-        if isinstance(self.dm._internal_loader, PanelLoader):
-            # For panel data, filter based on date column
-            date_col = self.dm._internal_loader.date_col
-            if date_col in X.columns:
-                # Get the indices where dates are after P0 and within horizon
-                valid_idx = X[(X[date_col] > self.P0) & (X[date_col] <= self.horizon_end)].index
-                preds = preds[valid_idx]
-        else:  # TimeSeriesLoader
-            # For time series, filter based on DatetimeIndex
-            if isinstance(preds.index, pd.DatetimeIndex):
-                preds = preds[(preds.index > self.P0) & (preds.index <= self.horizon_end)]
-            
-        return preds
-
-    def conditional_forecast(
-        self,
-        X: pd.DataFrame,
-        y0: pd.Series
-    ) -> pd.Series:
-        """
-        Iteratively forecast a single scenario: starting from P0 and initial y0 series,
-        rebuild any CondVar specs depending on the target at each step.
-
-        Currently only supports time series data (TimeSeriesLoader). Panel data (PanelLoader)
-        is not yet supported.
-
-        Parameters
-        ----------
-        X : pd.DataFrame
-            Feature DataFrame starting from P0
-        y0 : pd.Series
-            Target Series up to and including P0 (index must include P0)
-
-        Returns
-        -------
-        pd.Series
-            Series of forecasts indexed by X.index (periods > P0), truncated to horizon
-
-        Raises
-        ------
-        ValueError
-            - If y0 is not a pandas Series or doesn't include P0
-            - If using PanelLoader (not yet supported)
-        """
-        if isinstance(self.dm._internal_loader, PanelLoader):
-            raise ValueError(
-                "Conditional forecasting is not yet supported for panel data. "
-                "Please use simple_forecast() instead."
-            )
-
-        if not isinstance(y0, pd.Series) or self.P0 not in y0.index:
-            raise ValueError("y0 must be a pandas Series with its index including P0")
-            
-        # Only process data up to horizon
-        X_horizon = X[X.index <= self.horizon_end].copy()
-        
-        P0_inferred = y0.index.max()
-        X_iter = X_horizon.loc[X_horizon.index >= P0_inferred].copy()
-        y_series = y0.copy()
-        preds: List[tuple] = []
-        for idx in X_iter.index:
-            for spec in self.cond_specs:
-                spec.main_series = X_iter[spec.name]
-                updated_cond: List[pd.Series] = []
-                for cv in spec.cond_var:
-                    if isinstance(cv, str) and cv == self.target:
-                        updated_cond.append(y_series)
-                    elif isinstance(cv, pd.Series):
-                        updated_cond.append(cv)
-                    else:
-                        updated_cond.append(self.dm.internal_data[cv])
-                spec.cond_var = updated_cond
-                new_series = spec.apply()
-                X_iter[new_series.name] = new_series
-            y_hat = self.model.predict(X_iter.loc[[idx]]).iloc[0]
-            preds.append((idx, y_hat))
-            y_series.loc[idx] = y_hat
-        return pd.Series(dict(preds), name=self.target)
-
     def forecast(
         self,
-        X: pd.DataFrame,
-        y0: Optional[pd.Series] = None,
-        conditional: bool = False
+        X: pd.DataFrame
     ) -> pd.Series:
         """
-        Forecast a single scenario: simple or conditional based on flag.
+        Forecast a single scenario using the model's prediction methods.
+        
+        This method leverages the model's .predict() and .rolling_predict() methods
+        based on whether the model has lookback variables.
 
         Parameters
         ----------
         X : pd.DataFrame
-            Feature DataFrame starting from P0
-        y0 : pd.Series, optional
-            Initial target Series up to P0 (needed if conditional=True)
-        conditional : bool, default=False
-            If True and conditional specs exist, uses conditional_forecast
+            Feature DataFrame for the scenario
 
         Returns
         -------
         pd.Series
-            Series of predictions indexed like X, truncated to horizon
-
-        Raises
-        ------
-        ValueError
-            If conditional=True is used with panel data (not supported)
+            Series of predictions indexed like X, filtered to horizon_frame
         """
-        if conditional and self._has_cond:
-            if y0 is None:
-                # Get y0 based on data structure
-                if isinstance(self.dm._internal_loader, PanelLoader):
-                    raise ValueError(
-                        "Conditional forecasting is not yet supported for panel data. "
-                        "Please use simple_forecast() instead."
+        # Check if model has lookback variables
+        if hasattr(self.model, 'has_lookback_var') and self.model.has_lookback_var:
+            # Use rolling_predict for models with lookback variables
+            # Get scenario internal data and MEV data
+            scen_internal = None
+            scen_mev = None
+            
+            # Find the scenario data that corresponds to this X
+            for scen_set, scen_dict in self.dm.scen_mevs.items():
+                for scen_name, mev_df in scen_dict.items():
+                    # Check if this MEV data corresponds to the X we're forecasting
+                    # This is a simplified check - in practice, you might need more sophisticated matching
+                    if hasattr(self.dm, 'scen_internal_data') and self.dm.scen_internal_data:
+                        if scen_set in self.dm.scen_internal_data and scen_name in self.dm.scen_internal_data[scen_set]:
+                            scen_internal = self.dm.scen_internal_data[scen_set][scen_name]
+                            scen_mev = mev_df
+                            break
+                if scen_internal is not None:
+                    break
+            
+            if scen_internal is None:
+                # Fallback: use internal data and first available MEV
+                scen_internal = self.dm.internal_data
+                scen_mev = list(self.dm.scen_mevs.values())[0][list(self.dm.scen_mevs.values())[0].keys()][0]
+            
+            # Get time frame as string tuple for rolling_predict
+            start_date, end_date = self.horizon_frame
+            time_frame = (str(start_date), str(end_date))
+            
+            # Use rolling_predict
+            predictions, _ = self.model.rolling_predict(
+                df_internal=scen_internal,
+                df_mev=scen_mev,
+                y=self.dm.internal_data[self.target],
+                time_frame=time_frame
+            )
+            
+            return predictions
+            
+        else:
+            # Use standard predict for models without lookback variables
+            predictions = self.model.predict(X)
+            
+            # Filter to forecast period using horizon_frame
+            start_date, end_date = self.horizon_frame
+            
+            if isinstance(self.dm._internal_loader, PanelLoader):
+                # For panel data, filter based on date column
+                date_col = self.dm._internal_loader.date_col
+                if date_col in X.columns:
+                    # Get the indices where dates are within horizon_frame
+                    valid_idx = X[(X[date_col] >= start_date) & (X[date_col] <= end_date)].index
+                    predictions = predictions[valid_idx]
+            else:  # TimeSeriesLoader
+                # For time series, filter based on DatetimeIndex
+                if isinstance(predictions.index, pd.DatetimeIndex):
+                    predictions = predictions[(predictions.index >= start_date) & (predictions.index <= end_date)]
+                
+            return predictions
+
+    @property
+    def y_base_scens(self) -> Dict[str, Dict[str, pd.Series]]:
+        """
+        Nested base forecast results for all scenarios using base predictor.
+
+        Returns
+        -------
+        Dict[str, Dict[str, pd.Series]]
+            Nested scenario base forecast results: {scenario_set: {scenario_name: y_base_series}}
+            Each series contains base forecasts up to horizon quarters after P0 using base_predictor.
+
+        Notes
+        -----
+        For time series data:
+            - Uses the scenario jumpoff date (scen_p0) for base prediction conversion
+        For panel data:
+            - Only supports simple forecasting (no conditional forecasting)
+            - Base forecasts are made for each entity-date combination
+        """
+        if not hasattr(self.model, 'base_predictor') or self.model.base_predictor is None:
+            return {}
+            
+        # Get scenario target forecasts
+        target_forecasts = self.y_scens
+        
+        results: Dict[str, Dict[str, pd.Series]] = {}
+        for scen_set, scen_dict in target_forecasts.items():
+            results[scen_set] = {}
+            for scen_name, y_pred in scen_dict.items():
+                if y_pred.empty:
+                    results[scen_set][scen_name] = pd.Series([], name=self.model.target_base or self.target)
+                    continue
+                    
+                try:
+                    # Use scen_p0 as the jumpoff date for base prediction
+                    base_pred = self.model.base_predictor.predict_base(y_pred, self.P0)
+                    results[scen_set][scen_name] = base_pred
+                except Exception:
+                    # Return empty series if conversion fails
+                    results[scen_set][scen_name] = pd.Series([], name=self.model.target_base or self.target)
+        
+        return results
+
+    @property
+    def forecast_y_base_df(self) -> Dict[str, pd.DataFrame]:
+        """
+        Organize scenario base forecasting results into DataFrames with period indicators.
+        
+        Returns
+        -------
+        Dict[str, pd.DataFrame]
+            Dictionary mapping scenario set names to DataFrames.
+            Each DataFrame contains:
+            - Period: Indicator column ('Pre-P0', 'P0', 'P1', etc.)
+              Note: Period is always in quarterly frequency. For monthly data,
+              all months within the same quarter share the same period indicator.
+            - Fitted: In-sample fitted base values from model (if available)
+            - One column per scenario containing base forecast values
+            
+        Notes
+        -----
+        - For time series data, index is DatetimeIndex
+        - For panel data, index includes both entity and date information
+        - Periods before P0 are marked as 'Pre-P0'
+        - P0 and subsequent periods are numbered sequentially (P0, P1, P2, etc.)
+        - Period indicators are always quarterly, even for monthly data
+        - All time indices are normalized to dates only (no time component)
+        """
+        # Get base scenario forecasts
+        base_scen_results = self.y_base_scens
+        
+        if not base_scen_results:
+            return {}
+        
+        # Get fitted base values from model
+        fitted_base_values = None
+        if hasattr(self.model, 'y_base_fitted_in') and self.model.y_base_fitted_in is not None:
+            fitted_base_values = self.model.y_base_fitted_in
+            fitted_base_values.index = pd.to_datetime(fitted_base_values.index).normalize()
+        
+        # Function to get quarter-end date
+        def get_quarter_end(date):
+            return pd.Period(date, freq='Q').end_time.normalize()
+        
+        # Function to assign period indicator
+        def assign_period(date, p0_quarter_end):
+            date_quarter_end = get_quarter_end(date)
+            if date_quarter_end < p0_quarter_end:
+                return 'Pre-P0'
+            elif date_quarter_end == p0_quarter_end:
+                return 'P0'
+            else:
+                # Calculate quarters difference
+                quarters_diff = (date_quarter_end.to_period('Q') - p0_quarter_end.to_period('Q')).n
+                return f'P{quarters_diff}'
+        
+        results: Dict[str, pd.DataFrame] = {}
+        for scen_set, scen_dict in base_scen_results.items():
+            # Start with an empty DataFrame
+            if isinstance(self.dm._internal_loader, TimeSeriesLoader):
+                # For time series, get all unique dates
+                all_dates = pd.Index([])
+                if fitted_base_values is not None:
+                    all_dates = all_dates.union(fitted_base_values.index)
+                for scen_series in scen_dict.values():
+                    # Normalize scenario series index
+                    scen_series.index = pd.to_datetime(scen_series.index).normalize()
+                    all_dates = all_dates.union(scen_series.index)
+                all_dates = all_dates.sort_values()
+                
+                # Create DataFrame with DatetimeIndex
+                df = pd.DataFrame(index=all_dates)
+                
+                # Get P0 quarter-end date
+                p0_quarter_end = get_quarter_end(self.P0)
+                
+                # Add Period indicator
+                df['Period'] = df.index.map(lambda x: assign_period(x, p0_quarter_end))
+                
+                # Add fitted base values if available
+                if fitted_base_values is not None:
+                    df['Fitted'] = fitted_base_values
+                
+                # Add scenario base forecasts
+                for scen_name, scen_series in scen_dict.items():
+                    df[scen_name] = scen_series
+                    
+            else:  # PanelLoader
+                # For panel data, get all unique entity-date combinations
+                entity_col = self.dm._internal_loader.entity_col
+                date_col = self.dm._internal_loader.date_col
+                
+                # Collect all entity-date pairs
+                all_pairs = set()
+                if fitted_base_values is not None:
+                    all_pairs.update(zip(fitted_base_values.index.get_level_values(entity_col),
+                                      fitted_base_values.index.get_level_values(date_col).normalize()))
+                for scen_series in scen_dict.values():
+                    # Normalize dates in the index
+                    dates = scen_series.index.get_level_values(date_col).normalize()
+                    entities = scen_series.index.get_level_values(entity_col)
+                    all_pairs.update(zip(entities, dates))
+                
+                # Create MultiIndex DataFrame
+                entities, dates = zip(*sorted(all_pairs))
+                idx = pd.MultiIndex.from_tuples(list(zip(entities, dates)),
+                                              names=[entity_col, date_col])
+                df = pd.DataFrame(index=idx)
+                
+                # Get P0 quarter-end date
+                p0_quarter_end = get_quarter_end(self.P0)
+                
+                # Add Period indicator
+                date_series = pd.Series(dates, index=idx)
+                df['Period'] = date_series.map(lambda x: assign_period(x, p0_quarter_end))
+                
+                # Add fitted base values if available
+                if fitted_base_values is not None:
+                    df['Fitted'] = fitted_base_values
+                
+                # Add scenario base forecasts
+                for scen_name, scen_series in scen_dict.items():
+                    # Normalize dates in the scenario series index
+                    dates = scen_series.index.get_level_values(date_col).normalize()
+                    entities = scen_series.index.get_level_values(entity_col)
+                    scen_series.index = pd.MultiIndex.from_tuples(
+                        list(zip(entities, dates)),
+                        names=[entity_col, date_col]
                     )
-                else:  # TimeSeriesLoader
-                    y0 = self.dm.internal_data[self.target].loc[:self.P0]
-            return self.conditional_forecast(X, y0)
-        return self.simple_forecast(X)
+                    df[scen_name] = scen_series
+            
+            # Store the result
+            results[scen_set] = df
+            
+        return results
+
+    @property
+    def forecast_y_base_qtr_df(self) -> Dict[str, pd.DataFrame]:
+        """
+        Organize scenario base forecasting results into quarterly DataFrames with period indicators.
+        
+        Returns
+        -------
+        Dict[str, pd.DataFrame]
+            Dictionary mapping scenario set names to DataFrames.
+            Each DataFrame contains quarterly base data with:
+            - Index: Period indicators ('P0', 'P1', 'P2', etc. for P0+ periods; 
+                    'YY-MM' format for Pre-P0 quarters like '21-03', '21-06')
+            - Fitted: In-sample fitted base values in quarterly frequency
+            - One column per scenario containing quarterly base forecast values
+            
+        Notes
+        -----
+        - All results are converted to quarterly frequency using self.qtr_method
+        - For monthly data, conversion is applied according to qtr_method parameter
+        - For quarterly data, data is used as-is
+        - Period indicators: P0, P1, P2, etc. for forecast periods; YY-MM for historical
+        - YY-MM format uses quarter-end month (03, 06, 09, 12)
+        """
+        # Get base scenario forecasts
+        base_scen_results = self.y_base_scens
+        
+        if not base_scen_results:
+            return {}
+        
+        # Get fitted base values from model
+        fitted_base_values = None
+        if hasattr(self.model, 'y_base_fitted_in') and self.model.y_base_fitted_in is not None:
+            fitted_base_values = self.model.y_base_fitted_in
+            fitted_base_values.index = pd.to_datetime(fitted_base_values.index).normalize()
+        
+        # Function to get quarter-end date
+        def get_quarter_end(date):
+            return pd.Period(date, freq='Q').end_time.normalize()
+        
+        # Function to assign period indicator with new format
+        def assign_period_label(date, p0_quarter_end):
+            date_quarter_end = get_quarter_end(date)
+            if date_quarter_end < p0_quarter_end:
+                # Pre-P0: use YY-MM format (quarter end month)
+                year_2digit = str(date_quarter_end.year)[-2:]
+                month = f"{date_quarter_end.month:02d}"
+                return f'{year_2digit}-{month}'
+            elif date_quarter_end == p0_quarter_end:
+                return 'P0'
+            else:
+                # Calculate quarters difference
+                quarters_diff = (date_quarter_end.to_period('Q') - p0_quarter_end.to_period('Q')).n
+                return f'P{quarters_diff}'
+        
+        # Function to aggregate data to quarterly
+        def aggregate_to_quarterly(series, qtr_method):
+            """Aggregate series to quarterly frequency."""
+            if self.dm.freq == 'Q':
+                # Already quarterly, return as-is
+                return series
+            
+            # Convert to quarterly
+            series_copy = series.copy()
+            series_copy.index = pd.to_datetime(series_copy.index)
+            
+            # Group by quarter and aggregate
+            quarterly_grouped = series_copy.groupby(pd.Grouper(freq='Q'))
+            
+            if qtr_method == 'mean':
+                result = quarterly_grouped.mean()
+            elif qtr_method == 'sum':
+                result = quarterly_grouped.sum()
+            elif qtr_method == 'last':
+                result = quarterly_grouped.last()
+            elif qtr_method == 'first':
+                result = quarterly_grouped.first()
+            else:
+                raise ValueError(f"Unsupported aggregation method: {qtr_method}")
+            
+            # Convert index to quarter-end dates
+            result.index = result.index.to_period('Q').to_timestamp(how='end').normalize()
+            return result
+        
+        results: Dict[str, pd.DataFrame] = {}
+        for scen_set, scen_dict in base_scen_results.items():
+            # Collect all data first
+            all_data = {}
+            
+            # Process fitted base values
+            if fitted_base_values is not None:
+                fitted_quarterly = aggregate_to_quarterly(fitted_base_values, self.qtr_method)
+                all_data['Fitted'] = fitted_quarterly
+            
+            # Process scenario base forecasts
+            for scen_name, scen_series in scen_dict.items():
+                # Normalize scenario series index
+                scen_series.index = pd.to_datetime(scen_series.index).normalize()
+                scen_quarterly = aggregate_to_quarterly(scen_series, self.qtr_method)
+                all_data[scen_name] = scen_quarterly
+            
+            # Get all unique quarter-end dates
+            all_quarters = pd.Index([])
+            for series in all_data.values():
+                all_quarters = all_quarters.union(series.index)
+            all_quarters = all_quarters.sort_values()
+            
+            # Create quarterly DataFrame
+            df = pd.DataFrame(index=all_quarters)
+            
+            # Add all data series
+            for col_name, series in all_data.items():
+                df[col_name] = series
+            
+            # Get P0 quarter-end date
+            p0_quarter_end = get_quarter_end(self.P0)
+            
+            # Create period labels for index
+            period_labels = [assign_period_label(date, p0_quarter_end) for date in df.index]
+            
+            # Set period labels as index
+            df.index = period_labels
+            df.index.name = 'Period'
+            
+            results[scen_set] = df
+            
+        return results
 
     @property
     def y_scens(self) -> Dict[str, Dict[str, pd.Series]]:
@@ -351,38 +678,20 @@ class ScenManager:
 
         Notes
         -----
-        For time series data:
-            - Uses the target series up to P0 for conditional forecasting
-        For panel data:
-            - Only supports simple forecasting (no conditional forecasting)
-            - Forecasts are made for each entity-date combination
+        - Uses the model's .predict() method for standard forecasting
+        - Uses the model's .rolling_predict() method for models with lookback variables
+        - Automatically handles both time series and panel data
         """
-        # Get initial conditions based on data structure
-        if isinstance(self.dm._internal_loader, TimeSeriesLoader):
-            y0_series = self.dm.internal_data[self.target].loc[:self.P0]
-        else:  # PanelLoader
-            y0_series = None  # Panel data doesn't support conditional forecasting
-            if self._has_cond:
-                warnings.warn(
-                    "Conditional forecasting is not supported for panel data. "
-                    "Using simple_forecast() instead.",
-                    UserWarning
-                )
-
         results: Dict[str, Dict[str, pd.Series]] = {}
         for scen_set, scen_dict in self.X_scens.items():
             results[scen_set] = {}
             for scen_name, X in scen_dict.items():
-                # For panel data or when no conditional specs, use simple forecast
-                if isinstance(self.dm._internal_loader, PanelLoader) or not self._has_cond:
-                    results[scen_set][scen_name] = self.forecast(X, conditional=False)
-                else:
-                    # For time series with conditional specs, use conditional forecast
-                    results[scen_set][scen_name] = self.forecast(X, y0_series, conditional=True)
+                # Use the simplified forecast method
+                results[scen_set][scen_name] = self.forecast(X)
         return results
 
     @property
-    def forecast_df_qtr(self) -> Dict[str, pd.DataFrame]:
+    def forecast_y_qtr_df(self) -> Dict[str, pd.DataFrame]:
         """
         Organize scenario forecasting results into quarterly DataFrames with period indicators.
         
@@ -505,7 +814,7 @@ class ScenManager:
         return results
 
     @property
-    def forecast_df(self) -> Dict[str, pd.DataFrame]:
+    def forecast_y_df(self) -> Dict[str, pd.DataFrame]:
         """
         Organize scenario forecasting results into DataFrames with period indicators.
         
@@ -636,7 +945,7 @@ class ScenManager:
     def plot_forecasts(
         self,
         scen_set: str,
-        forecast_data: Optional[pd.DataFrame] = None,
+        forecast_data: Optional[Union[pd.DataFrame, Tuple[pd.DataFrame, pd.DataFrame]]] = None,
         figsize: tuple = (8, 4),
         style: Optional[Dict[str, Dict[str, Any]]] = None,
         title_prefix: str = "",
@@ -654,11 +963,12 @@ class ScenManager:
         ----------
         scen_set : str
             Name of the scenario set being plotted
-        forecast_data : pd.DataFrame, optional
-            DataFrame containing forecast data. If None, will use either
-            forecast_df_qtr or forecast_df based on show_qtr parameter
+        forecast_data : Union[pd.DataFrame, Tuple[pd.DataFrame, pd.DataFrame]], optional
+            DataFrame containing forecast data, or tuple of (target_df, base_df) for side-by-side plots.
+            If None, will use either forecast_y_qtr_df or forecast_y_df based on show_qtr parameter.
+            If tuple is provided, creates side-by-side plots: left for target variable, right for base variable.
         figsize : tuple, default=(8, 4)
-            Figure size as (width, height)
+            Figure size as (width, height). For side-by-side plots, width is automatically doubled.
         style : Dict[str, Dict[str, Any]], optional
             Styling options for each scenario. Format:
             {scenario_name: {style_param: value}}
@@ -670,8 +980,8 @@ class ScenManager:
         save_path : str, optional
             If provided, saves plots to this directory path
         show_qtr : bool, default=True
-            If True, use quarterly frequency data (forecast_df_qtr).
-            If False, use original frequency data (forecast_df).
+            If True, use quarterly frequency data (forecast_y_qtr_df).
+            If False, use original frequency data (forecast_y_df).
             Only used when forecast_data is None.
             
         Returns
@@ -684,137 +994,162 @@ class ScenManager:
         - Creates new figures without affecting existing plots
         - Works with both quarterly and original frequency data
         - Handles both YY-MM format and 'Pre-P0' period indicators
+        - Supports side-by-side plotting when forecast_data is a tuple
         """
+        # Determine if we have single or dual plotting
+        is_dual_plot = isinstance(forecast_data, tuple)
+        
         # Get forecast data if not provided
         if forecast_data is None:
             if show_qtr:
-                forecast_data = self.forecast_df_qtr[scen_set]
+                target_df = self.forecast_y_qtr_df[scen_set]
+                base_df = self.forecast_y_base_qtr_df.get(scen_set) if hasattr(self, 'forecast_y_base_qtr_df') else None
             else:
-                forecast_data = self.forecast_df[scen_set]
+                target_df = self.forecast_y_df[scen_set]
+                base_df = self.forecast_y_base_df.get(scen_set) if hasattr(self, 'forecast_y_base_df') else None
+            
+            # Create tuple if base data is available
+            if base_df is not None and not base_df.empty:
+                forecast_data = (target_df, base_df)
+                is_dual_plot = True
+            else:
+                forecast_data = target_df
+                is_dual_plot = False
         
-        df = forecast_data.copy()
-        
-        # Create new figure
-        fig = plt.figure(figsize=figsize)
-        ax = fig.add_subplot(111)
-        
-        # Handle different data structures
-        if 'Period' not in df.columns:
-            # Aggregated data with period labels as index
-            period_labels = df.index.tolist()
-            x_positions = list(range(len(period_labels)))
-            
-            # Get scenario names and sort for consistent ordering
-            scenarios = sorted([col for col in df.columns if col != 'Fitted'])
-            
-            # Identify historical periods and forecast periods
-            p0_position = None
-            if 'P0' in period_labels:
-                p0_position = period_labels.index('P0')
-            
-            # Plot fitted values for historical periods and P0
-            if 'Fitted' in df.columns:
-                fitted_data = df['Fitted'].dropna()
-                if not fitted_data.empty:
-                    fitted_x = []
-                    fitted_y = []
-                    for i, (period, value) in enumerate(fitted_data.items()):
-                        if not pd.isna(value) and (not period.startswith('P') or period == 'P0'):
-                            fitted_x.append(x_positions[period_labels.index(period)])
-                            fitted_y.append(value)
-                    
-                    if fitted_x:
-                        ax.plot(fitted_x, fitted_y, color='black', linestyle='-', 
-                               label='Fitted', linewidth=2)
-            
-            # Plot each scenario (forecast periods only)
-            for i, scenario in enumerate(scenarios):
-                # Get style for this scenario
-                if style and scenario in style:
-                    scen_style = style[scenario]
-                    if 'linewidth' not in scen_style:
-                        scen_style['linewidth'] = 2
-                else:
-                    color = self.scenario_colors[i % len(self.scenario_colors)]
-                    scen_style = {
-                        'color': color,
-                        'linestyle': '-',
-                        'label': scenario,
-                        'linewidth': 2
-                    }
-                
-                # Plot scenario data for forecast periods
-                scenario_data = df[scenario].dropna()
-                if not scenario_data.empty:
-                    forecast_x = []
-                    forecast_y = []
-                    for period, value in scenario_data.items():
-                        if not pd.isna(value) and period.startswith('P'):
-                            forecast_x.append(x_positions[period_labels.index(period)])
-                            forecast_y.append(value)
-                    
-                    if forecast_x:
-                        ax.plot(forecast_x, forecast_y, **scen_style)
-            
-            # Add vertical line at P0
-            if p0_position is not None:
-                ax.axvline(x=p0_position, color='gray', linestyle='--', alpha=0.7)
-                ax.text(p0_position, ax.get_ylim()[1], 'P0',
-                       rotation=0, ha='center', va='bottom', fontsize=8)
-            
-            # Set x-axis ticks and labels
-            ax.set_xticks(x_positions)
-            ax.set_xticklabels(period_labels, rotation=45, ha='right', fontsize=8)
-            
+        # Set up figure and axes
+        if is_dual_plot:
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(figsize[0] * 2, figsize[1]))
+            target_df, base_df = forecast_data
+            axes_data = [(ax1, target_df.copy(), "Target Variable"), (ax2, base_df.copy(), "Base Variable")]
         else:
-            # Original frequency data with DatetimeIndex and Period column
-            scenarios = sorted([col for col in df.columns if col not in ['Period', 'Fitted']])
-            
-            # Plot fitted values for Pre-P0 and P0 periods
-            if 'Fitted' in df.columns:
-                fitted_mask = df['Period'].isin(['Pre-P0', 'P0'])
-                fitted_data = df[fitted_mask]['Fitted'].dropna()
-                if not fitted_data.empty:
-                    ax.plot(fitted_data.index, fitted_data.values, color='black', 
-                           linestyle='-', label='Fitted', linewidth=2)
-            
-            # Plot each scenario (P0 and forecast periods)
-            for i, scenario in enumerate(scenarios):
-                if style and scenario in style:
-                    scen_style = style[scenario]
-                    if 'linewidth' not in scen_style:
-                        scen_style['linewidth'] = 2
-                else:
-                    color = self.scenario_colors[i % len(self.scenario_colors)]
-                    scen_style = {
-                        'color': color,
-                        'linestyle': '-',
-                        'label': scenario,
-                        'linewidth': 2
-                    }
-                
-                # Plot scenario data for forecast periods
-                forecast_mask = df['Period'].str.startswith('P')
-                scenario_data = df[forecast_mask][scenario].dropna()
-                if not scenario_data.empty:
-                    ax.plot(scenario_data.index, scenario_data.values, **scen_style)
-            
-            # Add vertical line at P0
-            p0_date = df[df['Period'] == 'P0'].index
-            if len(p0_date) > 0:
-                ax.axvline(x=p0_date[0], color='gray', linestyle='--', alpha=0.7)
-                ax.text(p0_date[0], ax.get_ylim()[1], 'P0',
-                       rotation=0, ha='center', va='bottom', fontsize=8)
-            
-            # Format x-axis for dates
-            ax.xaxis.set_major_formatter(DateFormatter('%Y-%m'))
-            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=8)
+            fig = plt.figure(figsize=figsize)
+            ax1 = fig.add_subplot(111)
+            df = forecast_data.copy()
+            axes_data = [(ax1, df, "")]
         
-        # Customize plot
-        title = f"{title_prefix}Scenario Forecast - {scen_set}" if title_prefix else f"Scenario Forecast - {scen_set}"
-        ax.set_title(title, fontsize=10)
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3)
+        # Plot each subplot
+        for ax, df, subplot_title in axes_data:
+            # Handle different data structures
+            if 'Period' not in df.columns:
+                # Aggregated data with period labels as index
+                period_labels = df.index.tolist()
+                x_positions = list(range(len(period_labels)))
+                
+                # Get scenario names and sort for consistent ordering
+                scenarios = sorted([col for col in df.columns if col != 'Fitted'])
+                
+                # Identify historical periods and forecast periods
+                p0_position = None
+                if 'P0' in period_labels:
+                    p0_position = period_labels.index('P0')
+                
+                # Plot fitted values for historical periods and P0
+                if 'Fitted' in df.columns:
+                    fitted_data = df['Fitted'].dropna()
+                    if not fitted_data.empty:
+                        fitted_x = []
+                        fitted_y = []
+                        for i, (period, value) in enumerate(fitted_data.items()):
+                            if not pd.isna(value) and (not period.startswith('P') or period == 'P0'):
+                                fitted_x.append(x_positions[period_labels.index(period)])
+                                fitted_y.append(value)
+                        
+                        if fitted_x:
+                            ax.plot(fitted_x, fitted_y, color='black', linestyle='-', 
+                                   label='Fitted', linewidth=2)
+                
+                # Plot each scenario (forecast periods only)
+                for i, scenario in enumerate(scenarios):
+                    # Get style for this scenario
+                    if style and scenario in style:
+                        scen_style = style[scenario]
+                        if 'linewidth' not in scen_style:
+                            scen_style['linewidth'] = 2
+                    else:
+                        color = self.scenario_colors[i % len(self.scenario_colors)]
+                        scen_style = {
+                            'color': color,
+                            'linestyle': '-',
+                            'label': scenario,
+                            'linewidth': 2
+                        }
+                    
+                    # Plot scenario data for forecast periods
+                    scenario_data = df[scenario].dropna()
+                    if not scenario_data.empty:
+                        forecast_x = []
+                        forecast_y = []
+                        for period, value in scenario_data.items():
+                            if not pd.isna(value) and period.startswith('P'):
+                                forecast_x.append(x_positions[period_labels.index(period)])
+                                forecast_y.append(value)
+                        
+                        if forecast_x:
+                            ax.plot(forecast_x, forecast_y, **scen_style)
+                
+                # Add vertical line at P0 (without label)
+                if p0_position is not None:
+                    ax.axvline(x=p0_position, color='gray', linestyle='--', alpha=0.7)
+                
+                # Set x-axis ticks and labels
+                ax.set_xticks(x_positions)
+                ax.set_xticklabels(period_labels, rotation=45, ha='right', fontsize=8)
+                
+            else:
+                # Original frequency data with DatetimeIndex and Period column
+                scenarios = sorted([col for col in df.columns if col not in ['Period', 'Fitted']])
+                
+                # Plot fitted values for Pre-P0 and P0 periods
+                if 'Fitted' in df.columns:
+                    fitted_mask = df['Period'].isin(['Pre-P0', 'P0'])
+                    fitted_data = df[fitted_mask]['Fitted'].dropna()
+                    if not fitted_data.empty:
+                        ax.plot(fitted_data.index, fitted_data.values, color='black', 
+                               linestyle='-', label='Fitted', linewidth=2)
+                
+                # Plot each scenario (P0 and forecast periods)
+                for i, scenario in enumerate(scenarios):
+                    if style and scenario in style:
+                        scen_style = style[scenario]
+                        if 'linewidth' not in scen_style:
+                            scen_style['linewidth'] = 2
+                    else:
+                        color = self.scenario_colors[i % len(self.scenario_colors)]
+                        scen_style = {
+                            'color': color,
+                            'linestyle': '-',
+                            'label': scenario,
+                            'linewidth': 2
+                        }
+                    
+                    # Plot scenario data for forecast periods
+                    forecast_mask = df['Period'].str.startswith('P')
+                    scenario_data = df[forecast_mask][scenario].dropna()
+                    if not scenario_data.empty:
+                        ax.plot(scenario_data.index, scenario_data.values, **scen_style)
+                
+                # Add vertical line at P0 (without label)
+                p0_date = df[df['Period'] == 'P0'].index
+                if len(p0_date) > 0:
+                    ax.axvline(x=p0_date[0], color='gray', linestyle='--', alpha=0.7)
+                
+                # Format x-axis for dates
+                ax.xaxis.set_major_formatter(DateFormatter('%Y-%m'))
+                plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=8)
+            
+            # Customize subplot
+            if is_dual_plot:
+                title = f"{subplot_title}"
+            else:
+                title = f"{title_prefix}Scenario Forecast - {scen_set}" if title_prefix else f"Scenario Forecast - {scen_set}"
+            ax.set_title(title, fontsize=10)
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
+        
+        # Set overall title for dual plots
+        if is_dual_plot:
+            overall_title = f"{title_prefix}Scenario Forecast - {scen_set}" if title_prefix else f"Scenario Forecast - {scen_set}"
+            fig.suptitle(overall_title, fontsize=12)
         
         # Adjust layout to prevent label cutoff
         plt.tight_layout()
@@ -1047,8 +1382,8 @@ class ScenManager:
         subplot_height : float, default=3.5
             Standard height for each subplot in variable plots
         show_qtr : bool, default=True
-            If True, use quarterly frequency data (forecast_df_qtr).
-            If False, use original frequency data (forecast_df).
+            If True, use quarterly frequency data (forecast_y_qtr_df).
+            If False, use original frequency data (forecast_y_df).
             
         Returns
         -------
@@ -1063,7 +1398,8 @@ class ScenManager:
         - Uses consistent color schemes across all plots
         """
         # Get forecast DataFrames and scenario feature matrices
-        forecast_dfs = self.forecast_df_qtr if show_qtr else self.forecast_df
+        forecast_dfs = self.forecast_y_qtr_df if show_qtr else self.forecast_y_df
+        base_forecast_dfs = self.forecast_y_base_qtr_df if show_qtr else self.forecast_y_base_df
         X_scens = self.X_scens
         
         # Store all figures for return
@@ -1072,10 +1408,19 @@ class ScenManager:
         for scen_set in forecast_dfs.keys():
             all_figures[scen_set] = {}
             
+            # Prepare forecast data - combine target and base if available
+            target_df = forecast_dfs[scen_set]
+            base_df = base_forecast_dfs.get(scen_set) if base_forecast_dfs else None
+            
+            if base_df is not None and not base_df.empty:
+                forecast_data = (target_df, base_df)
+            else:
+                forecast_data = target_df
+            
             # Create forecast plot
             forecast_fig = self.plot_forecasts(
                 scen_set=scen_set,
-                forecast_data=forecast_dfs[scen_set],
+                forecast_data=forecast_data,
                 figsize=figsize,
                 style=style,
                 title_prefix=title_prefix,

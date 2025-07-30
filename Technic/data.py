@@ -1446,6 +1446,30 @@ class DataManager:
         return self._internal_loader.scen_p0
 
     @property
+    def p0(self) -> Optional[pd.Timestamp]:
+        """
+        Get the p0 date from the internal loader.
+
+        Returns
+        -------
+        Optional[pd.Timestamp]
+            The date index just ahead of full_sample_start, or None if not available.
+        """
+        return getattr(self._internal_loader, 'p0', None)
+
+    @property
+    def out_p0(self) -> Optional[pd.Timestamp]:
+        """
+        Get the out_p0 date from the internal loader.
+
+        Returns
+        -------
+        Optional[pd.Timestamp]
+            The date index of in_sample_end, or None if not available.
+        """
+        return getattr(self._internal_loader, 'out_p0', None)
+
+    @property
     def in_sample_idx(self) -> pd.Index:
         """
         Get the in-sample index from the internal loader.

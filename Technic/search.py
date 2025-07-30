@@ -78,11 +78,17 @@ class ModelSearch:
         self,
         dm: DataManager,
         target: str,
-        model_cls: Type[ModelBase]
+        model_cls: Type[ModelBase],
+        model_type: Optional[Any] = None,
+        target_base: Optional[str] = None,
+        target_exposure: Optional[str] = None
     ):
         self.dm = dm
         self.target = target
         self.model_cls = model_cls
+        self.model_type = model_type
+        self.target_base = target_base
+        self.target_exposure = target_exposure
         self.all_specs: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
         self.passed_cms: List[CM] = []
         self.failed_info: List[Tuple[List[Any], List[str]]] = []
@@ -320,7 +326,15 @@ class ModelSearch:
             raise ValueError("`sample` must be either 'in' or 'full'.")
 
         # Build the candidate model
-        cm = CM(model_id=model_id, target=self.target, model_cls=self.model_cls, data_manager=self.dm)
+        cm = CM(
+            model_id=model_id, 
+            target=self.target, 
+            model_type=self.model_type,
+            target_base=self.target_base,
+            target_exposure=self.target_exposure,
+            model_cls=self.model_cls, 
+            data_manager=self.dm
+        )
         cm.build(specs, sample=sample, outlier_idx=outlier_idx)
         mdl = cm.model_in if sample == 'in' else cm.model_full
 
