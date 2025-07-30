@@ -37,4 +37,5 @@ from .test import *
 from .testset import *
 from .condition import *
 from .scenario import *
+from .sensitivity import *
 from .search import *

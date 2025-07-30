@@ -326,6 +326,7 @@ class CM:
         show_out: bool = True,
         show_tests: bool = False,
         show_scens: bool = False,
+        show_sens: bool = False,
         perf_kwargs: Optional[Dict[str, Any]] = None,
         test_kwargs: Optional[Dict[str, Any]] = None,
         scen_kwargs: Optional[Dict[str, Any]] = None
@@ -343,6 +344,8 @@ class CM:
             If True, include diagnostic test results.
         show_scens : bool, default False
             If True, display scenario forecast and variable plots.
+        show_sens : bool, default False
+            If True, display sensitivity testing plots for all scenarios.
         perf_kwargs : dict, optional
             Keyword arguments passed to performance plotting methods.
         test_kwargs : dict, optional
@@ -411,3 +414,25 @@ class CM:
             # If no scenario managers are available, inform the user
             if not self.scen_manager_in and (not show_full or not self.scen_manager_full):
                 print("\nNo scenario managers available. Scenario data may not be loaded in DataManager.")
+
+        # Sensitivity testing plots
+        if show_sens:
+            # Run sensitivity testing for in-sample model
+            if self.scen_manager_in is not None:
+                print(f"\n=== Model: {self.model_id} — Sensitivity Analysis ===")
+                try:
+                    self.scen_manager_in.sens_test.plot_all()
+                except Exception as e:
+                    print(f"Error generating in-sample sensitivity plots: {e}")
+            
+            # Run sensitivity testing for full-sample model if requested
+            if show_full and self.scen_manager_full is not None:
+                print(f"\n=== Model: {self.model_id} — Full-Sample Sensitivity Analysis ===")
+                try:
+                    self.scen_manager_full.sens_test.plot_all()
+                except Exception as e:
+                    print(f"Error generating full-sample sensitivity plots: {e}")
+            
+            # If no scenario managers are available, inform the user
+            if not self.scen_manager_in and (not show_full or not self.scen_manager_full):
+                print("\nNo scenario managers available for sensitivity testing. Scenario data may not be loaded in DataManager.")

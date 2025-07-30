@@ -151,6 +151,33 @@ class ScenManager:
         return (start_date, end_date)
 
     @property
+    def sens_test(self):
+        """
+        Get a SensitivityTest instance initialized with this ScenManager.
+        
+        This property provides easy access to sensitivity testing capabilities
+        for the current scenario manager and its associated model.
+        
+        Returns
+        -------
+        SensitivityTest
+            SensitivityTest instance initialized with this ScenManager
+            
+        Example
+        -------
+        >>> scen_mgr = ScenManager(model, horizon=9)
+        >>> sens_test = scen_mgr.sens_test
+        >>> 
+        >>> # Run parameter sensitivity testing
+        >>> param_results = sens_test.y_param_shock
+        >>> 
+        >>> # Plot sensitivity results
+        >>> sens_test.plot_all_param_shock()
+        """
+        from .sensitivity import SensitivityTest
+        return SensitivityTest(self)
+
+    @property
     def X_scens(self) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
         Build and return scenario feature matrices on demand.

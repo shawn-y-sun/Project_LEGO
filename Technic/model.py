@@ -1197,9 +1197,9 @@ class OLS(ModelBase):
         Xc_new = sm.add_constant(X_new, has_constant='add')
         return self.fitted.predict(Xc_new)
     
-    def predict_param_sensitivity(self, X_new: pd.DataFrame, param: str, shock: int) -> pd.Series:
+    def predict_param_shock(self, X_new: pd.DataFrame, param: str, shock: int) -> pd.Series:
         """
-        Predict with parameter sensitivity testing by applying standard error shocks to coefficients.
+        Predict with parameter shock testing by applying standard error shocks to coefficients.
         
         This method adjusts a specific parameter's coefficient by adding a multiple of its 
         standard error, then uses the adjusted coefficients to make predictions.
@@ -1222,10 +1222,10 @@ class OLS(ModelBase):
         Example
         -------
         >>> # Predict with +1 standard error shock to 'GDP' parameter
-        >>> predictions = model.predict_sensitivity(X_new, 'GDP', 1)
+        >>> predictions = model.predict_param_shock(X_new, 'GDP', 1)
         >>> 
         >>> # Predict with -2 standard error shock to 'UNRATE' parameter  
-        >>> predictions = model.predict_sensitivity(X_new, 'UNRATE', -2)
+        >>> predictions = model.predict_param_shock(X_new, 'UNRATE', -2)
         """
         if not self.is_fitted or self.fitted is None:
             raise RuntimeError("Model has not been fitted yet.")
@@ -1247,9 +1247,9 @@ class OLS(ModelBase):
         
         return predictions
     
-    def predict_input_sensitivity(self, X_new: pd.DataFrame, param: str, shock: int, std: float) -> pd.Series:
+    def predict_input_shock(self, X_new: pd.DataFrame, param: str, shock: int, std: float) -> pd.Series:
         """
-        Predict with input sensitivity testing by applying standard deviation shocks to independent variable values.
+        Predict with input shock testing by applying standard deviation shocks to independent variable values.
         
         This method adjusts a specific independent variable's values by adding a multiple of its 
         standard deviation, then uses the adjusted input data to make predictions.
@@ -1274,10 +1274,10 @@ class OLS(ModelBase):
         Example
         -------
         >>> # Predict with +1 standard deviation shock to 'GDP' input values
-        >>> predictions = model.predict_input_sensitivity(X_new, 'GDP', 1, 0.5)
+        >>> predictions = model.predict_input_shock(X_new, 'GDP', 1, 0.5)
         >>> 
         >>> # Predict with -2 standard deviation shock to 'UNRATE' input values  
-        >>> predictions = model.predict_input_sensitivity(X_new, 'UNRATE', -2, 0.3)
+        >>> predictions = model.predict_input_shock(X_new, 'UNRATE', -2, 0.3)
         """
         if not self.is_fitted or self.fitted is None:
             raise RuntimeError("Model has not been fitted yet.")
