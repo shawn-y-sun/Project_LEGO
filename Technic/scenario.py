@@ -7,7 +7,6 @@ import os
 from .internal import TimeSeriesLoader, PanelLoader
 from .data import DataManager
 from .model import ModelBase
-from .condition import CondVar
 from .feature import DumVar
 
 import matplotlib.dates as mdates
@@ -23,22 +22,18 @@ class ScenManager:
 
     Parameters
     ----------
-    dm : DataManager
-        DataManager instance (must have scen_mevs loaded and internal loader with scen_p0 set)
     model : ModelBase
-        Fitted ModelBase instance (with .predict)
-    specs : Any
-        Feature specs (str, TSFM, CondVar, etc.) as in CM
+        Fitted ModelBase instance (with .predict, dm, specs, and target attributes)
     horizon : int, default=12
         Number of quarters to forecast after P0 (e.g., 9 or 12 quarters)
-    target : str, optional
-        Name of target series; defaults to model.y.name
     qtr_method : str, default='mean'
         Method to aggregate monthly results to quarterly frequency.
         Options: 'mean', 'sum', 'last', 'first'
 
     Attributes
     ----------
+    horizon_frame : Tuple[pd.Timestamp, pd.Timestamp]
+        Prediction horizon time frame as (start_date, end_date) tuple
     y_scens : Dict[str, Dict[str, pd.Series]]
         Nested forecast results for all scenarios
     scenarios : List[str]
@@ -49,10 +44,10 @@ class ScenManager:
     Example
     -------
     # Create ScenManager for a fitted model with 9-quarter forecast horizon
-    scen_mgr = ScenManager(dm, model, specs, horizon=9)
+    scen_mgr = ScenManager(model, horizon=9)
     
     # Create ScenManager with sum aggregation for quarterly reporting
-    scen_mgr = ScenManager(dm, model, specs, horizon=9, qtr_method='sum')
+    scen_mgr = ScenManager(model, horizon=9, qtr_method='sum')
     
     # Access scenario forecasts
     forecasts = scen_mgr.y_scens
@@ -62,16 +57,15 @@ class ScenManager:
     scenario_colors = ['orange', 'grey', 'dodgerblue', 'purple', 'brown', 'pink', 'olive', 'cyan']
     def __init__(
         self,
-        dm: DataManager,
         model: ModelBase,
-        specs: Any,
         horizon: int = 12,
-        target: Optional[str] = None,
         qtr_method: str = 'mean'
     ):
-        self.dm = dm
+        # Reference parameters from ModelBase
         self.model = model
-        self.specs = specs
+        self.dm = self.model.dm
+        self.specs = self.model.specs
+        self.target = self.model.target
         
         # Validate forecast horizon
         if not isinstance(horizon, int) or horizon <= 0:
@@ -91,32 +85,80 @@ class ScenManager:
             
         # Calculate horizon end date (P0 + horizon quarters)
         self.horizon_end = self.P0 + pd.offsets.QuarterEnd(self.horizon)
-            
-        # Resolve target
-        if target:
-            self.target = target
-        elif hasattr(model, 'y') and model.y is not None:
-            self.target = model.y.name
-        else:
-            raise ValueError("Target name could not be inferred; please specify explicitly.")
-        # Detect conditional specs globally
-        specs_list = self.specs if isinstance(self.specs, list) else [self.specs]
-        self.cond_specs: List[CondVar] = [
-            spec for spec in specs_list
-            if isinstance(spec, CondVar)
-            and any(
-                (cv == self.target) if isinstance(cv, str)
-                else (cv.name == self.target)
-                for cv in spec.cond_var
-            )
-        ]
-        self._has_cond = bool(self.cond_specs)
+
+    @property
+    def horizon_frame(self) -> Tuple[pd.Timestamp, pd.Timestamp]:
+        """
+        Get the prediction horizon time frame as a tuple of start and end dates.
+        
+        The start date is the first available date after P0 from scenario MEV data,
+        and the end date is the cutoff date after enough quarters are included 
+        as specified by self.horizon.
+        
+        Returns
+        -------
+        Tuple[pd.Timestamp, pd.Timestamp]
+            (start_date, end_date) where:
+            - start_date: First available date after P0 from scenario data
+            - end_date: Cutoff date after horizon quarters from P0
+        """
+        # Get the first scenario MEV dataframe to determine available date range
+        if not self.dm.scen_mevs:
+            raise ValueError("No scenario MEV data available to determine horizon frame.")
+        
+        # Get the first scenario set and first scenario
+        first_scen_set = list(self.dm.scen_mevs.keys())[0]
+        first_scen_name = list(self.dm.scen_mevs[first_scen_set].keys())[0]
+        first_mev_df = self.dm.scen_mevs[first_scen_set][first_scen_name]
+        
+        # Determine start date based on data structure
+        if isinstance(self.dm._internal_loader, PanelLoader):
+            # For panel data, get dates from date column
+            date_col = self.dm._internal_loader.date_col
+            if date_col in first_mev_df.columns:
+                available_dates = pd.to_datetime(first_mev_df[date_col])
+            else:
+                # Fallback to theoretical calculation
+                start_date = self.P0 + pd.Timedelta(days=1)
+                end_date = self.horizon_end
+                return (start_date, end_date)
+        else:  # TimeSeriesLoader
+            # For time series, get dates from index
+            if isinstance(first_mev_df.index, pd.DatetimeIndex):
+                available_dates = first_mev_df.index
+            else:
+                # Fallback to theoretical calculation
+                start_date = self.P0 + pd.Timedelta(days=1)
+                end_date = self.horizon_end
+                return (start_date, end_date)
+        
+        # Filter to dates after P0
+        dates_after_p0 = available_dates[available_dates > self.P0]
+        
+        if dates_after_p0.empty:
+            raise ValueError(f"No dates after P0 ({self.P0}) found in scenario data.")
+        
+        # Start date is the first available date after P0
+        start_date = dates_after_p0.min()
+        
+        # End date is the horizon end date (theoretical calculation)
+        end_date = self.horizon_end
+        
+        # Ensure end date doesn't exceed available data
+        if dates_after_p0.max() < end_date:
+            end_date = dates_after_p0.max()
+        
+        return (start_date, end_date)
 
     @property
     def X_scens(self) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
         Build and return scenario feature matrices on demand.
         
+        For models with lookback variables, uses rolling_predict() to generate
+        features that account for conditional variable effects. For models without
+        lookback variables, builds features using MEVs and internal data.
+
         Returns
         -------
         Dict[str, Dict[str, pd.DataFrame]]
@@ -129,214 +171,196 @@ class ScenManager:
         """
         X_scens: Dict[str, Dict[str, pd.DataFrame]] = {}
         
-        # Get scenario sets from MEVs
-        for scen_set, scen_map in self.dm.scen_mevs.items():
-            X_scens[scen_set] = {}
-            
-            # Check if we have internal data for this scenario set
-            has_internal = bool(self.dm.scen_internal_data)
-            if has_internal and scen_set not in self.dm.scen_internal_data:
-                raise ValueError(
-                    f"Scenario set '{scen_set}' found in MEVs but not in internal data. "
-                    "Please provide corresponding internal data or clean scen_internal_data."
-                )
-            
-            for scen_name, df_mev in scen_map.items():
-                # If we have internal data, validate scenario exists
-                if has_internal:
-                    if scen_name not in self.dm.scen_internal_data[scen_set]:
-                        raise ValueError(
-                            f"Scenario '{scen_name}' found in MEVs but not in internal data "
-                            f"for set '{scen_set}'. Please provide corresponding internal data "
-                            "or clean scen_internal_data."
-                        )
-                    internal_df = self.dm.scen_internal_data[scen_set][scen_name]
-                else:
-                    internal_df = pd.DataFrame()
+        # If model has lookback variables, use rolling_predict for all scenarios
+        if self.model.has_lookback_var:
+            # Get scenario sets from MEVs
+            for scen_set, scen_map in self.dm.scen_mevs.items():
+                X_scens[scen_set] = {}
                 
-                # Build features using both MEVs and internal data if available
-                try:
-                    X_full = self.dm.build_features(
-                        self.specs,
-                        internal_df=internal_df,
-                        mev_df=df_mev
+                # Check if we have internal data for this scenario set
+                has_internal = bool(self.dm.scen_internal_data)
+                if has_internal and scen_set not in self.dm.scen_internal_data:
+                    raise ValueError(
+                        f"Scenario set '{scen_set}' found in MEVs but not in internal data. "
+                        "Please provide corresponding internal data or clean scen_internal_data."
                     )
-                except KeyError as e:
-                    # Extract the missing variable name from the error message
-                    missing_var = str(e).strip("'")
-                    if internal_df is not None and internal_df.empty:
-                        raise ValueError(
-                            f"Scenario '{scen_name}' in set '{scen_set}' has empty internal data. "
-                            "Please ensure all scenario internal data is populated with the necessary variables."
-                        ) from e
-                    else:
-                        raise ValueError(
-                            f"Variable '{missing_var}' not found in scenario '{scen_name}' internal data (set: '{scen_set}'). "
-                            "Please ensure all required internal variables are available in the scenario data."
-                        ) from e
                 
-                # Filter to forecast period (from P0 onwards and within horizon)
-                if isinstance(self.dm._internal_loader, PanelLoader):
-                    # For panel data, filter based on date column
-                    date_col = self.dm._internal_loader.date_col
-                    if date_col in X_full.columns:
-                        X_filtered = X_full[
-                            (X_full[date_col] >= self.P0) & 
-                            (X_full[date_col] <= self.horizon_end)
-                        ].copy()
+                for scen_name, df_mev in scen_map.items():
+                    # If we have internal data, validate scenario exists
+                    if has_internal:
+                        if scen_name not in self.dm.scen_internal_data[scen_set]:
+                            raise ValueError(
+                                f"Scenario '{scen_name}' found in MEVs but not in internal data "
+                                f"for set '{scen_set}'. Please provide corresponding internal data "
+                                "or clean scen_internal_data."
+                            )
+                        internal_df = self.dm.scen_internal_data[scen_set][scen_name]
                     else:
-                        X_filtered = X_full.copy()
-                else:  # TimeSeriesLoader
-                    # For time series, filter based on DatetimeIndex
-                    if isinstance(X_full.index, pd.DatetimeIndex):
-                        X_filtered = X_full[
-                            (X_full.index >= self.P0) & 
-                            (X_full.index <= self.horizon_end)
-                        ].copy()
-                    else:
-                        X_filtered = X_full.copy()
+                        internal_df = pd.DataFrame()
                     
-                X_scens[scen_set][scen_name] = X_filtered.astype(float)
+                    # Use rolling_predict to get features for models with lookback variables
+                    _, X_features = self.model.rolling_predict(
+                        df_internal=internal_df,
+                        df_mev=df_mev,
+                        y=self.model.y_full,
+                        time_frame=self.horizon_frame
+                    )
+                    
+                    X_scens[scen_set][scen_name] = X_features.astype(float)
+        else:
+            # Original logic for models without lookback variables
+            # Get scenario sets from MEVs
+            for scen_set, scen_map in self.dm.scen_mevs.items():
+                X_scens[scen_set] = {}
+                
+                # Check if we have internal data for this scenario set
+                has_internal = bool(self.dm.scen_internal_data)
+                if has_internal and scen_set not in self.dm.scen_internal_data:
+                    raise ValueError(
+                        f"Scenario set '{scen_set}' found in MEVs but not in internal data. "
+                        "Please provide corresponding internal data or clean scen_internal_data."
+                    )
+                
+                for scen_name, df_mev in scen_map.items():
+                    # If we have internal data, validate scenario exists
+                    if has_internal:
+                        if scen_name not in self.dm.scen_internal_data[scen_set]:
+                            raise ValueError(
+                                f"Scenario '{scen_name}' found in MEVs but not in internal data "
+                                f"for set '{scen_set}'. Please provide corresponding internal data "
+                                "or clean scen_internal_data."
+                            )
+                        internal_df = self.dm.scen_internal_data[scen_set][scen_name]
+                    else:
+                        internal_df = pd.DataFrame()
+                    
+                    # Build features using both MEVs and internal data if available
+                    try:
+                        X_full = self.dm.build_features(
+                            self.specs,
+                            internal_df=internal_df,
+                            mev_df=df_mev
+                        )
+                    except KeyError as e:
+                        # Extract the missing variable name from the error message
+                        missing_var = str(e).strip("'")
+                        if internal_df is not None and internal_df.empty:
+                            raise ValueError(
+                                f"Scenario '{scen_name}' in set '{scen_set}' has empty internal data. "
+                                "Please ensure all scenario internal data is populated with the necessary variables."
+                            ) from e
+                        else:
+                            raise ValueError(
+                                f"Variable '{missing_var}' not found in scenario '{scen_name}' internal data (set: '{scen_set}'). "
+                                "Please ensure all required internal variables are available in the scenario data."
+                            ) from e
+                    
+                    # Filter to forecast period using horizon_frame
+                    start_date, end_date = self.horizon_frame
+                    
+                    if isinstance(self.dm._internal_loader, PanelLoader):
+                        # For panel data, filter based on date column
+                        date_col = self.dm._internal_loader.date_col
+                        if date_col in X_full.columns:
+                            X_filtered = X_full[
+                                (X_full[date_col] >= start_date) & 
+                                (X_full[date_col] <= end_date)
+                            ].copy()
+                        else:
+                            X_filtered = X_full.copy()
+                    else:  # TimeSeriesLoader
+                        # For time series, filter based on DatetimeIndex
+                        if isinstance(X_full.index, pd.DatetimeIndex):
+                            X_filtered = X_full[
+                                (X_full.index >= start_date) & 
+                                (X_full.index <= end_date)
+                            ].copy()
+                        else:
+                            X_filtered = X_full.copy()
+                        
+                    X_scens[scen_set][scen_name] = X_filtered.astype(float)
                 
         return X_scens
 
-    def simple_forecast(self, X: pd.DataFrame) -> pd.Series:
-        """
-        Predict target for a single scenario feature table X.
-
-        Parameters
-        ----------
-        X : pd.DataFrame
-            Feature DataFrame (e.g. from X_scens)
-
-        Returns
-        -------
-        pd.Series
-            Series of predicted values indexed like X, truncated to horizon and after P0
-        """
-        # Get predictions
-        preds = self.model.predict(X)
-        
-        # Filter to forecast period (after P0 and within horizon) based on data structure
-        if isinstance(self.dm._internal_loader, PanelLoader):
-            # For panel data, filter based on date column
-            date_col = self.dm._internal_loader.date_col
-            if date_col in X.columns:
-                # Get the indices where dates are after P0 and within horizon
-                valid_idx = X[(X[date_col] > self.P0) & (X[date_col] <= self.horizon_end)].index
-                preds = preds[valid_idx]
-        else:  # TimeSeriesLoader
-            # For time series, filter based on DatetimeIndex
-            if isinstance(preds.index, pd.DatetimeIndex):
-                preds = preds[(preds.index > self.P0) & (preds.index <= self.horizon_end)]
-            
-        return preds
-
-    def conditional_forecast(
-        self,
-        X: pd.DataFrame,
-        y0: pd.Series
-    ) -> pd.Series:
-        """
-        Iteratively forecast a single scenario: starting from P0 and initial y0 series,
-        rebuild any CondVar specs depending on the target at each step.
-
-        Currently only supports time series data (TimeSeriesLoader). Panel data (PanelLoader)
-        is not yet supported.
-
-        Parameters
-        ----------
-        X : pd.DataFrame
-            Feature DataFrame starting from P0
-        y0 : pd.Series
-            Target Series up to and including P0 (index must include P0)
-
-        Returns
-        -------
-        pd.Series
-            Series of forecasts indexed by X.index (periods > P0), truncated to horizon
-
-        Raises
-        ------
-        ValueError
-            - If y0 is not a pandas Series or doesn't include P0
-            - If using PanelLoader (not yet supported)
-        """
-        if isinstance(self.dm._internal_loader, PanelLoader):
-            raise ValueError(
-                "Conditional forecasting is not yet supported for panel data. "
-                "Please use simple_forecast() instead."
-            )
-
-        if not isinstance(y0, pd.Series) or self.P0 not in y0.index:
-            raise ValueError("y0 must be a pandas Series with its index including P0")
-            
-        # Only process data up to horizon
-        X_horizon = X[X.index <= self.horizon_end].copy()
-        
-        P0_inferred = y0.index.max()
-        X_iter = X_horizon.loc[X_horizon.index >= P0_inferred].copy()
-        y_series = y0.copy()
-        preds: List[tuple] = []
-        for idx in X_iter.index:
-            for spec in self.cond_specs:
-                spec.main_series = X_iter[spec.name]
-                updated_cond: List[pd.Series] = []
-                for cv in spec.cond_var:
-                    if isinstance(cv, str) and cv == self.target:
-                        updated_cond.append(y_series)
-                    elif isinstance(cv, pd.Series):
-                        updated_cond.append(cv)
-                    else:
-                        updated_cond.append(self.dm.internal_data[cv])
-                spec.cond_var = updated_cond
-                new_series = spec.apply()
-                X_iter[new_series.name] = new_series
-            y_hat = self.model.predict(X_iter.loc[[idx]]).iloc[0]
-            preds.append((idx, y_hat))
-            y_series.loc[idx] = y_hat
-        return pd.Series(dict(preds), name=self.target)
-
     def forecast(
         self,
-        X: pd.DataFrame,
-        y0: Optional[pd.Series] = None,
-        conditional: bool = False
+        X: pd.DataFrame
     ) -> pd.Series:
         """
-        Forecast a single scenario: simple or conditional based on flag.
+        Forecast a single scenario using the model's prediction methods.
+        
+        This method leverages the model's .predict() and .rolling_predict() methods
+        based on whether the model has lookback variables.
 
         Parameters
         ----------
         X : pd.DataFrame
-            Feature DataFrame starting from P0
-        y0 : pd.Series, optional
-            Initial target Series up to P0 (needed if conditional=True)
-        conditional : bool, default=False
-            If True and conditional specs exist, uses conditional_forecast
+            Feature DataFrame for the scenario
 
         Returns
         -------
         pd.Series
-            Series of predictions indexed like X, truncated to horizon
-
-        Raises
-        ------
-        ValueError
-            If conditional=True is used with panel data (not supported)
+            Series of predictions indexed like X, filtered to horizon_frame
         """
-        if conditional and self._has_cond:
-            if y0 is None:
-                # Get y0 based on data structure
-                if isinstance(self.dm._internal_loader, PanelLoader):
-                    raise ValueError(
-                        "Conditional forecasting is not yet supported for panel data. "
-                        "Please use simple_forecast() instead."
-                    )
-                else:  # TimeSeriesLoader
-                    y0 = self.dm.internal_data[self.target].loc[:self.P0]
-            return self.conditional_forecast(X, y0)
-        return self.simple_forecast(X)
+        # Check if model has lookback variables
+        if hasattr(self.model, 'has_lookback_var') and self.model.has_lookback_var:
+            # Use rolling_predict for models with lookback variables
+            # Get scenario internal data and MEV data
+            scen_internal = None
+            scen_mev = None
+            
+            # Find the scenario data that corresponds to this X
+            for scen_set, scen_dict in self.dm.scen_mevs.items():
+                for scen_name, mev_df in scen_dict.items():
+                    # Check if this MEV data corresponds to the X we're forecasting
+                    # This is a simplified check - in practice, you might need more sophisticated matching
+                    if hasattr(self.dm, 'scen_internal_data') and self.dm.scen_internal_data:
+                        if scen_set in self.dm.scen_internal_data and scen_name in self.dm.scen_internal_data[scen_set]:
+                            scen_internal = self.dm.scen_internal_data[scen_set][scen_name]
+                            scen_mev = mev_df
+                            break
+                if scen_internal is not None:
+                    break
+            
+            if scen_internal is None:
+                # Fallback: use internal data and first available MEV
+                scen_internal = self.dm.internal_data
+                scen_mev = list(self.dm.scen_mevs.values())[0][list(self.dm.scen_mevs.values())[0].keys()][0]
+            
+            # Get time frame as string tuple for rolling_predict
+            start_date, end_date = self.horizon_frame
+            time_frame = (str(start_date), str(end_date))
+            
+            # Use rolling_predict
+            predictions, _ = self.model.rolling_predict(
+                df_internal=scen_internal,
+                df_mev=scen_mev,
+                y=self.dm.internal_data[self.target],
+                time_frame=time_frame
+            )
+            
+            return predictions
+            
+        else:
+            # Use standard predict for models without lookback variables
+            predictions = self.model.predict(X)
+            
+            # Filter to forecast period using horizon_frame
+            start_date, end_date = self.horizon_frame
+            
+            if isinstance(self.dm._internal_loader, PanelLoader):
+                # For panel data, filter based on date column
+                date_col = self.dm._internal_loader.date_col
+                if date_col in X.columns:
+                    # Get the indices where dates are within horizon_frame
+                    valid_idx = X[(X[date_col] >= start_date) & (X[date_col] <= end_date)].index
+                    predictions = predictions[valid_idx]
+            else:  # TimeSeriesLoader
+                # For time series, filter based on DatetimeIndex
+                if isinstance(predictions.index, pd.DatetimeIndex):
+                    predictions = predictions[(predictions.index >= start_date) & (predictions.index <= end_date)]
+                
+            return predictions
 
     @property
     def y_base_scens(self) -> Dict[str, Dict[str, pd.Series]]:
@@ -654,34 +678,16 @@ class ScenManager:
 
         Notes
         -----
-        For time series data:
-            - Uses the target series up to P0 for conditional forecasting
-        For panel data:
-            - Only supports simple forecasting (no conditional forecasting)
-            - Forecasts are made for each entity-date combination
+        - Uses the model's .predict() method for standard forecasting
+        - Uses the model's .rolling_predict() method for models with lookback variables
+        - Automatically handles both time series and panel data
         """
-        # Get initial conditions based on data structure
-        if isinstance(self.dm._internal_loader, TimeSeriesLoader):
-            y0_series = self.dm.internal_data[self.target].loc[:self.P0]
-        else:  # PanelLoader
-            y0_series = None  # Panel data doesn't support conditional forecasting
-            if self._has_cond:
-                warnings.warn(
-                    "Conditional forecasting is not supported for panel data. "
-                    "Using simple_forecast() instead.",
-                    UserWarning
-                )
-
         results: Dict[str, Dict[str, pd.Series]] = {}
         for scen_set, scen_dict in self.X_scens.items():
             results[scen_set] = {}
             for scen_name, X in scen_dict.items():
-                # For panel data or when no conditional specs, use simple forecast
-                if isinstance(self.dm._internal_loader, PanelLoader) or not self._has_cond:
-                    results[scen_set][scen_name] = self.forecast(X, conditional=False)
-                else:
-                    # For time series with conditional specs, use conditional forecast
-                    results[scen_set][scen_name] = self.forecast(X, y0_series, conditional=True)
+                # Use the simplified forecast method
+                results[scen_set][scen_name] = self.forecast(X)
         return results
 
     @property
