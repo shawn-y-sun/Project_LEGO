@@ -326,6 +326,8 @@ class CM:
         show_out: bool = True,
         show_tests: bool = False,
         show_scens: bool = False,
+        show_sens: bool = False,
+        show_stab: bool = False,
         perf_kwargs: Optional[Dict[str, Any]] = None,
         test_kwargs: Optional[Dict[str, Any]] = None,
         scen_kwargs: Optional[Dict[str, Any]] = None
@@ -343,6 +345,10 @@ class CM:
             If True, include diagnostic test results.
         show_scens : bool, default False
             If True, display scenario forecast and variable plots.
+        show_sens : bool, default False
+            If True, display sensitivity testing plots for all scenarios.
+        show_stab : bool, default False
+            If True, display stability test results using the in-sample model's stability test.
         perf_kwargs : dict, optional
             Keyword arguments passed to performance plotting methods.
         test_kwargs : dict, optional
@@ -411,3 +417,47 @@ class CM:
             # If no scenario managers are available, inform the user
             if not self.scen_manager_in and (not show_full or not self.scen_manager_full):
                 print("\nNo scenario managers available. Scenario data may not be loaded in DataManager.")
+
+        # Sensitivity testing plots
+        if show_sens:
+            # Run sensitivity testing for in-sample model
+            if self.scen_manager_in is not None:
+                print(f"\n=== Model: {self.model_id} — Sensitivity Analysis ===")
+                try:
+                    self.scen_manager_in.sens_test.plot_all()
+                except Exception as e:
+                    print(f"Error generating in-sample sensitivity plots: {e}")
+            
+            # Run sensitivity testing for full-sample model if requested
+            if show_full and self.scen_manager_full is not None:
+                print(f"\n=== Model: {self.model_id} — Full-Sample Sensitivity Analysis ===")
+                try:
+                    self.scen_manager_full.sens_test.plot_all()
+                except Exception as e:
+                    print(f"Error generating full-sample sensitivity plots: {e}")
+            
+            # If no scenario managers are available, inform the user
+            if not self.scen_manager_in and (not show_full or not self.scen_manager_full):
+                print("\nNo scenario managers available for sensitivity testing. Scenario data may not be loaded in DataManager.")
+
+        # Stability testing
+        if show_stab:
+            # In-sample stability testing
+            if self.model_in is not None:
+                print(f"\n=== Model: {self.model_id} — Model Stability Analysis ===")
+                try:
+                    self.model_in.stability_test.show_all()
+                except Exception as e:
+                    print(f"Error generating in-sample stability test results: {e}")
+            else:
+                print("\nNo in-sample model available for stability testing. Call build(sample='in' or 'both').")
+            
+            # Full-sample stability testing (if show_full is True)
+            if show_full and self.model_full is not None:
+                print(f"\n=== Model: {self.model_id} — Model Stability Analysis ===")
+                try:
+                    self.model_full.stability_test.show_all()
+                except Exception as e:
+                    print(f"Error generating full-sample stability test results: {e}")
+            elif show_full and self.model_full is None:
+                print("\nNo full-sample model available for stability testing. Call build(sample='full' or 'both').")

@@ -216,6 +216,8 @@ class Segment:
         show_params: bool = False,
         show_tests: bool = False,
         show_scens: bool = False,
+        show_sens: bool = False,
+        show_stab: bool = False,
         perf_kwargs: Optional[Dict[str, Any]] = None,
         params_kwargs: Optional[Dict[str, Any]] = None,
         test_kwargs: Optional[Dict[str, Any]] = None,
@@ -244,6 +246,10 @@ class Segment:
             Whether to include diagnostic test results.
         show_scens : bool, default False
             Whether to include scenario forecast and variable plots.
+        show_sens : bool, default False
+            Whether to include sensitivity testing plots for all scenarios.
+        show_stab : bool, default False
+            Whether to include stability test results for each model.
         perf_kwargs : Optional[Dict[str, Any]], default None
             Additional kwargs for performance display.
         params_kwargs : Optional[Dict[str, Any]], default None
@@ -309,6 +315,54 @@ class Segment:
             test_kwargs=test_kwargs,
             scen_kwargs=scen_kwargs
         )
+        
+        # Sensitivity testing (handled separately since it's not part of ReportSet)
+        if show_sens:
+            for cm_id in cm_ids:
+                cm = self.cms[cm_id]
+                # In-sample sensitivity testing
+                if cm.model_in is not None and hasattr(cm.model_in, 'scen_manager') and cm.model_in.scen_manager is not None:
+                    print(f"\n=== Model: {cm_id} — In-Sample Sensitivity Analysis ===")
+                    try:
+                        cm.model_in.scen_manager.sens_test.plot_all()
+                    except Exception as e:
+                        print(f"Error generating in-sample sensitivity plots for {cm_id}: {e}")
+                
+                # Full-sample sensitivity testing (if report_sample is 'full')
+                if report_sample == 'full' and cm.model_full is not None and hasattr(cm.model_full, 'scen_manager') and cm.model_full.scen_manager is not None:
+                    print(f"\n=== Model: {cm_id} — Full-Sample Sensitivity Analysis ===")
+                    try:
+                        cm.model_full.scen_manager.sens_test.plot_all()
+                    except Exception as e:
+                        print(f"Error generating full-sample sensitivity plots for {cm_id}: {e}")
+        
+        # Stability testing (handled separately since it's not part of ReportSet)
+        if show_stab:
+            for cm_id in cm_ids:
+                cm = self.cms[cm_id]
+                
+                # In-sample stability testing
+                if cm.model_in is not None:
+                    print(f"\n=== Model: {cm_id} — In-Sample Stability Analysis ===")
+                    try:
+                        cm.model_in.stability_test.show_all()
+                    except Exception as e:
+                        print(f"Error generating in-sample stability test results for {cm_id}: {e}")
+                else:
+                    print(f"\n=== Model: {cm_id} — No In-Sample Model Available for Stability Testing ===")
+                    print("In-sample model not built. Call build_cm() first.")
+                
+                # Full-sample stability testing (if report_sample is 'full')
+                if report_sample == 'full':
+                    if cm.model_full is not None:
+                        print(f"\n=== Model: {cm_id} — Full-Sample Stability Analysis ===")
+                        try:
+                            cm.model_full.stability_test.show_all()
+                        except Exception as e:
+                            print(f"Error generating full-sample stability test results for {cm_id}: {e}")
+                    else:
+                        print(f"\n=== Model: {cm_id} — No Full-Sample Model Available for Stability Testing ===")
+                        print("Full-sample model not built. Call build_cm() first.")
     
     def plot_vars(
         self,
