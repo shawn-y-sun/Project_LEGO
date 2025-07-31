@@ -518,15 +518,6 @@ class SensitivityTest:
                 baseline_col_name = f"{scen_set_name}_{scen_name}"
                 
                 # Start with baseline predictions as first column
-                # Ensure baseline_pred is a pandas Series
-                if not isinstance(baseline_pred, pd.Series):
-                    if hasattr(baseline_pred, '__len__') and len(baseline_pred) > 0:
-                        # Convert numpy array or list to pandas Series
-                        baseline_pred = pd.Series(baseline_pred, name=baseline_col_name)
-                    else:
-                        # Handle empty or scalar values
-                        baseline_pred = pd.Series([], name=baseline_col_name)
-                
                 summary_df = pd.DataFrame({baseline_col_name: baseline_pred})
                 
                 # Check if we have parameter shock results for this scenario
@@ -602,15 +593,6 @@ class SensitivityTest:
                 baseline_col_name = f"{scen_set_name}_{scen_name}"
                 
                 # Start with baseline predictions as first column
-                # Ensure baseline_pred is a pandas Series
-                if not isinstance(baseline_pred, pd.Series):
-                    if hasattr(baseline_pred, '__len__') and len(baseline_pred) > 0:
-                        # Convert numpy array or list to pandas Series
-                        baseline_pred = pd.Series(baseline_pred, name=baseline_col_name)
-                    else:
-                        # Handle empty or scalar values
-                        baseline_pred = pd.Series([], name=baseline_col_name)
-                
                 summary_df = pd.DataFrame({baseline_col_name: baseline_pred})
                 
                 # Check if we have input shock results for this scenario
@@ -738,12 +720,6 @@ class SensitivityTest:
             
             # Plot baseline with simplified label (just scenario name)
             baseline_data = df[baseline_col]
-            
-            # Ensure baseline_data is a pandas Series with proper index
-            if not isinstance(baseline_data, pd.Series):
-                # Convert to pandas Series if it's a numpy array
-                baseline_data = pd.Series(baseline_data, index=df.index, name=baseline_col)
-            
             ax.plot(baseline_data.index, baseline_data.values, 'b-', linewidth=2, label=scenario_name)
             
             # Plot shock results with simplified labels (just shock value)
@@ -753,11 +729,6 @@ class SensitivityTest:
             for j, shock_col in enumerate(shock_cols):
                 color = shock_colors[j % len(shock_colors)]
                 shock_data_vals = df[shock_col]
-                
-                # Ensure shock_data_vals is a pandas Series with proper index
-                if not isinstance(shock_data_vals, pd.Series):
-                    # Convert to pandas Series if it's a numpy array
-                    shock_data_vals = pd.Series(shock_data_vals, index=df.index, name=shock_col)
                 
                 # Extract just the shock part (e.g., 'pricing+1se' -> '+1se')
                 shock_part = shock_col[len(param):]
@@ -879,17 +850,24 @@ class SensitivityTest:
         """
         self.plot_shock(scenario_set, scenario_name, self.input_shock_df, "input")
 
-    def plot_all_param_shock(self) -> None:
+    def plot_all_param_shock(self, sev_only: bool = True) -> None:
         """
         Plot parameter shock results for all scenarios across all scenario sets.
         
         Runs plot_param_shock() for each scenario in each scenario set,
         with clear separators and labels to distinguish between different scenarios.
         
+        Parameters
+        ----------
+        sev_only : bool, default True
+            If True, only plot scenarios whose names start with 'sev' (case-insensitive).
+            If False, plot all scenarios.
+            
         Example
         -------
         >>> sens_test = SensitivityTest(scen_manager)
-        >>> sens_test.plot_all_param_shock()
+        >>> sens_test.plot_all_param_shock()  # Only severe scenarios
+        >>> sens_test.plot_all_param_shock(sev_only=False)  # All scenarios
         """
         if not hasattr(self, 'param_shock_df'):
             warnings.warn("No parameter shock data available. Run y_param_shock first.")
@@ -906,23 +884,34 @@ class SensitivityTest:
         # Plot each scenario set and scenario
         for scenario_set in param_shock_data.keys():
             for scenario_name in param_shock_data[scenario_set].keys():
+                # Filter by sev_only if specified
+                if sev_only and not scenario_name.lower().startswith('sev'):
+                    continue
+                    
                 try:
                     self.plot_param_shock(scenario_set, scenario_name)
                 except Exception as e:
                     print(f"Error plotting scenario '{scenario_name}' in scenario set '{scenario_set}': {e}")
                     continue
 
-    def plot_all_input_shock(self) -> None:
+    def plot_all_input_shock(self, sev_only: bool = True) -> None:
         """
         Plot input shock results for all scenarios across all scenario sets.
         
         Runs plot_input_shock() for each scenario in each scenario set,
         with clear separators and labels to distinguish between different scenarios.
         
+        Parameters
+        ----------
+        sev_only : bool, default True
+            If True, only plot scenarios whose names start with 'sev' (case-insensitive).
+            If False, plot all scenarios.
+            
         Example
         -------
         >>> sens_test = SensitivityTest(scen_manager)
-        >>> sens_test.plot_all_input_shock()
+        >>> sens_test.plot_all_input_shock()  # Only severe scenarios
+        >>> sens_test.plot_all_input_shock(sev_only=False)  # All scenarios
         """
         if not hasattr(self, 'input_shock_df'):
             warnings.warn("No input shock data available. Run y_input_shock first.")
@@ -939,28 +928,39 @@ class SensitivityTest:
         # Plot each scenario set and scenario
         for scenario_set in input_shock_data.keys():
             for scenario_name in input_shock_data[scenario_set].keys():
+                # Filter by sev_only if specified
+                if sev_only and not scenario_name.lower().startswith('sev'):
+                    continue
+                    
                 try:
                     self.plot_input_shock(scenario_set, scenario_name)
                 except Exception as e:
                     print(f"Error plotting input shock for scenario '{scenario_name}' in scenario set '{scenario_set}': {e}")
                     continue
 
-    def plot_all(self) -> None:
+    def plot_all(self, sev_only: bool = True) -> None:
         """
         Run both parameter and input sensitivity testing plots for all scenarios.
         
         This method executes both plot_all_param_shock() and plot_all_input_shock()
         to provide comprehensive sensitivity analysis visualization.
         
+        Parameters
+        ----------
+        sev_only : bool, default True
+            If True, only plot scenarios whose names start with 'sev' (case-insensitive).
+            If False, plot all scenarios.
+            
         Example
         -------
         >>> sens_test = SensitivityTest(scen_manager)
-        >>> sens_test.plot_all()
+        >>> sens_test.plot_all()  # Only severe scenarios
+        >>> sens_test.plot_all(sev_only=False)  # All scenarios
         """
         # Run parameter sensitivity testing plots
-        self.plot_all_param_shock()
+        self.plot_all_param_shock(sev_only=sev_only)
         
         # Run input sensitivity testing plots
-        self.plot_all_input_shock()
+        self.plot_all_input_shock(sev_only=sev_only)
             
 
