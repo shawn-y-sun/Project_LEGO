@@ -703,12 +703,18 @@ class SensitivityTest:
         fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_width, 3 * n_rows))
         
         # Handle axes array dimensions
+        # When we have only 1 subplot, plt.subplots returns a single Axes object, not an array
         if n_params == 1:
-            axes = [axes]
+            axes = [axes]  # Convert single Axes to list for consistent indexing
         elif n_rows == 1 and n_cols > 1:
-            axes = axes.reshape(1, -1)
+            # Single row, multiple columns - axes is already 1D array
+            pass  # No reshaping needed
         elif n_cols == 1 and n_rows > 1:
-            axes = axes.reshape(-1, 1)
+            # Single column, multiple rows - axes is already 1D array  
+            pass  # No reshaping needed
+        else:
+            # Multiple rows and columns - axes is already 2D array
+            pass  # No reshaping needed
         
         # Define colors for shock lines
         shock_colors = ['red', 'orange', 'green', 'purple', 'brown', 'pink', 'gray', 'olive']
@@ -716,10 +722,16 @@ class SensitivityTest:
         # Plot each parameter
         for i, param in enumerate(param_names):
             if n_params == 1:
+                # Single parameter - axes is now a list with one element
                 ax = axes[0]
             elif n_rows == 1:
+                # Single row - axes is 1D array, index directly
+                ax = axes[i]
+            elif n_cols == 1:
+                # Single column - axes is 1D array, index directly
                 ax = axes[i]
             else:
+                # Multiple rows and columns - axes is 2D array
                 row = i // n_cols
                 col = i % n_cols
                 ax = axes[row, col]
@@ -800,9 +812,17 @@ class SensitivityTest:
         # Hide empty subplots
         if n_rows * n_cols > n_params:
             for i in range(n_params, n_rows * n_cols):
-                if n_rows == 1:
+                if n_params == 1:
+                    # Single parameter case - no empty subplots to hide
+                    pass
+                elif n_rows == 1:
+                    # Single row - axes is 1D array
+                    axes[i].set_visible(False)
+                elif n_cols == 1:
+                    # Single column - axes is 1D array
                     axes[i].set_visible(False)
                 else:
+                    # Multiple rows and columns - axes is 2D array
                     row = i // n_cols
                     col = i % n_cols
                     axes[row, col].set_visible(False)
