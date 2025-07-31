@@ -518,6 +518,15 @@ class SensitivityTest:
                 baseline_col_name = f"{scen_set_name}_{scen_name}"
                 
                 # Start with baseline predictions as first column
+                # Ensure baseline_pred is a pandas Series
+                if not isinstance(baseline_pred, pd.Series):
+                    if hasattr(baseline_pred, '__len__') and len(baseline_pred) > 0:
+                        # Convert numpy array or list to pandas Series
+                        baseline_pred = pd.Series(baseline_pred, name=baseline_col_name)
+                    else:
+                        # Handle empty or scalar values
+                        baseline_pred = pd.Series([], name=baseline_col_name)
+                
                 summary_df = pd.DataFrame({baseline_col_name: baseline_pred})
                 
                 # Check if we have parameter shock results for this scenario
@@ -593,6 +602,15 @@ class SensitivityTest:
                 baseline_col_name = f"{scen_set_name}_{scen_name}"
                 
                 # Start with baseline predictions as first column
+                # Ensure baseline_pred is a pandas Series
+                if not isinstance(baseline_pred, pd.Series):
+                    if hasattr(baseline_pred, '__len__') and len(baseline_pred) > 0:
+                        # Convert numpy array or list to pandas Series
+                        baseline_pred = pd.Series(baseline_pred, name=baseline_col_name)
+                    else:
+                        # Handle empty or scalar values
+                        baseline_pred = pd.Series([], name=baseline_col_name)
+                
                 summary_df = pd.DataFrame({baseline_col_name: baseline_pred})
                 
                 # Check if we have input shock results for this scenario
@@ -708,6 +726,12 @@ class SensitivityTest:
             
             # Plot baseline with simplified label (just scenario name)
             baseline_data = df[baseline_col]
+            
+            # Ensure baseline_data is a pandas Series with proper index
+            if not isinstance(baseline_data, pd.Series):
+                # Convert to pandas Series if it's a numpy array
+                baseline_data = pd.Series(baseline_data, index=df.index, name=baseline_col)
+            
             ax.plot(baseline_data.index, baseline_data.values, 'b-', linewidth=2, label=scenario_name)
             
             # Plot shock results with simplified labels (just shock value)
@@ -717,6 +741,12 @@ class SensitivityTest:
             for j, shock_col in enumerate(shock_cols):
                 color = shock_colors[j % len(shock_colors)]
                 shock_data_vals = df[shock_col]
+                
+                # Ensure shock_data_vals is a pandas Series with proper index
+                if not isinstance(shock_data_vals, pd.Series):
+                    # Convert to pandas Series if it's a numpy array
+                    shock_data_vals = pd.Series(shock_data_vals, index=df.index, name=shock_col)
+                
                 # Extract just the shock part (e.g., 'pricing+1se' -> '+1se')
                 shock_part = shock_col[len(param):]
                 ax.plot(shock_data_vals.index, shock_data_vals.values, '--', color=color, 
