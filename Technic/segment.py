@@ -13,6 +13,8 @@ from .template import ExportTemplateBase
 from .report import ReportSet
 from .search import ModelSearch
 from .scenario import ScenManager
+from .sensitivity import SensitivityTest
+from .stability import WalkForwardTest
 from .export import (
     EXPORT_CONTENT_TYPES,
     ExportStrategy,
@@ -689,7 +691,9 @@ class Segment:
             Valid types are:
             - 'timeseries_data': Combined modeling dataset and fit results
             - 'staticStats': Model statistics and metrics
-            - 'scenario_testing': Scenario testing results
+            - 'scenario_testing': Scenario testing results with target and base variables
+            - 'sensitivity_testing': Sensitivity testing results for parameters and inputs
+            - 'test_results': Comprehensive test results from all tests
         
         Example
         -------
@@ -701,6 +705,12 @@ class Segment:
         ...     model_ids=['model1'],
         ...     output_dir='my_exports',
         ...     content=['timeseries_data', 'staticStats']
+        ... )
+        >>> 
+        >>> # Export scenario and sensitivity testing results
+        >>> segment.export(
+        ...     content=['scenario_testing', 'sensitivity_testing'],
+        ...     output_dir='scenario_analysis'
         ... )
         """
         # Convert output_dir to Path object
@@ -722,6 +732,8 @@ class Segment:
         # Print export start message
         print(f"\nStarting export for segment '{self.segment_id}':")
         print(f"- Target variable: {self.target}")
+        if self.target_base:
+            print(f"- Base variable: {self.target_base}")
         print(f"- Number of models: {len(models_to_export)}")
         print(f"- Output directory: {output_dir}")
         
@@ -753,10 +765,10 @@ class Segment:
         exportable_models = []
         for model_id, cm in models_to_export:
             if isinstance(cm.model_in, OLS):
-                adapter = OLSModelAdapter(cm.model_in, model_id)
+                adapter = OLSModelAdapter(cm.model_in, model_id + "_in")
                 exportable_models.append(adapter)
             if isinstance(cm.model_full, OLS):
-                adapter = OLSModelAdapter(cm.model_full, model_id)
+                adapter = OLSModelAdapter(cm.model_full, model_id + "_full")
                 exportable_models.append(adapter)
         
         # Export models
