@@ -234,12 +234,13 @@ class OLSExportStrategy(ExportStrategy):
         self._current_chunk_size = 0
         self._written_files = set()  # Track which files have been written
     
-    def _write_chunk(self, output_dir: Path, content_type: str):
+    def _write_chunk(self, output_dir: Path, content_type: str, force_write: bool = False):
         """Write a chunk of data to disk with proper file handling and user feedback.
         
         Args:
             output_dir: Directory to write the file to
             content_type: Type of content being written ('timeseries_data', 'staticStats', etc.)
+            force_write: If True, forces writing regardless of chunk size
         """
         # Configuration for different content types
         content_config = {
@@ -260,7 +261,7 @@ class OLSExportStrategy(ExportStrategy):
             },
             'test_results': {
                 'chunks': self._test_results_chunks,
-                'columns': ['model', 'test_name', 'test_target', 'test_statistics', 'test_statistic_value'],
+                'columns': ['model', 'test_name', 'test_target', 'test_statistic', 'test_statistic_value', 'pass'],
                 'filename': 'test_results.csv'
             },
             'sensitivity_testing': {
@@ -279,37 +280,30 @@ class OLSExportStrategy(ExportStrategy):
         columns = config['columns']
         filepath = output_dir / config['filename']
         
-        # Skip if we've already written this file
-        if filepath in self._written_files:
-            chunks.clear()
-            self._current_chunk_size = 0
-            return
-        
         # Combine chunks and ensure column order
         df = pd.concat(chunks, copy=False)
         df = df[columns]
         
-        # Handle file overwrite
+        # Determine write mode based on file existence
         file_exists = filepath.exists()
+        write_mode = 'a' if file_exists else 'w'
+        write_header = not file_exists
         
         try:
-            # Write data (will overwrite existing files)
-            df.to_csv(filepath, index=False)
+            # Write data (append if file exists, otherwise create new)
+            df.to_csv(filepath, mode=write_mode, header=write_header, index=False)
             
-            # Print appropriate success message
-            if file_exists:
-                print(f"\n✓ Successfully overwrote {content_type} file to {filepath}")
-            else:
-                print(f"\n✓ Successfully wrote {content_type} file to {filepath}")
-            
-            # Mark this file as written
-            self._written_files.add(filepath)
+            # Print appropriate success message only for new files or force_write
+            if force_write or not file_exists:
+                if file_exists:
+                    print(f"\n✓ Successfully updated {content_type} file: {filepath}")
+                else:
+                    print(f"\n✓ Successfully wrote {content_type} file: {filepath}")
+                # Mark this file as written only when we print the message
+                self._written_files.add(filepath)
             
         except Exception as e:
-            if file_exists:
-                print(f"\n✗ Failed to overwrite {content_type} file to {filepath}: {str(e)}")
-            else:
-                print(f"\n✗ Failed to write {content_type} file to {filepath}: {str(e)}")
+            print(f"\n✗ Failed to write {content_type} file to {filepath}: {str(e)}")
         
         # Clear the chunks
         chunks.clear()
@@ -378,14 +372,14 @@ class OLSExportStrategy(ExportStrategy):
         The output will include:
         - Target variable forecasts
         - Base variable forecasts (if available)
-        - Quarter labels for better period identification
+        - Both monthly and quarterly data in datetime format
         
         Output format:
         - model: Model identifier
         - scenario_name: Scenario set name (e.g., 'EWST_2024')
         - severity: Severity level (e.g., 'base', 'adv', 'sev')
-        - date: End of period date
-        - quarter_label: Period label (e.g., 'P0', 'P1', 'YY-MM')
+        - date: End of period date in datetime format
+        - frequency: 'monthly' or 'quarterly'
         - value_type: 'Target' or 'Base'
         - value: The forecasted value
         """
@@ -403,21 +397,21 @@ class OLSExportStrategy(ExportStrategy):
     
     def save_consolidated_results(self, output_dir: Path) -> None:
         """Save any remaining data chunks to files."""
-        # Write any remaining chunks
+        # Write any remaining chunks with force_write=True to ensure final consolidation
         if self.should_export('timeseries_data'):
-            self._write_chunk(output_dir, 'timeseries_data')
+            self._write_chunk(output_dir, 'timeseries_data', force_write=True)
         
         if self.should_export('staticStats'):
-            self._write_chunk(output_dir, 'staticStats')
+            self._write_chunk(output_dir, 'staticStats', force_write=True)
         
         if self.should_export('scenario_testing'):
-            self._write_chunk(output_dir, 'scenario_testing')
+            self._write_chunk(output_dir, 'scenario_testing', force_write=True)
         
         if self.should_export('test_results'):
-            self._write_chunk(output_dir, 'test_results')
+            self._write_chunk(output_dir, 'test_results', force_write=True)
         
         if self.should_export('sensitivity_testing'):  # Add sensitivity testing export
-            self._write_chunk(output_dir, 'sensitivity_testing')
+            self._write_chunk(output_dir, 'sensitivity_testing', force_write=True)
         
         # Reset containers
         self._initialize_containers()
@@ -880,8 +874,9 @@ class OLSModelAdapter(ExportableModel):
         - model: string, model_id
         - test_name: string (e.g., 'Normality', 'Stationarity', 'Coefficient Significance')
         - test_target: string (e.g., 'Residual', variable name, target variable name)
-        - test_statistics: string (e.g., 'Statistic_JB', 'P-value_ADF', 'Pass?', 'VIF Observed')
-        - test_statistic_value: numerical (boolean values converted to 1/0)
+        - test_statistic: string (e.g., 'Statistic_JB', 'P-value_ADF', 'VIF Observed')
+        - test_statistic_value: numerical
+        - pass: boolean (True/False indicating if the test passed)
         
         Each test provides three layers of information:
         1. Expected/criteria/threshold value
@@ -1007,14 +1002,19 @@ class OLSModelAdapter(ExportableModel):
             # Use clean target name without test index
             clean_test_target = test_target
             
-            # Add the three layers of information
+            # Add test statistic and p-value with pass status
+            test_passed = None
+            if pass_value is not None:
+                test_passed = bool(pass_value)
+                
             if statistic_value is not None:
                 results_list.append({
                     'model': model_id,
                     'test_name': test_name,
                     'test_target': clean_test_target,
-                    'test_statistics': f'Statistic_{test_type}',
-                    'test_statistic_value': statistic_value
+                    'test_statistic': f'Statistic_{test_type}',
+                    'test_statistic_value': statistic_value,
+                    'pass': test_passed
                 })
                 added_count += 1
             
@@ -1023,19 +1023,11 @@ class OLSModelAdapter(ExportableModel):
                     'model': model_id,
                     'test_name': test_name,
                     'test_target': clean_test_target,
-                    'test_statistics': f'P-value_{test_type}',
-                    'test_statistic_value': pvalue_value
+                    'test_statistic': f'P-value_{test_type}',
+                    'test_statistic_value': pvalue_value,
+                    'pass': test_passed
                 })
                 added_count += 1
-            
-            if pass_value is not None:
-                results_list.append({
-                    'model': model_id,
-                    'test_name': test_name,
-                    'test_target': clean_test_target,
-                    'test_statistics': 'Pass?',
-                    'test_statistic_value': pass_value
-                })
 
     def _process_autocorrelation_test(self, results_list: list, model_id: str, result):
         """Process autocorrelation tests with three-layer structure."""
@@ -1066,6 +1058,11 @@ class OLSModelAdapter(ExportableModel):
                 clean_test_name = 'Autocorrelation'
                 clean_test_target = 'Residual'
                 
+                # Determine test pass status
+                test_passed = None
+                if pass_value is not None:
+                    test_passed = bool(pass_value)
+                
                 # Handle Durbin-Watson test specifically
                 if 'Durbin' in test_idx or 'DW' in test_idx or isinstance(threshold_info, (tuple, list)):
                     # Add threshold information with separate upper and lower limits
@@ -1080,15 +1077,17 @@ class OLSModelAdapter(ExportableModel):
                             'model': model_id,
                             'test_name': clean_test_name,
                             'test_target': clean_test_target,
-                            'test_statistics': 'Threshold Lower Limit',
-                            'test_statistic_value': float(lower_limit)
+                            'test_statistic': 'Threshold Lower Limit',
+                            'test_statistic_value': float(lower_limit),
+                            'pass': test_passed
                         },
                         {
                             'model': model_id,
                             'test_name': clean_test_name,
                             'test_target': clean_test_target,
-                            'test_statistics': 'Threshold Upper Limit',
-                            'test_statistic_value': float(upper_limit)
+                            'test_statistic': 'Threshold Upper Limit',
+                            'test_statistic_value': float(upper_limit),
+                            'pass': test_passed
                         }
                     ])
                     
@@ -1097,8 +1096,9 @@ class OLSModelAdapter(ExportableModel):
                             'model': model_id,
                             'test_name': clean_test_name,
                             'test_target': clean_test_target,
-                            'test_statistics': 'Durbin-Watson Observed',
-                            'test_statistic_value': dw_value
+                            'test_statistic': 'Durbin-Watson Observed',
+                            'test_statistic_value': dw_value,
+                            'pass': test_passed
                         })
                 else:
                     # For other autocorrelation tests, just add the statistic
@@ -1107,43 +1107,41 @@ class OLSModelAdapter(ExportableModel):
                             'model': model_id,
                             'test_name': clean_test_name,
                             'test_target': clean_test_target,
-                            'test_statistics': 'Statistic Observed',
-                            'test_statistic_value': dw_value
+                            'test_statistic': 'Statistic Observed',
+                            'test_statistic_value': dw_value,
+                            'pass': test_passed
                         })
-                
-                # Add pass status for all autocorrelation tests
-                if pass_value is not None:
-                    results_list.append({
-                        'model': model_id,
-                        'test_name': clean_test_name,
-                        'test_target': clean_test_target,
-                        'test_statistics': 'Pass?',
-                        'test_statistic_value': pass_value
-                    })
         
         elif isinstance(result, (int, float)):
             # Handle direct DW statistic value (legacy support)
+            # Determine pass status based on DW statistic
+            dw_stat = float(result)
+            dw_passed = 1.5 <= dw_stat <= 2.5  # Standard DW acceptable range
+            
             results_list.extend([
                 {
                     'model': model_id,
                     'test_name': 'Autocorrelation',
                     'test_target': 'Residual',
-                    'test_statistics': 'Threshold Lower Limit',
-                    'test_statistic_value': 1.5
+                    'test_statistic': 'Threshold Lower Limit',
+                    'test_statistic_value': 1.5,
+                    'pass': dw_passed
                 },
                 {
                     'model': model_id,
                     'test_name': 'Autocorrelation',
                     'test_target': 'Residual',
-                    'test_statistics': 'Threshold Upper Limit',
-                    'test_statistic_value': 2.5
+                    'test_statistic': 'Threshold Upper Limit',
+                    'test_statistic_value': 2.5,
+                    'pass': dw_passed
                 },
                 {
                     'model': model_id,
                     'test_name': 'Autocorrelation',
                     'test_target': 'Residual',
-                    'test_statistics': 'Durbin-Watson Observed',
-                    'test_statistic_value': float(result)
+                    'test_statistic': 'Durbin-Watson Observed',
+                    'test_statistic_value': dw_stat,
+                    'pass': dw_passed
                 }
             ])
 
@@ -1180,15 +1178,21 @@ class OLSModelAdapter(ExportableModel):
             if 'Passed' in test_row and pd.notnull(test_row['Passed']):
                 pass_value = float(1.0 if test_row['Passed'] else 0.0)
             
-            # Add three layers of information
+            # Determine test pass status
+            test_passed = None
+            if pass_value is not None:
+                test_passed = bool(pass_value)
+            
+            # Add expected sign and coefficient information with pass status
             if expected_sign_value is not None:
                 sign_str = 'positive' if expected_sign_value > 0 else 'negative' if expected_sign_value < 0 else 'zero'
                 results_list.append({
                     'model': model_id,
                     'test_name': 'Coefficient Sign Check',
                     'test_target': var_name,
-                    'test_statistics': f'Expected Sign ({sign_str})',
-                    'test_statistic_value': expected_sign_value
+                    'test_statistic': f'Expected Sign ({sign_str})',
+                    'test_statistic_value': expected_sign_value,
+                    'pass': test_passed
                 })
             
             if coefficient_value is not None:
@@ -1196,17 +1200,9 @@ class OLSModelAdapter(ExportableModel):
                     'model': model_id,
                     'test_name': 'Coefficient Sign Check',
                     'test_target': var_name,
-                    'test_statistics': 'Coefficient Estimated',
-                    'test_statistic_value': coefficient_value
-                })
-            
-            if pass_value is not None:
-                results_list.append({
-                    'model': model_id,
-                    'test_name': 'Coefficient Sign Check',
-                    'test_target': var_name,
-                    'test_statistics': 'Pass?',
-                    'test_statistic_value': pass_value
+                    'test_statistic': 'Coefficient Estimated',
+                    'test_statistic_value': coefficient_value,
+                    'pass': test_passed
                 })
 
     def _process_coefficient_significance_test(self, results_list: list, model_id: str, result):
@@ -1243,13 +1239,19 @@ class OLSModelAdapter(ExportableModel):
             if 'Passed' in test_row and pd.notnull(test_row['Passed']):
                 pass_value = float(1.0 if test_row['Passed'] else 0.0)
             
-            # Add three layers of information
+            # Determine test pass status
+            test_passed = None
+            if pass_value is not None:
+                test_passed = bool(pass_value)
+            
+            # Add threshold, p-value, and t-statistic information with pass status
             results_list.append({
                 'model': model_id,
                 'test_name': 'Coefficient Significance',
                 'test_target': var_name,
-                'test_statistics': 'Significance Threshold',
-                'test_statistic_value': threshold_value
+                'test_statistic': 'Significance Threshold',
+                'test_statistic_value': threshold_value,
+                'pass': test_passed
             })
             
             if pvalue_value is not None:
@@ -1257,8 +1259,9 @@ class OLSModelAdapter(ExportableModel):
                     'model': model_id,
                     'test_name': 'Coefficient Significance',
                     'test_target': var_name,
-                    'test_statistics': 'P-value Observed',
-                    'test_statistic_value': pvalue_value
+                    'test_statistic': 'P-value Observed',
+                    'test_statistic_value': pvalue_value,
+                    'pass': test_passed
                 })
             
             if tstat_value is not None:
@@ -1266,17 +1269,9 @@ class OLSModelAdapter(ExportableModel):
                     'model': model_id,
                     'test_name': 'Coefficient Significance',
                     'test_target': var_name,
-                    'test_statistics': 'T-statistic Observed',
-                    'test_statistic_value': tstat_value
-                })
-            
-            if pass_value is not None:
-                results_list.append({
-                    'model': model_id,
-                    'test_name': 'Coefficient Significance',
-                    'test_target': var_name,
-                    'test_statistics': 'Pass?',
-                    'test_statistic_value': pass_value
+                    'test_statistic': 'T-statistic Observed',
+                    'test_statistic_value': tstat_value,
+                    'pass': test_passed
                 })
 
     def _process_error_measures_test(self, results_list: list, model_id: str, result, test_name: str):
@@ -1298,8 +1293,9 @@ class OLSModelAdapter(ExportableModel):
                             'model': model_id,
                             'test_name': 'Error Measures',
                             'test_target': f'{sample_type} Prediction',
-                            'test_statistics': f'{metric_name} Observed',
-                            'test_statistic_value': float(value)
+                            'test_statistic': f'{metric_name} Observed',
+                            'test_statistic_value': float(value),
+                            'pass': None  # Error measures don't have pass/fail concept
                         })
         
         elif isinstance(result, dict):
@@ -1312,8 +1308,9 @@ class OLSModelAdapter(ExportableModel):
                         'model': model_id,
                         'test_name': 'Error Measures',
                         'test_target': f'{sample_type} Prediction',
-                        'test_statistics': f'{metric_name} Observed',
-                        'test_statistic_value': float(value)
+                        'test_statistic': f'{metric_name} Observed',
+                        'test_statistic_value': float(value),
+                        'pass': None  # Error measures don't have pass/fail concept
                     })
         else:
             print(f"⚠️  {test_name}: Expected DataFrame or dict, got {type(result).__name__}")
@@ -1356,8 +1353,9 @@ class OLSModelAdapter(ExportableModel):
                             'model': model_id,
                             'test_name': test_name,
                             'test_target': str(row_idx) if row_idx != test_name else 'Unknown',
-                            'test_statistics': f'{stat_name} Observed',
-                            'test_statistic_value': numeric_value
+                            'test_statistic': f'{stat_name} Observed',
+                            'test_statistic_value': numeric_value,
+                            'pass': None  # Generic tests don't have pass/fail concept
                         })
                         added_count += 1
         
@@ -1382,8 +1380,9 @@ class OLSModelAdapter(ExportableModel):
                         'model': model_id,
                         'test_name': test_name,
                         'test_target': 'Unknown',
-                        'test_statistics': f'{stat_name} Observed',
-                        'test_statistic_value': numeric_value
+                        'test_statistic': f'{stat_name} Observed',
+                        'test_statistic_value': numeric_value,
+                        'pass': None  # Generic tests don't have pass/fail concept
                     })
                     added_count += 1
         
@@ -1398,8 +1397,9 @@ class OLSModelAdapter(ExportableModel):
                 'model': model_id,
                 'test_name': test_name,
                 'test_target': 'Unknown',
-                'test_statistics': 'Value Observed',
-                'test_statistic_value': numeric_value
+                'test_statistic': 'Value Observed',
+                'test_statistic_value': numeric_value,
+                'pass': None  # Generic tests don't have pass/fail concept
             })
             added_count += 1
         
@@ -1417,12 +1417,20 @@ class OLSModelAdapter(ExportableModel):
         return added_count
 
     def _process_multicollinearity_test(self, results_list: list, model_id: str, result):
-        """Process multicollinearity tests with three-layer structure."""
+        """Process multicollinearity tests with VIF threshold filtering (default: 10).
+        
+        VIF filtering criteria:
+        - VIF <= 10: Pass (no multicollinearity concern)
+        - VIF > 10: Fail (multicollinearity detected)
+        """
         if not isinstance(result, pd.DataFrame):
             return
         
         if result.empty:
             return
+        
+        # Default VIF threshold for multicollinearity detection
+        VIF_THRESHOLD = 10.0
         
         # Process each row in the multicollinearity test DataFrame (each variable)
         for var_name in result.index:
@@ -1433,28 +1441,35 @@ class OLSModelAdapter(ExportableModel):
             if 'VIF' in test_row and pd.notnull(test_row['VIF']):
                 vif_value = float(test_row['VIF'])
             
-            # Extract pass status
-            pass_value = None
-            if 'Passed' in test_row and pd.notnull(test_row['Passed']):
-                pass_value = float(1.0 if test_row['Passed'] else 0.0)
+            # Calculate pass status based on VIF threshold
+            test_passed = None
+            if vif_value is not None:
+                # VIF <= 10: Pass (no multicollinearity), VIF > 10: Fail (multicollinearity)
+                test_passed = vif_value <= VIF_THRESHOLD
+            else:
+                # If no VIF value, check if original test result has 'Passed' column
+                if 'Passed' in test_row and pd.notnull(test_row['Passed']):
+                    test_passed = bool(test_row['Passed'])
             
-            # Add three layers of information
+            # Add VIF threshold information
+            results_list.append({
+                'model': model_id,
+                'test_name': 'Multicollinearity',
+                'test_target': var_name,
+                'test_statistic': 'VIF Threshold',
+                'test_statistic_value': VIF_THRESHOLD,
+                'pass': test_passed
+            })
+            
+            # Add VIF observed value with pass status
             if vif_value is not None:
                 results_list.append({
                     'model': model_id,
                     'test_name': 'Multicollinearity',
                     'test_target': var_name,
-                    'test_statistics': 'VIF Observed',
-                    'test_statistic_value': vif_value
-                })
-            
-            if pass_value is not None:
-                results_list.append({
-                    'model': model_id,
-                    'test_name': 'Multicollinearity',
-                    'test_target': var_name,
-                    'test_statistics': 'Pass?',
-                    'test_statistic_value': pass_value
+                    'test_statistic': 'VIF Observed',
+                    'test_statistic_value': vif_value,
+                    'pass': test_passed
                 })
 
     def _process_group_f_test(self, results_list: list, model_id: str, result):
@@ -1481,23 +1496,20 @@ class OLSModelAdapter(ExportableModel):
             if 'Passed' in test_row and pd.notnull(test_row['Passed']):
                 pass_value = float(1.0 if test_row['Passed'] else 0.0)
             
-            # Add three layers of information
+            # Determine test pass status
+            test_passed = None
+            if pass_value is not None:
+                test_passed = bool(pass_value)
+            
+            # Add p-value information with pass status
             if pvalue_value is not None:
                 results_list.append({
                     'model': model_id,
                     'test_name': 'Group Driver F-test',
                     'test_target': group_name,
-                    'test_statistics': 'P-value Observed',
-                    'test_statistic_value': pvalue_value
-                })
-            
-            if pass_value is not None:
-                results_list.append({
-                    'model': model_id,
-                    'test_name': 'Group Driver F-test',
-                    'test_target': group_name,
-                    'test_statistics': 'Pass?',
-                    'test_statistic_value': pass_value
+                    'test_statistic': 'P-value Observed',
+                    'test_statistic_value': pvalue_value,
+                    'pass': test_passed
                 })
 
     def get_sensitivity_results(self) -> Optional[pd.DataFrame]:

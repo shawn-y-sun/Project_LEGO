@@ -671,7 +671,8 @@ class Segment:
         output_dir: Union[str, Path] = Path.cwd(),
         strategy_cls: Type[ExportStrategy] = OLSExportStrategy,
         format_handler_cls: Type[ExportFormatHandler] = CSVFormatHandler,
-        content: Optional[List[str]] = None
+        content: Optional[List[str]] = None,
+        overwrite: bool = True
     ) -> None:
         """
         Export model results using the specified export strategy and format handler.
@@ -694,6 +695,9 @@ class Segment:
             - 'scenario_testing': Scenario testing results with target and base variables
             - 'sensitivity_testing': Sensitivity testing results for parameters and inputs
             - 'test_results': Comprehensive test results from all tests
+        overwrite : bool, default False
+            Whether to overwrite existing files. If False and files exist, the operation
+            will be cancelled with a warning message.
         
         Example
         -------
@@ -712,12 +716,61 @@ class Segment:
         ...     content=['scenario_testing', 'sensitivity_testing'],
         ...     output_dir='scenario_analysis'
         ... )
+        >>> 
+        >>> # Export with overwrite enabled to replace existing files
+        >>> segment.export(
+        ...     output_dir='my_exports',
+        ...     overwrite=True
+        ... )
         """
         # Convert output_dir to Path object
         output_dir = Path(output_dir)
         
         # Create output directory if it doesn't exist
         output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Check for existing files and handle overwrite logic
+        content_types_set = set(content) if content is not None else set(EXPORT_CONTENT_TYPES.keys())
+        expected_files = []
+        for content_type in content_types_set:
+            if content_type == 'timeseries_data':
+                expected_files.append(output_dir / 'timeseries_data.csv')
+            elif content_type == 'staticStats':
+                expected_files.append(output_dir / 'staticStats.csv')
+            elif content_type == 'scenario_testing':
+                expected_files.append(output_dir / 'scenario_testing.csv')
+            elif content_type == 'sensitivity_testing':
+                expected_files.append(output_dir / 'sensitivity_testing.csv')
+            elif content_type == 'test_results':
+                expected_files.append(output_dir / 'test_results.csv')
+        
+        # Check if any expected files exist
+        existing_files = [f for f in expected_files if f.exists()]
+        
+        if existing_files and not overwrite:
+            print(f"\n❌ Export cancelled: The following files already exist in {output_dir}:")
+            for file in existing_files:
+                print(f"   - {file.name}")
+            print(f"\nTo overwrite existing files, use: segment.export(overwrite=True)")
+            print("Or choose a different output directory.")
+            return
+        elif existing_files and overwrite:
+            print(f"\n⚠️  Overwrite mode enabled: The following existing files will be replaced:")
+            for file in existing_files:
+                print(f"   - {file.name}")
+            print(f"Files will be overwritten in: {output_dir}")
+            
+            # Actually delete existing files to ensure clean overwrite
+            print("Removing existing files...")
+            for file in existing_files:
+                try:
+                    file.unlink()
+                    print(f"   ✓ Removed: {file.name}")
+                except Exception as e:
+                    print(f"   ❌ Failed to remove {file.name}: {e}")
+                    return
+        else:
+            print(f"\n✓ No existing files detected. Proceeding with export to: {output_dir}")
         
         # Get models to export
         if model_ids is None:
@@ -737,15 +790,16 @@ class Segment:
         print(f"- Number of models: {len(models_to_export)}")
         print(f"- Output directory: {output_dir}")
         
-        # Convert content list to set and validate
-        content_types_set = set(content) if content is not None else None
-        if content_types_set is not None:
+        # Validate content types (content_types_set already defined above for overwrite check)
+        if content is not None:
             invalid_types = content_types_set - set(EXPORT_CONTENT_TYPES.keys())
             if invalid_types:
                 raise ValueError(f"Invalid content types: {invalid_types}. Valid types are: {list(EXPORT_CONTENT_TYPES.keys())}")
             print(f"- Content types to export: {', '.join(content_types_set)}")
         else:
             print("- Content types to export: all")
+            # For strategy creation, use all content types when content is None
+            content_types_set = None
         print("\nPreparing export...")
         
         # Create format handler and strategy
@@ -777,6 +831,10 @@ class Segment:
         # Print final success message
         print(f"\nExport completed successfully for segment '{self.segment_id}'!")
         print(f"Results have been saved to: {output_dir}")
+        
+        # Print overwrite confirmation if files were overwritten
+        if existing_files and overwrite:
+            print(f"✓ Successfully overwrote {len(existing_files)} existing file(s).")
 
     def clear_cms(self) -> None:
         """
