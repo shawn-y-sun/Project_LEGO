@@ -848,7 +848,13 @@ class ScenManager:
             if qtr_method == 'mean':
                 result = quarterly_grouped.mean()
             elif qtr_method == 'sum':
-                result = quarterly_grouped.sum()
+                # Avoid rendering artificial zeros when a quarter has only NaNs
+                try:
+                    # pandas >= 1.1 supports min_count
+                    result = quarterly_grouped.sum(min_count=1)
+                except TypeError:
+                    # Fallback: explicit apply to ensure NaN if all values are NaN
+                    result = quarterly_grouped.apply(lambda s: s.sum() if s.notna().any() else np.nan)
             elif qtr_method == 'end':
                 # Use last value in quarter (quarter-end)
                 result = quarterly_grouped.last()
@@ -904,16 +910,16 @@ class ScenManager:
             # Add core series
             if not combined_quarterly.empty:
                 # Split combined into Fitted_IS and Pred_OOS by availability
-                df['Fitted_IS'] = combined_quarterly.reindex(all_quarters)
+                df['Fitted_IS'] = pd.to_numeric(combined_quarterly.reindex(all_quarters), errors='coerce')
                 df['Pred_OOS'] = np.nan
                 if not pred_oos_quarterly.empty:
-                    df.loc[pred_oos_quarterly.index, 'Pred_OOS'] = pred_oos_quarterly
+                    df.loc[pred_oos_quarterly.index, 'Pred_OOS'] = pd.to_numeric(pred_oos_quarterly, errors='coerce')
                 if not fitted_quarterly.empty:
                     # Where Pred_OOS is present, clear Fitted_IS
                     df.loc[df['Pred_OOS'].notna(), 'Fitted_IS'] = np.nan
             # Add scenario series
             for col_name, series in all_data.items():
-                df[col_name] = series
+                df[col_name] = pd.to_numeric(series, errors='coerce')
             
             # Get P0 quarter-end date
             p0_quarter_end = get_quarter_end(self.P0)
@@ -923,7 +929,7 @@ class ScenManager:
             # Add Actual quarterly if available
             if y_base_full is not None and not y_base_full.empty:
                 actual_q = aggregate_to_quarterly(y_base_full, self.qtr_method).reindex(all_quarters)
-                df['Actual'] = actual_q
+                df['Actual'] = pd.to_numeric(actual_q, errors='coerce')
             
             results[scen_set] = df
             
@@ -1082,8 +1088,14 @@ class ScenManager:
         if nrows == 2:
             plot_df(ax_qtr, base_qtr_df, f"{title_prefix}Base Variable (Quarterly)" if title_prefix else "Base Variable (Quarterly)")
         
-        # Set overall title for dual plots
-        overall_title = f"{title_prefix}Scenario Forecast - {scen_set}" if title_prefix else f"Scenario Forecast - {scen_set}"
+        # Set overall title for dual plots with variable names
+        target_name = getattr(self, 'target', getattr(self.model, 'target', 'Target'))
+        base_name = getattr(self.model, 'target_base', None)
+        if not base_name:
+            base_name = 'Base'
+        base_fragment = f" | Base Variable: {base_name}" if base_name else ""
+        title_core = f"Scenario Forecast - {scen_set} | Target Variable: {target_name}{base_fragment}"
+        overall_title = f"{title_prefix}{title_core}" if title_prefix else title_core
         fig.suptitle(overall_title, fontsize=12)
         
         # Adjust layout to prevent label cutoff
