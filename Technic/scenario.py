@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 from typing import Any, Dict, List, Optional, Union, Tuple
 import warnings
 import matplotlib.pyplot as plt
@@ -28,7 +29,8 @@ class ScenManager:
         Number of quarters to forecast after P0 (e.g., 9 or 12 quarters)
     qtr_method : str, default='mean'
         Method to aggregate monthly results to quarterly frequency.
-        Options: 'mean', 'sum', 'last', 'first'
+        Options: 'mean', 'sum', 'end' (quarter-end value). If 'avg' is
+        provided, it's treated as 'mean'.
 
     Attributes
     ----------
@@ -73,7 +75,10 @@ class ScenManager:
         self.horizon = horizon
         
         # Validate quarterly aggregation method
-        valid_qtr_methods = ['mean', 'sum', 'last', 'first']
+        # Normalize and validate quarterly aggregation method
+        if qtr_method == 'avg':
+            qtr_method = 'mean'
+        valid_qtr_methods = ['mean', 'sum', 'end']
         if qtr_method not in valid_qtr_methods:
             raise ValueError(f"qtr_method must be one of {valid_qtr_methods}")
         self.qtr_method = qtr_method
@@ -432,10 +437,42 @@ class ScenManager:
         
         return results
 
+    
+
     @property
-    def forecast_y_base_df(self) -> Dict[str, pd.DataFrame]:
+    def y_scens(self) -> Dict[str, Dict[str, pd.Series]]:
         """
-        Organize scenario base forecasting results into DataFrames with period indicators.
+        Nested forecast results for all scenarios using `forecast`.
+
+        Returns
+        -------
+        Dict[str, Dict[str, pd.Series]]
+            Nested scenario forecast results: {scenario_set: {scenario_name: y_series}}
+            Each series contains forecasts up to horizon quarters after P0.
+
+        Notes
+        -----
+        - Uses the model's .predict() method for standard forecasting
+        - Uses the model's .rolling_predict() method for models with lookback variables
+        - Automatically handles both time series and panel data
+        """
+        results: Dict[str, Dict[str, pd.Series]] = {}
+        for scen_set, scen_dict in self.X_scens.items():
+            results[scen_set] = {}
+            for scen_name, X in scen_dict.items():
+                # Use the simplified forecast method
+                results[scen_set][scen_name] = self.forecast(X)
+        return results
+
+    @property
+    def forecast_y_qtr_df(self) -> Dict[str, pd.DataFrame]:
+        """Deprecated: quarterly aggregation for target forecasts is no longer exposed."""
+        raise AttributeError("forecast_y_qtr_df has been removed. Use forecast_y_df for target (monthly) and forecast_y_base_qtr_df for base quarterly aggregation.")
+
+    @property
+    def forecast_y_df(self) -> Dict[str, pd.DataFrame]:
+        """
+        Organize scenario forecasting results into DataFrames with period indicators.
         
         Returns
         -------
@@ -445,8 +482,10 @@ class ScenManager:
             - Period: Indicator column ('Pre-P0', 'P0', 'P1', etc.)
               Note: Period is always in quarterly frequency. For monthly data,
               all months within the same quarter share the same period indicator.
-            - Fitted: In-sample fitted base values from model (if available)
-            - One column per scenario containing base forecast values
+            - Fitted_IS: In-sample fitted values from model
+            - Pred_OOS: Out-of-sample predictions
+            - Actual: Actual target values
+            - One column per scenario containing forecast values
             
         Notes
         -----
@@ -456,6 +495,163 @@ class ScenManager:
         - P0 and subsequent periods are numbered sequentially (P0, P1, P2, etc.)
         - Period indicators are always quarterly, even for monthly data
         - All time indices are normalized to dates only (no time component)
+
+        Example output structure
+        ------------------------
+        For a single scenario set (monthly frequency):
+        ┌──────────────┬─────────┬───────────┬──────────┬────────┬────────┐
+        │ Index (Date) │ Period  │ Fitted_IS │ Pred_OOS │ Actual │ Base   │
+        ├──────────────┼─────────┼───────────┼──────────┼────────┼────────┤
+        │ 2024-12-31   │ P0      │ 1.02      │ NaN      │ 1.01   │ 1.01   │
+        │ 2025-01-31   │ P1      │ NaN       │ 1.05     │ NaN    │ 1.05   │
+        │ 2025-02-28   │ P1      │ NaN       │ 1.06     │ NaN    │ 1.06   │
+        └──────────────┴─────────┴───────────┴──────────┴────────┴────────┘
+        """
+        # Get scenario forecasts
+        scen_results = self.y_scens
+        
+        # Collect actual, fitted (IS), and OOS predictions
+        actual_values = getattr(self.model, 'y_full', None)
+        fitted_values = getattr(self.model, 'y_fitted_in', None)
+        pred_oos = getattr(self.model, 'y_pred_out', None)
+        if actual_values is not None:
+            actual_values = actual_values.copy()
+            actual_values.index = pd.to_datetime(actual_values.index).normalize()
+        if fitted_values is not None:
+            fitted_values = fitted_values.copy()
+            fitted_values.index = pd.to_datetime(fitted_values.index).normalize()
+        if pred_oos is not None and not pred_oos.empty:
+            pred_oos = pred_oos.copy()
+            pred_oos.index = pd.to_datetime(pred_oos.index).normalize()
+        
+        # Function to get quarter-end date
+        def get_quarter_end(date):
+            return pd.Period(date, freq='Q').end_time.normalize()
+        
+        # Function to assign period indicator
+        def assign_period(date, p0_quarter_end):
+            date_quarter_end = get_quarter_end(date)
+            if date_quarter_end < p0_quarter_end:
+                return 'Pre-P0'
+            elif date_quarter_end == p0_quarter_end:
+                return 'P0'
+            else:
+                # Calculate quarters difference
+                quarters_diff = (date_quarter_end.to_period('Q') - p0_quarter_end.to_period('Q')).n
+                return f'P{quarters_diff}'
+        
+        results: Dict[str, pd.DataFrame] = {}
+        for scen_set, scen_dict in scen_results.items():
+            # Start with an empty DataFrame
+            if isinstance(self.dm._internal_loader, TimeSeriesLoader):
+                # For time series, get all unique dates
+                all_dates = pd.Index([])
+                if fitted_values is not None:
+                    all_dates = all_dates.union(fitted_values.index)
+                for scen_series in scen_dict.values():
+                    # Normalize scenario series index
+                    scen_series.index = pd.to_datetime(scen_series.index).normalize()
+                    all_dates = all_dates.union(scen_series.index)
+                all_dates = all_dates.sort_values()
+                
+                # Create DataFrame with DatetimeIndex
+                df = pd.DataFrame(index=all_dates)
+                
+                # Get P0 quarter-end date
+                p0_quarter_end = get_quarter_end(self.P0)
+                
+                # Add Period indicator
+                df['Period'] = df.index.map(lambda x: assign_period(x, p0_quarter_end))
+                
+                # Add Actual / Fitted_IS / Pred_OOS if available
+                if actual_values is not None:
+                    df['Actual'] = actual_values
+                if fitted_values is not None:
+                    df['Fitted_IS'] = fitted_values
+                if pred_oos is not None and not pred_oos.empty:
+                    df['Pred_OOS'] = pred_oos
+                
+                # Add scenario forecasts
+                for scen_name, scen_series in scen_dict.items():
+                    df[scen_name] = scen_series
+                    
+                # If monthly frequency, ensure we keep monthly detail (target stays monthly)
+                # No additional quarterly aggregation for target here
+
+            else:  # PanelLoader
+                # For panel data, get all unique entity-date combinations
+                entity_col = self.dm._internal_loader.entity_col
+                date_col = self.dm._internal_loader.date_col
+                
+                # Collect all entity-date pairs
+                all_pairs = set()
+                if fitted_values is not None:
+                    all_pairs.update(zip(fitted_values.index.get_level_values(entity_col),
+                                      fitted_values.index.get_level_values(date_col).normalize()))
+                for scen_series in scen_dict.values():
+                    # Normalize dates in the index
+                    dates = scen_series.index.get_level_values(date_col).normalize()
+                    entities = scen_series.index.get_level_values(entity_col)
+                    all_pairs.update(zip(entities, dates))
+                
+                # Create MultiIndex DataFrame
+                entities, dates = zip(*sorted(all_pairs))
+                idx = pd.MultiIndex.from_tuples(list(zip(entities, dates)),
+                                              names=[entity_col, date_col])
+                df = pd.DataFrame(index=idx)
+                
+                # Get P0 quarter-end date
+                p0_quarter_end = get_quarter_end(self.P0)
+                
+                # Add Period indicator
+                date_series = pd.Series(dates, index=idx)
+                df['Period'] = date_series.map(lambda x: assign_period(x, p0_quarter_end))
+                
+                # Add Fitted_IS aligned by index if available
+                if fitted_values is not None:
+                    df['Fitted_IS'] = fitted_values
+                # Add Actual aligned to date level
+                if actual_values is not None:
+                    actual_aligned = actual_values.reindex(pd.to_datetime(dates).normalize())
+                    df['Actual'] = actual_aligned.values
+                
+                # Add scenario forecasts
+                for scen_name, scen_series in scen_dict.items():
+                    # Normalize dates in the scenario series index
+                    dates = scen_series.index.get_level_values(date_col).normalize()
+                    entities = scen_series.index.get_level_values(entity_col)
+                    scen_series.index = pd.MultiIndex.from_tuples(
+                        list(zip(entities, dates)),
+                        names=[entity_col, date_col]
+                    )
+                    df[scen_name] = scen_series
+                
+                # Add Pred_OOS aligned to date level
+                if pred_oos is not None and not pred_oos.empty:
+                    pred_aligned = pred_oos.reindex(pd.to_datetime(df.index.get_level_values(date_col)).normalize())
+                    df['Pred_OOS'] = pred_aligned.values
+            
+            # Store the result
+            results[scen_set] = df
+            
+        return results
+
+    @property
+    def forecast_y_base_df(self) -> Dict[str, pd.DataFrame]:
+        """
+        Organize scenario base forecasting results into DataFrames with period indicators.
+        Always aligned to original data frequency; when monthly, shows monthly base forecasts.
+
+        Example output structure
+        ------------------------
+        For a single scenario set (monthly frequency):
+        ┌──────────────┬─────────┬───────────┬──────────┬────────┬────────┐
+        │ Index (Date) │ Period  │ Fitted_IS │ Pred_OOS │ Actual │ Base   │
+        ├──────────────┼─────────┼───────────┼──────────┼────────┼────────┤
+        │ 2024-12-31   │ P0      │ 100.0     │ NaN      │ 100.0  │ 100.0  │
+        │ 2025-01-31   │ P1      │ NaN       │ 101.2    │ NaN    │ 101.2  │
+        │ 2025-02-28   │ P1      │ NaN       │ 101.6    │ NaN    │ 101.6  │
+        └──────────────┴─────────┴───────────┴──────────┴────────┴────────┘
         """
         # Get base scenario forecasts
         base_scen_results = self.y_base_scens
@@ -508,9 +704,16 @@ class ScenManager:
                 # Add Period indicator
                 df['Period'] = df.index.map(lambda x: assign_period(x, p0_quarter_end))
                 
-                # Add fitted base values if available
+                # Add fitted/actual/pred_oos if available
                 if fitted_base_values is not None:
-                    df['Fitted'] = fitted_base_values
+                    df['Fitted_IS'] = fitted_base_values
+                # Actual base if available from model (y_base_full), else omit
+                y_base_full = getattr(self.model, 'y_base_full', None)
+                if y_base_full is not None and not y_base_full.empty:
+                    df['Actual'] = y_base_full.reindex(df.index)
+                y_base_pred_out = getattr(self.model, 'y_base_pred_out', None)
+                if y_base_pred_out is not None and not y_base_pred_out.empty:
+                    df['Pred_OOS'] = y_base_pred_out.reindex(df.index)
                 
                 # Add scenario base forecasts
                 for scen_name, scen_series in scen_dict.items():
@@ -545,9 +748,15 @@ class ScenManager:
                 date_series = pd.Series(dates, index=idx)
                 df['Period'] = date_series.map(lambda x: assign_period(x, p0_quarter_end))
                 
-                # Add fitted base values if available
+                # Add fitted/actual/pred_oos if available
                 if fitted_base_values is not None:
-                    df['Fitted'] = fitted_base_values
+                    df['Fitted_IS'] = fitted_base_values
+                y_base_full = getattr(self.model, 'y_base_full', None)
+                if y_base_full is not None and not y_base_full.empty:
+                    df['Actual'] = y_base_full
+                y_base_pred_out = getattr(self.model, 'y_base_pred_out', None)
+                if y_base_pred_out is not None and not y_base_pred_out.empty:
+                    df['Pred_OOS'] = y_base_pred_out
                 
                 # Add scenario base forecasts
                 for scen_name, scen_series in scen_dict.items():
@@ -569,24 +778,19 @@ class ScenManager:
     def forecast_y_base_qtr_df(self) -> Dict[str, pd.DataFrame]:
         """
         Organize scenario base forecasting results into quarterly DataFrames with period indicators.
-        
-        Returns
-        -------
-        Dict[str, pd.DataFrame]
-            Dictionary mapping scenario set names to DataFrames.
-            Each DataFrame contains quarterly base data with:
-            - Index: Period indicators ('P0', 'P1', 'P2', etc. for P0+ periods; 
-                    'YY-MM' format for Pre-P0 quarters like '21-03', '21-06')
-            - Fitted: In-sample fitted base values in quarterly frequency
-            - One column per scenario containing quarterly base forecast values
-            
-        Notes
-        -----
-        - All results are converted to quarterly frequency using self.qtr_method
-        - For monthly data, conversion is applied according to qtr_method parameter
-        - For quarterly data, data is used as-is
-        - Period indicators: P0, P1, P2, etc. for forecast periods; YY-MM for historical
-        - YY-MM format uses quarter-end month (03, 06, 09, 12)
+        When internal frequency is monthly, this converts monthly base forecasts to quarterly
+        using the configured qtr_method ('mean', 'sum', 'end').
+
+        Example output structure
+        ------------------------
+        For a single scenario set (quarterly aggregation):
+        ┌──────────────┬─────────┬───────────┬──────────┬────────┬────────┐
+        │ Index (Date) │ Period  │ Fitted_IS │ Pred_OOS │ Actual │ Base   │
+        ├──────────────┼─────────┼───────────┼──────────┼────────┼────────┤
+        │ 2024-12-31   │ 24-12   │ 100.0     │ NaN      │ 100.0  │ 100.0  │
+        │ 2025-03-31   │ P0      │ 101.0     │ NaN      │ NaN    │ 101.0  │
+        │ 2025-06-30   │ P1      │ NaN       │ 102.3    │ NaN    │ 102.3  │
+        └──────────────┴─────────┴───────────┴──────────┴────────┴────────┘
         """
         # Get base scenario forecasts
         base_scen_results = self.y_base_scens
@@ -594,11 +798,19 @@ class ScenManager:
         if not base_scen_results:
             return {}
         
-        # Get fitted base values from model
-        fitted_base_values = None
-        if hasattr(self.model, 'y_base_fitted_in') and self.model.y_base_fitted_in is not None:
-            fitted_base_values = self.model.y_base_fitted_in
+        # Get fitted base values and actual/pred_oos from model
+        fitted_base_values = getattr(self.model, 'y_base_fitted_in', None)
+        if fitted_base_values is not None:
+            fitted_base_values = fitted_base_values.copy()
             fitted_base_values.index = pd.to_datetime(fitted_base_values.index).normalize()
+        y_base_full = getattr(self.model, 'y_base_full', None)
+        if y_base_full is not None and not y_base_full.empty:
+            y_base_full = y_base_full.copy()
+            y_base_full.index = pd.to_datetime(y_base_full.index).normalize()
+        y_base_pred_out = getattr(self.model, 'y_base_pred_out', None)
+        if y_base_pred_out is not None and not y_base_pred_out.empty:
+            y_base_pred_out = y_base_pred_out.copy()
+            y_base_pred_out.index = pd.to_datetime(y_base_pred_out.index).normalize()
         
         # Function to get quarter-end date
         def get_quarter_end(date):
@@ -637,10 +849,9 @@ class ScenManager:
                 result = quarterly_grouped.mean()
             elif qtr_method == 'sum':
                 result = quarterly_grouped.sum()
-            elif qtr_method == 'last':
+            elif qtr_method == 'end':
+                # Use last value in quarter (quarter-end)
                 result = quarterly_grouped.last()
-            elif qtr_method == 'first':
-                result = quarterly_grouped.first()
             else:
                 raise ValueError(f"Unsupported aggregation method: {qtr_method}")
             
@@ -653,10 +864,26 @@ class ScenManager:
             # Collect all data first
             all_data = {}
             
-            # Process fitted base values
+            # Build a combined series for Fitted_IS (IS window) and Pred_OOS (OOS window)
+            combined_series = None
             if fitted_base_values is not None:
-                fitted_quarterly = aggregate_to_quarterly(fitted_base_values, self.qtr_method)
-                all_data['Fitted'] = fitted_quarterly
+                combined_series = fitted_base_values.copy()
+            if y_base_pred_out is not None and not y_base_pred_out.empty:
+                if combined_series is None:
+                    combined_series = y_base_pred_out.copy()
+                else:
+                    # Prefer OOS where available
+                    combined_series = combined_series.combine_first(y_base_pred_out)
+            # Aggregate combined series to quarterly for partitioning
+            if combined_series is not None:
+                combined_quarterly = aggregate_to_quarterly(combined_series, self.qtr_method)
+                # Separately aggregate IS and OOS for mask
+                fitted_quarterly = aggregate_to_quarterly(fitted_base_values, self.qtr_method) if fitted_base_values is not None else pd.Series(dtype=float)
+                pred_oos_quarterly = aggregate_to_quarterly(y_base_pred_out, self.qtr_method) if y_base_pred_out is not None and not y_base_pred_out.empty else pd.Series(dtype=float)
+            else:
+                combined_quarterly = pd.Series(dtype=float)
+                fitted_quarterly = pd.Series(dtype=float)
+                pred_oos_quarterly = pd.Series(dtype=float)
             
             # Process scenario base forecasts
             for scen_name, scen_series in scen_dict.items():
@@ -674,297 +901,30 @@ class ScenManager:
             # Create quarterly DataFrame
             df = pd.DataFrame(index=all_quarters)
             
-            # Add all data series
+            # Add core series
+            if not combined_quarterly.empty:
+                # Split combined into Fitted_IS and Pred_OOS by availability
+                df['Fitted_IS'] = combined_quarterly.reindex(all_quarters)
+                df['Pred_OOS'] = np.nan
+                if not pred_oos_quarterly.empty:
+                    df.loc[pred_oos_quarterly.index, 'Pred_OOS'] = pred_oos_quarterly
+                if not fitted_quarterly.empty:
+                    # Where Pred_OOS is present, clear Fitted_IS
+                    df.loc[df['Pred_OOS'].notna(), 'Fitted_IS'] = np.nan
+            # Add scenario series
             for col_name, series in all_data.items():
                 df[col_name] = series
             
             # Get P0 quarter-end date
             p0_quarter_end = get_quarter_end(self.P0)
             
-            # Create period labels for index
-            period_labels = [assign_period_label(date, p0_quarter_end) for date in df.index]
+            # Create period labels as a column; keep index as actual dates
+            df['Period'] = [assign_period_label(date, p0_quarter_end) for date in df.index]
+            # Add Actual quarterly if available
+            if y_base_full is not None and not y_base_full.empty:
+                actual_q = aggregate_to_quarterly(y_base_full, self.qtr_method).reindex(all_quarters)
+                df['Actual'] = actual_q
             
-            # Set period labels as index
-            df.index = period_labels
-            df.index.name = 'Period'
-            
-            results[scen_set] = df
-            
-        return results
-
-    @property
-    def y_scens(self) -> Dict[str, Dict[str, pd.Series]]:
-        """
-        Nested forecast results for all scenarios using `forecast`.
-
-        Returns
-        -------
-        Dict[str, Dict[str, pd.Series]]
-            Nested scenario forecast results: {scenario_set: {scenario_name: y_series}}
-            Each series contains forecasts up to horizon quarters after P0.
-
-        Notes
-        -----
-        - Uses the model's .predict() method for standard forecasting
-        - Uses the model's .rolling_predict() method for models with lookback variables
-        - Automatically handles both time series and panel data
-        """
-        results: Dict[str, Dict[str, pd.Series]] = {}
-        for scen_set, scen_dict in self.X_scens.items():
-            results[scen_set] = {}
-            for scen_name, X in scen_dict.items():
-                # Use the simplified forecast method
-                results[scen_set][scen_name] = self.forecast(X)
-        return results
-
-    @property
-    def forecast_y_qtr_df(self) -> Dict[str, pd.DataFrame]:
-        """
-        Organize scenario forecasting results into quarterly DataFrames with period indicators.
-        
-        Returns
-        -------
-        Dict[str, pd.DataFrame]
-            Dictionary mapping scenario set names to DataFrames.
-            Each DataFrame contains quarterly data with:
-            - Index: Period indicators ('P0', 'P1', 'P2', etc. for P0+ periods; 
-                    'YY-MM' format for Pre-P0 quarters like '21-03', '21-06')
-            - Fitted: In-sample fitted values in quarterly frequency
-            - One column per scenario containing quarterly forecast values
-            
-        Notes
-        -----
-        - All results are converted to quarterly frequency using self.qtr_method
-        - For monthly data, conversion is applied according to qtr_method parameter
-        - For quarterly data, data is used as-is
-        - Period indicators: P0, P1, P2, etc. for forecast periods; YY-MM for historical
-        - YY-MM format uses quarter-end month (03, 06, 09, 12)
-        """
-        # Get scenario forecasts
-        scen_results = self.y_scens
-        
-        # Get fitted values from model
-        fitted_values = self.model.y_fitted_in if hasattr(self.model, 'y_fitted_in') else None
-        if fitted_values is not None:
-            fitted_values.index = pd.to_datetime(fitted_values.index).normalize()
-        
-        # Function to get quarter-end date
-        def get_quarter_end(date):
-            return pd.Period(date, freq='Q').end_time.normalize()
-        
-        # Function to assign period indicator with new format
-        def assign_period_label(date, p0_quarter_end):
-            date_quarter_end = get_quarter_end(date)
-            if date_quarter_end < p0_quarter_end:
-                # Pre-P0: use YY-MM format (quarter end month)
-                year_2digit = str(date_quarter_end.year)[-2:]
-                month = f"{date_quarter_end.month:02d}"
-                return f'{year_2digit}-{month}'
-            elif date_quarter_end == p0_quarter_end:
-                return 'P0'
-            else:
-                # Calculate quarters difference
-                quarters_diff = (date_quarter_end.to_period('Q') - p0_quarter_end.to_period('Q')).n
-                return f'P{quarters_diff}'
-        
-        # Function to aggregate data to quarterly
-        def aggregate_to_quarterly(series, qtr_method):
-            """Aggregate series to quarterly frequency."""
-            if self.dm.freq == 'Q':
-                # Already quarterly, return as-is
-                return series
-            
-            # Convert to quarterly
-            series_copy = series.copy()
-            series_copy.index = pd.to_datetime(series_copy.index)
-            
-            # Group by quarter and aggregate
-            quarterly_grouped = series_copy.groupby(pd.Grouper(freq='Q'))
-            
-            if qtr_method == 'mean':
-                result = quarterly_grouped.mean()
-            elif qtr_method == 'sum':
-                result = quarterly_grouped.sum()
-            elif qtr_method == 'last':
-                result = quarterly_grouped.last()
-            elif qtr_method == 'first':
-                result = quarterly_grouped.first()
-            else:
-                raise ValueError(f"Unsupported aggregation method: {qtr_method}")
-            
-            # Convert index to quarter-end dates
-            result.index = result.index.to_period('Q').to_timestamp(how='end').normalize()
-            return result
-        
-        results: Dict[str, pd.DataFrame] = {}
-        for scen_set, scen_dict in scen_results.items():
-            # Collect all data first
-            all_data = {}
-            
-            # Process fitted values
-            if fitted_values is not None:
-                fitted_quarterly = aggregate_to_quarterly(fitted_values, self.qtr_method)
-                all_data['Fitted'] = fitted_quarterly
-            
-            # Process scenario forecasts
-            for scen_name, scen_series in scen_dict.items():
-                # Normalize scenario series index
-                scen_series.index = pd.to_datetime(scen_series.index).normalize()
-                scen_quarterly = aggregate_to_quarterly(scen_series, self.qtr_method)
-                all_data[scen_name] = scen_quarterly
-            
-            # Get all unique quarter-end dates
-            all_quarters = pd.Index([])
-            for series in all_data.values():
-                all_quarters = all_quarters.union(series.index)
-            all_quarters = all_quarters.sort_values()
-            
-            # Create quarterly DataFrame
-            df = pd.DataFrame(index=all_quarters)
-            
-            # Add all data series
-            for col_name, series in all_data.items():
-                df[col_name] = series
-            
-            # Get P0 quarter-end date
-            p0_quarter_end = get_quarter_end(self.P0)
-            
-            # Create period labels for index
-            period_labels = [assign_period_label(date, p0_quarter_end) for date in df.index]
-            
-            # Set period labels as index
-            df.index = period_labels
-            df.index.name = 'Period'
-            
-            results[scen_set] = df
-            
-        return results
-
-    @property
-    def forecast_y_df(self) -> Dict[str, pd.DataFrame]:
-        """
-        Organize scenario forecasting results into DataFrames with period indicators.
-        
-        Returns
-        -------
-        Dict[str, pd.DataFrame]
-            Dictionary mapping scenario set names to DataFrames.
-            Each DataFrame contains:
-            - Period: Indicator column ('Pre-P0', 'P0', 'P1', etc.)
-              Note: Period is always in quarterly frequency. For monthly data,
-              all months within the same quarter share the same period indicator.
-            - Fitted: In-sample fitted values from model
-            - One column per scenario containing forecast values
-            
-        Notes
-        -----
-        - For time series data, index is DatetimeIndex
-        - For panel data, index includes both entity and date information
-        - Periods before P0 are marked as 'Pre-P0'
-        - P0 and subsequent periods are numbered sequentially (P0, P1, P2, etc.)
-        - Period indicators are always quarterly, even for monthly data
-        - All time indices are normalized to dates only (no time component)
-        """
-        # Get scenario forecasts
-        scen_results = self.y_scens
-        
-        # Get fitted values from model
-        fitted_values = self.model.y_fitted_in if hasattr(self.model, 'y_fitted_in') else None
-        if fitted_values is not None:
-            fitted_values.index = pd.to_datetime(fitted_values.index).normalize()
-        
-        # Function to get quarter-end date
-        def get_quarter_end(date):
-            return pd.Period(date, freq='Q').end_time.normalize()
-        
-        # Function to assign period indicator
-        def assign_period(date, p0_quarter_end):
-            date_quarter_end = get_quarter_end(date)
-            if date_quarter_end < p0_quarter_end:
-                return 'Pre-P0'
-            elif date_quarter_end == p0_quarter_end:
-                return 'P0'
-            else:
-                # Calculate quarters difference
-                quarters_diff = (date_quarter_end.to_period('Q') - p0_quarter_end.to_period('Q')).n
-                return f'P{quarters_diff}'
-        
-        results: Dict[str, pd.DataFrame] = {}
-        for scen_set, scen_dict in scen_results.items():
-            # Start with an empty DataFrame
-            if isinstance(self.dm._internal_loader, TimeSeriesLoader):
-                # For time series, get all unique dates
-                all_dates = pd.Index([])
-                if fitted_values is not None:
-                    all_dates = all_dates.union(fitted_values.index)
-                for scen_series in scen_dict.values():
-                    # Normalize scenario series index
-                    scen_series.index = pd.to_datetime(scen_series.index).normalize()
-                    all_dates = all_dates.union(scen_series.index)
-                all_dates = all_dates.sort_values()
-                
-                # Create DataFrame with DatetimeIndex
-                df = pd.DataFrame(index=all_dates)
-                
-                # Get P0 quarter-end date
-                p0_quarter_end = get_quarter_end(self.P0)
-                
-                # Add Period indicator
-                df['Period'] = df.index.map(lambda x: assign_period(x, p0_quarter_end))
-                
-                # Add fitted values if available
-                if fitted_values is not None:
-                    df['Fitted'] = fitted_values
-                
-                # Add scenario forecasts
-                for scen_name, scen_series in scen_dict.items():
-                    df[scen_name] = scen_series
-                    
-            else:  # PanelLoader
-                # For panel data, get all unique entity-date combinations
-                entity_col = self.dm._internal_loader.entity_col
-                date_col = self.dm._internal_loader.date_col
-                
-                # Collect all entity-date pairs
-                all_pairs = set()
-                if fitted_values is not None:
-                    all_pairs.update(zip(fitted_values.index.get_level_values(entity_col),
-                                      fitted_values.index.get_level_values(date_col).normalize()))
-                for scen_series in scen_dict.values():
-                    # Normalize dates in the index
-                    dates = scen_series.index.get_level_values(date_col).normalize()
-                    entities = scen_series.index.get_level_values(entity_col)
-                    all_pairs.update(zip(entities, dates))
-                
-                # Create MultiIndex DataFrame
-                entities, dates = zip(*sorted(all_pairs))
-                idx = pd.MultiIndex.from_tuples(list(zip(entities, dates)),
-                                              names=[entity_col, date_col])
-                df = pd.DataFrame(index=idx)
-                
-                # Get P0 quarter-end date
-                p0_quarter_end = get_quarter_end(self.P0)
-                
-                # Add Period indicator
-                date_series = pd.Series(dates, index=idx)
-                df['Period'] = date_series.map(lambda x: assign_period(x, p0_quarter_end))
-                
-                # Add fitted values if available
-                if fitted_values is not None:
-                    df['Fitted'] = fitted_values
-                
-                # Add scenario forecasts
-                for scen_name, scen_series in scen_dict.items():
-                    # Normalize dates in the scenario series index
-                    dates = scen_series.index.get_level_values(date_col).normalize()
-                    entities = scen_series.index.get_level_values(entity_col)
-                    scen_series.index = pd.MultiIndex.from_tuples(
-                        list(zip(entities, dates)),
-                        names=[entity_col, date_col]
-                    )
-                    df[scen_name] = scen_series
-            
-            # Store the result
             results[scen_set] = df
             
         return results
@@ -977,7 +937,7 @@ class ScenManager:
         style: Optional[Dict[str, Dict[str, Any]]] = None,
         title_prefix: str = "",
         save_path: Optional[str] = None,
-        show_qtr: bool = True
+        show_qtr: bool = False
     ) -> plt.Figure:
         """
         Plot forecasting results for a single scenario set.
@@ -1023,163 +983,106 @@ class ScenManager:
         - Handles both YY-MM format and 'Pre-P0' period indicators
         - Supports side-by-side plotting when forecast_data is a tuple
         """
-        # Determine if we have single or dual plotting
-        is_dual_plot = isinstance(forecast_data, tuple)
-        
-        # Get forecast data if not provided
+        # Get required DataFrames: always original frequency on first row
         if forecast_data is None:
-            if show_qtr:
-                target_df = self.forecast_y_qtr_df[scen_set]
-                base_df = self.forecast_y_base_qtr_df.get(scen_set) if hasattr(self, 'forecast_y_base_qtr_df') else None
-            else:
-                target_df = self.forecast_y_df[scen_set]
-                base_df = self.forecast_y_base_df.get(scen_set) if hasattr(self, 'forecast_y_base_df') else None
-            
-            # Create tuple if base data is available
-            if base_df is not None and not base_df.empty:
-                forecast_data = (target_df, base_df)
-                is_dual_plot = True
-            else:
-                forecast_data = target_df
-                is_dual_plot = False
-        
-        # Set up figure and axes
-        if is_dual_plot:
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(figsize[0] * 2, figsize[1]))
-            target_df, base_df = forecast_data
-            axes_data = [(ax1, target_df.copy(), "Target Variable"), (ax2, base_df.copy(), "Base Variable")]
+            target_df = self.forecast_y_df[scen_set].copy()
+            base_df = self.forecast_y_base_df.get(scen_set)
+            base_qtr_df = None
+            if show_qtr and getattr(self.dm, 'freq', 'M') == 'M':
+                base_qtr_df = self.forecast_y_base_qtr_df.get(scen_set)
         else:
-            fig = plt.figure(figsize=figsize)
-            ax1 = fig.add_subplot(111)
-            df = forecast_data.copy()
-            axes_data = [(ax1, df, "")]
-        
-        # Plot each subplot
-        for ax, df, subplot_title in axes_data:
-            # Handle different data structures
-            if 'Period' not in df.columns:
-                # Aggregated data with period labels as index
-                period_labels = df.index.tolist()
-                x_positions = list(range(len(period_labels)))
-                
-                # Get scenario names and sort for consistent ordering
-                scenarios = sorted([col for col in df.columns if col != 'Fitted'])
-                
-                # Identify historical periods and forecast periods
-                p0_position = None
-                if 'P0' in period_labels:
-                    p0_position = period_labels.index('P0')
-                
-                # Plot fitted values for historical periods and P0
-                if 'Fitted' in df.columns:
-                    fitted_data = df['Fitted'].dropna()
-                    if not fitted_data.empty:
-                        fitted_x = []
-                        fitted_y = []
-                        for i, (period, value) in enumerate(fitted_data.items()):
-                            if not pd.isna(value) and (not period.startswith('P') or period == 'P0'):
-                                fitted_x.append(x_positions[period_labels.index(period)])
-                                fitted_y.append(value)
-                        
-                        if fitted_x:
-                            ax.plot(fitted_x, fitted_y, color='black', linestyle='-', 
-                                   label='Fitted', linewidth=2)
-                
-                # Plot each scenario (forecast periods only)
-                for i, scenario in enumerate(scenarios):
-                    # Get style for this scenario
-                    if style and scenario in style:
-                        scen_style = style[scenario]
-                        if 'linewidth' not in scen_style:
-                            scen_style['linewidth'] = 2
-                    else:
-                        color = self.scenario_colors[i % len(self.scenario_colors)]
-                        scen_style = {
-                            'color': color,
-                            'linestyle': '-',
-                            'label': scenario,
-                            'linewidth': 2
-                        }
-                    
-                    # Plot scenario data for forecast periods
-                    scenario_data = df[scenario].dropna()
-                    if not scenario_data.empty:
-                        forecast_x = []
-                        forecast_y = []
-                        for period, value in scenario_data.items():
-                            if not pd.isna(value) and period.startswith('P'):
-                                forecast_x.append(x_positions[period_labels.index(period)])
-                                forecast_y.append(value)
-                        
-                        if forecast_x:
-                            ax.plot(forecast_x, forecast_y, **scen_style)
-                
-                # Add vertical line at P0 (without label)
-                if p0_position is not None:
-                    ax.axvline(x=p0_position, color='gray', linestyle='--', alpha=0.7)
-                
-                # Set x-axis ticks and labels
-                ax.set_xticks(x_positions)
-                ax.set_xticklabels(period_labels, rotation=45, ha='right', fontsize=8)
-                
+            # Backward-compat: if provided, infer left/right
+            if isinstance(forecast_data, tuple):
+                target_df, base_df = forecast_data
             else:
-                # Original frequency data with DatetimeIndex and Period column
-                scenarios = sorted([col for col in df.columns if col not in ['Period', 'Fitted']])
-                
-                # Plot fitted values for Pre-P0 and P0 periods
-                if 'Fitted' in df.columns:
-                    fitted_mask = df['Period'].isin(['Pre-P0', 'P0'])
-                    fitted_data = df[fitted_mask]['Fitted'].dropna()
-                    if not fitted_data.empty:
-                        ax.plot(fitted_data.index, fitted_data.values, color='black', 
-                               linestyle='-', label='Fitted', linewidth=2)
-                
-                # Plot each scenario (P0 and forecast periods)
-                for i, scenario in enumerate(scenarios):
-                    if style and scenario in style:
-                        scen_style = style[scenario]
-                        if 'linewidth' not in scen_style:
-                            scen_style['linewidth'] = 2
-                    else:
-                        color = self.scenario_colors[i % len(self.scenario_colors)]
-                        scen_style = {
-                            'color': color,
-                            'linestyle': '-',
-                            'label': scenario,
-                            'linewidth': 2
-                        }
-                    
-                    # Plot scenario data for forecast periods
-                    forecast_mask = df['Period'].str.startswith('P')
-                    scenario_data = df[forecast_mask][scenario].dropna()
-                    if not scenario_data.empty:
-                        ax.plot(scenario_data.index, scenario_data.values, **scen_style)
-                
-                # Add vertical line at P0 (without label)
-                p0_date = df[df['Period'] == 'P0'].index
-                if len(p0_date) > 0:
-                    ax.axvline(x=p0_date[0], color='gray', linestyle='--', alpha=0.7)
-                
-                # Format x-axis for dates
-                ax.xaxis.set_major_formatter(DateFormatter('%Y-%m'))
+                target_df, base_df = forecast_data, None
+            base_qtr_df = None
+
+        # Build subplot grid
+        add_quarterly_row = base_qtr_df is not None and not base_qtr_df.empty
+        nrows = 2 if add_quarterly_row else 1
+        ncols = 2
+        fig_width = figsize[0] * ncols
+        fig_height = figsize[1] * nrows
+        fig, axes = plt.subplots(nrows, ncols, figsize=(fig_width, fig_height))
+        if nrows == 1:
+            axes_flat = np.ravel(axes)
+            ax_target, ax_base = axes_flat[0], axes_flat[1]
+        else:
+            ax_target = axes[0, 0]
+            ax_base = axes[0, 1]
+            ax_empty = axes[1, 0]
+            ax_qtr = axes[1, 1]
+            ax_empty.set_visible(False)
+
+        def plot_df(ax, df: pd.DataFrame, title: str):
+            if df is None or df.empty:
+                ax.set_visible(False)
+                return
+            # Ensure datetime index
+            if not isinstance(df.index, pd.DatetimeIndex):
+                try:
+                    df = df.copy()
+                    df.index = pd.to_datetime(df.index)
+                except Exception:
+                    pass
+            # Plot Actual
+            if 'Actual' in df.columns:
+                actual_series = df['Actual'].dropna()
+                if not actual_series.empty:
+                    ax.plot(actual_series.index, actual_series.values, color='red', linestyle='-', linewidth=2, alpha=0.6, label='Actual')
+            # Plot Fitted_IS
+            fitted_color = 'black'
+            if 'Fitted_IS' in df.columns:
+                fitted_series = df['Fitted_IS'].dropna()
+                if not fitted_series.empty:
+                    ax.plot(fitted_series.index, fitted_series.values, color=fitted_color, linestyle='-', linewidth=2, label='Fitted_IS')
+            # Plot Pred_OOS (same color as Fitted_IS, dashed)
+            if 'Pred_OOS' in df.columns:
+                pred_series = df['Pred_OOS'].dropna()
+                if not pred_series.empty:
+                    ax.plot(pred_series.index, pred_series.values, color=fitted_color, linestyle='--', linewidth=2, label='Pred_OOS')
+            # Plot scenarios
+            scenario_cols = [c for c in df.columns if c not in {'Period', 'Fitted_IS', 'Pred_OOS', 'Actual'}]
+            for i, scenario in enumerate(sorted(scenario_cols)):
+                series = df[scenario].dropna()
+                if series.empty:
+                    continue
+                if style and scenario in style:
+                    scen_style = style[scenario]
+                    scen_style.setdefault('linewidth', 2)
+                else:
+                    color = self.scenario_colors[i % len(self.scenario_colors)]
+                    scen_style = {'color': color, 'linestyle': '-', 'label': scenario, 'linewidth': 2}
+                ax.plot(series.index, series.values, **scen_style)
+            # Axes formatting: YY-MM, auto monthly/quarterly/yearly density
+            if isinstance(df.index, pd.DatetimeIndex):
+                n = len(df.index)
+                if n > 60:
+                    ax.xaxis.set_major_locator(YearLocator())
+                elif n > 18:
+                    ax.xaxis.set_major_locator(MonthLocator(bymonth=[3, 6, 9, 12]))
+                else:
+                    ax.xaxis.set_major_locator(MonthLocator(interval=1))
+                ax.xaxis.set_major_formatter(DateFormatter('%y-%m'))
                 plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=8)
-            
-            # Customize subplot
-            if is_dual_plot:
-                title = f"{subplot_title}"
-            else:
-                title = f"{title_prefix}Scenario Forecast - {scen_set}" if title_prefix else f"Scenario Forecast - {scen_set}"
             ax.set_title(title, fontsize=10)
             ax.legend(fontsize=8)
             ax.grid(True, alpha=0.3)
+
+        # Plot first row
+        plot_df(ax_target, target_df, f"{title_prefix}Target Variable" if title_prefix else "Target Variable")
+        plot_df(ax_base, base_df, f"{title_prefix}Base Variable" if title_prefix else "Base Variable")
+        # Plot second row quarterly base if requested
+        if nrows == 2:
+            plot_df(ax_qtr, base_qtr_df, f"{title_prefix}Base Variable (Quarterly)" if title_prefix else "Base Variable (Quarterly)")
         
         # Set overall title for dual plots
-        if is_dual_plot:
-            overall_title = f"{title_prefix}Scenario Forecast - {scen_set}" if title_prefix else f"Scenario Forecast - {scen_set}"
-            fig.suptitle(overall_title, fontsize=12)
+        overall_title = f"{title_prefix}Scenario Forecast - {scen_set}" if title_prefix else f"Scenario Forecast - {scen_set}"
+        fig.suptitle(overall_title, fontsize=12)
         
         # Adjust layout to prevent label cutoff
-        plt.tight_layout()
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
         
         # Save figure if path provided
         if save_path:
@@ -1425,7 +1328,9 @@ class ScenManager:
         - Uses consistent color schemes across all plots
         """
         # Get forecast DataFrames and scenario feature matrices
-        forecast_dfs = self.forecast_y_qtr_df if show_qtr else self.forecast_y_df
+        # Target forecasts are always shown in original frequency (monthly if M, quarterly if Q)
+        forecast_dfs = self.forecast_y_df
+        # Base forecasts can be shown as quarterly if show_qtr is True and freq is monthly
         base_forecast_dfs = self.forecast_y_base_qtr_df if show_qtr else self.forecast_y_base_df
         X_scens = self.X_scens
         

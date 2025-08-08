@@ -121,10 +121,22 @@ class FitMeasure(ModelTestBase):
     @property
     def test_result(self) -> pd.Series:
         """
+        Compute R² and adjusted R² and return as a small table.
+
         Returns
         -------
-        pd.Series
-            {'R²': ..., 'Adj R²': ...}
+        pandas.DataFrame
+            Index named 'Metric' with rows 'R²' and 'Adj R²' and a single
+            column 'Value'.
+
+        Example output structure
+        ------------------------
+        ┌──────────┬─────────┐
+        │ Metric   │ Value   │
+        ├──────────┼─────────┤
+        │ R²       │ 0.87    │
+        │ Adj R²   │ 0.85    │
+        └──────────┴─────────┘
         """
         # compute sum of squares
         ss_res = ((self.actual - self.predicted) ** 2).sum()
@@ -132,8 +144,12 @@ class FitMeasure(ModelTestBase):
         r2 = 1 - ss_res / ss_tot if ss_tot > 0 else float('nan')
         # adjusted R² = 1 - (1−R²)*(n−1)/(n−p−1)
         adj_r2 = 1 - (1 - r2) * (self.n - 1) / (self.n - self.p - 1) if self.n > self.p + 1 else float('nan')
-
-        return pd.Series({'R²': float(r2), 'Adj R²': float(adj_r2)}, name=self.name)
+        df = pd.DataFrame(
+            [{'Metric': 'R²', 'Value': float(r2)},
+             {'Metric': 'Adj R²', 'Value': float(adj_r2)}]
+        ).set_index('Metric')
+        df.index.name = 'Metric'
+        return df
 
     @property
     def test_filter(self) -> bool:
@@ -178,17 +194,34 @@ class ErrorMeasure(ModelTestBase):
     @property
     def test_result(self) -> pd.Series:
         """
+        Compute error diagnostics (ME, MAE, RMSE) and return as a table.
+
         Returns
         -------
-        pd.Series
-            {'ME': ..., 'MAE': ..., 'RMSE': ...}
+        pandas.DataFrame
+            Index named 'Metric' with rows 'ME', 'MAE', 'RMSE' and column 'Value'.
+
+        Example output structure
+        ------------------------
+        ┌────────┬─────────┐
+        │ Metric │ Value   │
+        ├────────┼─────────┤
+        │ ME     │ 1.23    │
+        │ MAE    │ 0.54    │
+        │ RMSE   │ 0.78    │
+        └────────┴─────────┘
         """
         abs_err = self.errors.abs()
         me = float(abs_err.max())
         mae = float(abs_err.mean())
         rmse = float(np.sqrt((self.errors ** 2).mean()))
-
-        return pd.Series({'ME': me, 'MAE': mae, 'RMSE': rmse}, name=self.name)
+        df = pd.DataFrame(
+            [{'Metric': 'ME', 'Value': me},
+             {'Metric': 'MAE', 'Value': mae},
+             {'Metric': 'RMSE', 'Value': rmse}]
+        ).set_index('Metric')
+        df.index.name = 'Metric'
+        return df
 
     @property
     def test_filter(self) -> bool:
@@ -248,7 +281,26 @@ class R2Test(ModelTestBase):
 
     @property
     def test_result(self) -> pd.Series:
-        return pd.Series({'R²': self.r2}, name=self.name)
+        """
+        Return the model R² as a one-line series with a named index.
+
+        Returns
+        -------
+        pandas.Series
+            Index name 'Metric' with a single entry 'R²'. The series name is
+            the test instance name.
+
+        Example output structure
+        ------------------------
+        ┌──────────┬───────┐
+        │ Metric   │ value │
+        ├──────────┼───────┤
+        │ R²       │ 0.74  │
+        └──────────┴───────┘
+        """
+        s = pd.Series({'R²': self.r2}, name=self.name)
+        s.index.name = 'Metric'
+        return s
 
     @property
     def test_filter(self) -> bool:
@@ -339,6 +391,15 @@ class AutocorrTest(ModelTestBase):
               - 'statistic': computed value (float or p-value)
               - 'threshold': tuple or float threshold
               - 'passed': bool if statistic meets threshold criteria
+
+        Example output structure
+        ------------------------
+        ┌───────────────────┬───────────┬────────────┬────────┐
+        │ Test              │ Statistic │ Threshold  │ Passed │
+        ├───────────────────┼───────────┼────────────┼────────┤
+        │ Durbin–Watson     │ 2.01      │ (1.5, 2.5) │ True   │
+        │ Breusch–Godfrey   │ 0.23      │ 0.1        │ True   │
+        └───────────────────┴───────────┴────────────┴────────┘
         """
         records = []
         for name, func in self.test_funcs.items():
@@ -439,6 +500,23 @@ class HetTest(ModelTestBase):
 
     @property
     def test_result(self) -> pd.DataFrame:
+        """
+        Run homoscedasticity tests and return a table of p-values and pass/fail.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Index 'Test' with columns 'P-value' and 'Passed'.
+
+        Example output structure
+        ------------------------
+        ┌────────────────┬──────────┬────────┐
+        │ Test           │ P-value  │ Passed │
+        ├────────────────┼──────────┼────────┤
+        │ Breusch–Pagan  │ 0.42     │ True   │
+        │ White          │ 0.31     │ True   │
+        └────────────────┴──────────┴────────┘
+        """
         records = []
         for name, func in self.test_funcs.items():
             pval = func(self.resids, self.exog)
@@ -504,7 +582,10 @@ class NormalityTest(ModelTestBase):
     @property
     def test_result(self) -> pd.DataFrame:
         """
-        Run each normality test and return a DataFrame:
+        Run each normality test and return a DataFrame.
+
+        Example output structure
+        ------------------------
         ┌──────┬──────────┬─────────┬────────┐
         │ Test │ Statistic│ P-value │ Passed │
         ├──────┼──────────┼─────────┼────────┤
@@ -645,7 +726,10 @@ class StationarityTest(ModelTestBase):
     @property
     def test_result(self) -> pd.DataFrame:
         """
-        Run each stationarity test and return a DataFrame:
+        Run each stationarity test and return a DataFrame.
+
+        Example output structure
+        ------------------------
         ┌──────┬──────────┬─────────┬────────┐
         │ Test │ Statistic│ P-value │ Passed │
         ├──────┼──────────┼─────────┼────────┤
@@ -777,11 +861,21 @@ class CoefTest(ModelTestBase):
         Returns a DataFrame with columns:
           - 'P-value': the original p-values
           - 'Passed' : True if p-value < α
+
+        Example output structure
+        ------------------------
+        ┌──────────────┬──────────┬────────┐
+        │ Coefficient  │ P-value  │ Passed │
+        ├──────────────┼──────────┼────────┤
+        │ x1_DF        │ 0.012    │ True   │
+        │ x2_GR        │ 0.085    │ True   │
+        └──────────────┴──────────┴────────┘
         """
         df = pd.DataFrame({
             'P-value': self.pvalues,
             'Passed':  self.pvalues < self.alpha
         })
+        df.index.name = 'Coefficient'
         return df
 
     @property
@@ -846,6 +940,14 @@ class GroupTest(ModelTestBase):
         """
         Perform joint hypothesis test that all specified coefficients are zero.
         Returns DataFrame with columns ['F-statistic','P-value','Passed'] and index label alias.
+
+        Example output structure
+        ------------------------
+        ┌───────────────┬──────────────┬──────────┬────────┐
+        │ Test          │ F-statistic  │ P-value  │ Passed │
+        ├───────────────┼──────────────┼──────────┼────────┤
+        │ Joint F Test  │ 5.23         │ 0.003    │ True   │
+        └───────────────┴──────────────┴──────────┴────────┘
         """
         # build restriction matrix string e.g. 'x1 = 0, x2 = 0'
         hypothesis = ' = 0, '.join(self.vars) + ' = 0'
@@ -858,6 +960,7 @@ class GroupTest(ModelTestBase):
             'P-value':     pvalue,
             'Passed':      passed
         }], index=['Joint F Test'])
+        df.index.name = 'Test'
         return df
 
     @property
@@ -937,6 +1040,15 @@ class SignCheck(ModelTestBase):
               - 'Expected': '+' for positive, '-' for negative expected sign
               - 'Coefficient': actual coefficient value
               - 'Passed': True if sign matches expectation, False otherwise
+
+        Example output structure
+        ------------------------
+        ┌──────────┬───────────┬─────────────┬────────┐
+        │ Variable │ Expected  │ Coefficient │ Passed │
+        ├──────────┼───────────┼─────────────┼────────┤
+        │ x1_DF    │ +         │ 0.52        │ True   │
+        │ x2_GR    │ -         │ -0.31       │ True   │
+        └──────────┴───────────┴─────────────┴────────┘
         """
         records = []
         
@@ -1041,6 +1153,15 @@ class VIFTest(ModelTestBase):
         pandas.DataFrame
             Index: variable names
             Columns: 'VIF'
+
+        Example output structure
+        ------------------------
+        ┌──────────┬──────┐
+        │ Variable │ VIF  │
+        ├──────────┼──────┤
+        │ x1       │ 3.4  │
+        │ x2       │ 6.1  │
+        └──────────┴──────┘
         """
         vif_values = []
         X = self.exog.values
@@ -1141,6 +1262,15 @@ class CointTest(ModelTestBase):
               - Individual test columns (e.g., 'ADF', 'PP'): True if test passed expectation
               - 'Result': 'Non-stationary'/'Stationary' based on filter_mode aggregation
               - 'Passed': True if meets expectation, False otherwise
+
+        Example output structure
+        ------------------------
+        ┌────────────┬──────────────┬───────────────────┬──────┬─────┬──────────────┬────────┐
+        │ Variable   │ Type         │ Expected          │ ADF  │ PP  │ Result       │ Passed │
+        ├────────────┼──────────────┼───────────────────┼──────┼─────┼──────────────┼────────┤
+        │ x1         │ X Variable   │ Non-stationary    │ True │ …   │ Non-stationary│ True  │
+        │ Residuals  │ Residuals    │ Stationary        │ True │ …   │ Stationary    │ True  │
+        └────────────┴──────────────┴───────────────────┴──────┴─────┴──────────────┴────────┘
         """
         records = []
         test_names = list(self.test_dict.keys())

@@ -134,8 +134,7 @@ class SensitivityTest:
         """
         Get parameter names suitable for sensitivity testing.
         
-        Returns parameter names from model.spec_map["StationarityTest"], 
-        excluding constant and dummy variables.
+        Returns parameter names from model.spec_map['SensitivityTest'].
         
         Returns
         -------
@@ -153,11 +152,11 @@ class SensitivityTest:
             return []
         
         spec_map = self.model.spec_map
-        if "StationarityTest" not in spec_map:
+        if "SensitivityTest" not in spec_map:
             return []
         
-        # Get stationarity test variables (excludes dummies and constants)
-        stationarity_vars = spec_map["StationarityTest"]
+        # Get sensitivity test variables (already excludes dummies and constants)
+        sensitivity_vars = spec_map["SensitivityTest"]
         
         # Filter to only include variables that exist in model parameters
         available_params = []
@@ -168,7 +167,7 @@ class SensitivityTest:
         else:
             return []
         
-        for var in stationarity_vars:
+        for var in sensitivity_vars:
             if var in model_params:
                 available_params.append(var)
         

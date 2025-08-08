@@ -64,6 +64,7 @@ class CM:
         model_cls: Type[ModelBase] = None,
         data_manager: Any = None,
         scen_cls: Type = None,
+        qtr_method: str = 'mean',
     ):
         """
         Initialize CM.
@@ -92,6 +93,7 @@ class CM:
         self.target_exposure = target_exposure
         self.model_cls = model_cls
         self.dm = data_manager
+        self.qtr_method = qtr_method
         
         # Import and set default ScenManager if not provided
         if scen_cls is None:
@@ -157,7 +159,8 @@ class CM:
                 model_type=self.model_type,
                 target_base=self.target_base,
                 target_exposure=self.target_exposure,
-                scen_cls=self.scen_cls
+                scen_cls=self.scen_cls,
+                qtr_method=self.qtr_method
             ).fit()
 
         # Create full-sample model if requested
@@ -171,7 +174,8 @@ class CM:
                 model_type=self.model_type,
                 target_base=self.target_base,
                 target_exposure=self.target_exposure,
-                scen_cls=self.scen_cls
+                scen_cls=self.scen_cls,
+                qtr_method=self.qtr_method
             ).fit()
 
     @property

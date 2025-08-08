@@ -81,7 +81,8 @@ class ModelSearch:
         model_cls: Type[ModelBase],
         model_type: Optional[Any] = None,
         target_base: Optional[str] = None,
-        target_exposure: Optional[str] = None
+        target_exposure: Optional[str] = None,
+        qtr_method: str = 'mean'
     ):
         self.dm = dm
         self.target = target
@@ -89,6 +90,7 @@ class ModelSearch:
         self.model_type = model_type
         self.target_base = target_base
         self.target_exposure = target_exposure
+        self.qtr_method = qtr_method
         self.all_specs: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
         self.passed_cms: List[CM] = []
         self.failed_info: List[Tuple[List[Any], List[str]]] = []
@@ -333,7 +335,8 @@ class ModelSearch:
             target_base=self.target_base,
             target_exposure=self.target_exposure,
             model_cls=self.model_cls, 
-            data_manager=self.dm
+            data_manager=self.dm,
+            qtr_method=self.qtr_method
         )
         cm.build(specs, sample=sample, outlier_idx=outlier_idx)
         mdl = cm.model_in if sample == 'in' else cm.model_full
@@ -517,17 +520,39 @@ class ModelSearch:
         if sample not in {'in', 'full'}:
             raise ValueError("sample must be 'in' or 'full'.")
         records = []
+
+        def _flatten_test_result(obj: Any) -> pd.Series:
+            """
+            Convert a test_result (Series or DataFrame) into a flat Series of numeric values.
+            - If DataFrame, prefer 'Value' column; otherwise, the first numeric column.
+            - Returns empty Series if nothing usable.
+            """
+            if obj is None:
+                return pd.Series(dtype=float)
+            if isinstance(obj, pd.Series):
+                return obj.astype(float)
+            if isinstance(obj, pd.DataFrame):
+                if 'Value' in obj.columns:
+                    return obj['Value'].astype(float)
+                numeric_cols = obj.select_dtypes(include=['number']).columns
+                if len(numeric_cols) > 0:
+                    return obj[numeric_cols[0]].astype(float)
+            return pd.Series(dtype=float)
         for cm in cms_list:
             mdl = cm.model_in if sample == 'in' else cm.model_full
             testdict = {t.name: t for t in mdl.testset.tests}
-            fit_sr = testdict['Fit Measures'].test_result
-            is_err_sr = testdict['IS Error Measures'].test_result
-            oos_err_sr = testdict.get('OOS Error Measures')
+            fit_sr = _flatten_test_result(testdict['Fit Measures'].test_result) if 'Fit Measures' in testdict else pd.Series(dtype=float)
+            is_err_sr = _flatten_test_result(testdict['IS Error Measures'].test_result) if 'IS Error Measures' in testdict else pd.Series(dtype=float)
+            oos_err_obj = testdict.get('OOS Error Measures')
+            oos_err_sr = _flatten_test_result(oos_err_obj.test_result) if oos_err_obj is not None else pd.Series(dtype=float)
             rec = {'model_id': cm.model_id}
-            for nm, val in fit_sr.items(): rec[f'fit_{nm}'] = val
-            for nm, val in is_err_sr.items(): rec[f'is_err_{nm}'] = val
-            if oos_err_sr is not None:
-                for nm, val in oos_err_sr.test_result.items(): rec[f'oos_err_{nm}'] = val
+            for nm, val in fit_sr.items():
+                rec[f'fit_{nm}'] = float(val)
+            for nm, val in is_err_sr.items():
+                rec[f'is_err_{nm}'] = float(val)
+            if not oos_err_sr.empty:
+                for nm, val in oos_err_sr.items():
+                    rec[f'oos_err_{nm}'] = float(val)
             records.append(rec)
 
         df = pd.DataFrame(records)

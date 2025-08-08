@@ -92,7 +92,8 @@ class ModelBase(ABC):
         X: Optional[pd.DataFrame] = None,
         y: Optional[pd.Series] = None,
         X_out: Optional[pd.DataFrame] = None,
-        y_out: Optional[pd.Series] = None
+        y_out: Optional[pd.Series] = None,
+        qtr_method: str = 'mean'
     ):
         # Core data preparation parameters
         self.dm = dm
@@ -102,6 +103,8 @@ class ModelBase(ABC):
         self.target = target
         self.target_base = target_base
         self.target_exposure = target_exposure
+        # Quarterly aggregation method for scenario/base reporting
+        self.qtr_method = qtr_method
         
         # Validation
         if sample not in {'in', 'full'}:
@@ -852,7 +855,9 @@ class ModelBase(ABC):
         """
         In-sample performance measures from testset results.
         
-        Combines 'Fit Measures' and 'IS Error Measures' test results into a single Series.
+        Combines 'Fit Measures' and 'IS Error Measures' into a single Series.
+        Handles underlying test_result objects that return either Series or
+        DataFrame (in which case the 'Value' column is used if present).
         
         Returns
         -------
@@ -868,17 +873,30 @@ class ModelBase(ABC):
         # Combine Fit Measures and IS Error Measures
         combined_series = pd.Series(dtype=float)
         
+        def _to_series(obj: Any) -> pd.Series:
+            """Convert a test_result (Series or DataFrame) to a flat Series.
+            - If DataFrame, prefer 'Value' column; else the sole numeric column if unique.
+            - Otherwise return empty Series.
+            """
+            if isinstance(obj, pd.Series):
+                return obj.astype(float)
+            if isinstance(obj, pd.DataFrame):
+                if 'Value' in obj.columns:
+                    return obj['Value'].astype(float)
+                numeric_cols = obj.select_dtypes(include=[np.number]).columns
+                if len(numeric_cols) == 1:
+                    return obj[numeric_cols[0]].astype(float)
+            return pd.Series(dtype=float)
+        
         # Add Fit Measures if available
         if 'Fit Measures' in all_results:
             fit_result = all_results['Fit Measures']
-            if isinstance(fit_result, pd.Series):
-                combined_series = pd.concat([combined_series, fit_result])
+            combined_series = pd.concat([combined_series, _to_series(fit_result)])
         
         # Add IS Error Measures if available
         if 'IS Error Measures' in all_results:
             error_result = all_results['IS Error Measures']
-            if isinstance(error_result, pd.Series):
-                combined_series = pd.concat([combined_series, error_result])
+            combined_series = pd.concat([combined_series, _to_series(error_result)])
         
         return combined_series
 
@@ -887,7 +905,8 @@ class ModelBase(ABC):
         """
         Out-of-sample performance measures from testset results.
         
-        Returns 'OOS Error Measures' test result as a Series.
+        Returns 'OOS Error Measures' as a Series, converting from DataFrame if needed
+        (using the 'Value' column when available).
         
         Returns
         -------
@@ -904,7 +923,13 @@ class ModelBase(ABC):
         if 'OOS Error Measures' in all_results:
             oos_result = all_results['OOS Error Measures']
             if isinstance(oos_result, pd.Series):
-                return oos_result
+                return oos_result.astype(float)
+            if isinstance(oos_result, pd.DataFrame):
+                if 'Value' in oos_result.columns:
+                    return oos_result['Value'].astype(float)
+                numeric_cols = oos_result.select_dtypes(include=[np.number]).columns
+                if len(numeric_cols) == 1:
+                    return oos_result[numeric_cols[0]].astype(float)
         
         return pd.Series(dtype=float)
 
@@ -914,7 +939,8 @@ class ModelBase(ABC):
         """
         if self.scen_cls is not None:
             self.scen_manager = self.scen_cls(
-                model=self
+                model=self,
+                qtr_method=self.qtr_method
             )
 
     @property
@@ -929,6 +955,7 @@ class ModelBase(ABC):
             - 'GroupTest': tuples of variable names for group F-tests (only full monthly/quarterly dummies)
             - 'StationarityTest': variable names applicable for stationarity tests
             - 'SignCheck': Feature instances with exp_sign attribute
+            - 'SensitivityTest': variable names applicable for sensitivity testing (exclude 'const' and M:/Q: dummies)
             - 'lookback_var': CondVar objects with lookback_n > 0
         """
         if self.specs is None:
@@ -937,6 +964,7 @@ class ModelBase(ABC):
                 'GroupTest': [],
                 'StationarityTest': [],
                 'SignCheck': [],
+                'SensitivityTest': [],
                 'lookback_var': []
             }
         
@@ -948,6 +976,7 @@ class ModelBase(ABC):
         stationarity_test_vars: List[str] = []
         sign_check_features: List[Feature] = []
         lookback_vars: List[Any] = []
+        sensitivity_test_vars: List[str] = []
 
         def _flatten(items):
             """Recursively flatten nested lists but leave tuples intact."""
@@ -997,6 +1026,12 @@ class ModelBase(ABC):
             
             return False
         
+        def _is_periodical_dummy_name(name: str) -> bool:
+            """Return True if the provided variable name is a monthly/quarterly dummy like 'M:2' or 'Q:3'."""
+            if not isinstance(name, str):
+                return False
+            return name.startswith('M:') or name.startswith('Q:')
+        
         for spec in _flatten(self.specs):
             # 1) Tuple of specs → one tuple of their output names
             if isinstance(spec, tuple):
@@ -1013,6 +1048,9 @@ class ModelBase(ABC):
                 for name in names:
                     if not ':' in name:  # Not a dummy variable
                         stationarity_test_vars.append(name)
+                    # Sensitivity: include everything except constant and periodical M:/Q: dummies
+                    if name != 'const' and not _is_periodical_dummy_name(name):
+                        sensitivity_test_vars.append(name)
 
             # 2) DumVar instance → one tuple of its dummy-column names
             elif isinstance(spec, DumVar):
@@ -1025,6 +1063,10 @@ class ModelBase(ABC):
                 else:
                     # Other dummy groups go to CoefTest only
                     coef_test_vars.extend(names)
+                    # For sensitivity, exclude only M:/Q: periodical dummies; include other dummy groups
+                    for name in names:
+                        if name != 'const' and not _is_periodical_dummy_name(name):
+                            sensitivity_test_vars.append(name)
 
             # 3) Everything else → individual features
             else:
@@ -1036,6 +1078,9 @@ class ModelBase(ABC):
                     for name in spec.output_names:
                         if not ':' in name:  # Not a dummy variable
                             stationarity_test_vars.append(name)
+                        # Sensitivity inclusion rule
+                        if name != 'const' and not _is_periodical_dummy_name(name):
+                            sensitivity_test_vars.append(name)
                     
                     # Check for SignCheck eligibility (Features with exp_sign attribute)
                     if hasattr(spec, 'exp_sign'):
@@ -1049,12 +1094,15 @@ class ModelBase(ABC):
                     # String specifications
                     coef_test_vars.append(str(spec))
                     stationarity_test_vars.append(str(spec))
+                    if str(spec) != 'const' and not _is_periodical_dummy_name(str(spec)):
+                        sensitivity_test_vars.append(str(spec))
 
         return {
             'CoefTest': coef_test_vars,
             'GroupTest': group_test_vars,
             'StationarityTest': stationarity_test_vars,
             'SignCheck': sign_check_features,
+            'SensitivityTest': sensitivity_test_vars,
             'lookback_var': lookback_vars
         }
 
@@ -1125,7 +1173,8 @@ class OLS(ModelBase):
         X: Optional[pd.DataFrame] = None,
         y: Optional[pd.Series] = None,
         X_out: Optional[pd.DataFrame] = None,
-        y_out: Optional[pd.Series] = None
+        y_out: Optional[pd.Series] = None,
+        qtr_method: str = 'mean'
     ):
         # Set default stability test class if not provided
         if stability_test_cls is None:
@@ -1150,7 +1199,8 @@ class OLS(ModelBase):
             X=X,
             y=y,
             X_out=X_out,
-            y_out=y_out
+            y_out=y_out,
+            qtr_method=qtr_method
         )
         # Fit result placeholders
         self.fitted = None
