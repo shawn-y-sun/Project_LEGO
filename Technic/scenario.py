@@ -937,7 +937,8 @@ class ScenManager:
         style: Optional[Dict[str, Dict[str, Any]]] = None,
         title_prefix: str = "",
         save_path: Optional[str] = None,
-        show_qtr: bool = False
+        show_qtr: bool = False,
+        show_actual: bool = False
     ) -> plt.Figure:
         """
         Plot forecasting results for a single scenario set.
@@ -970,6 +971,8 @@ class ScenManager:
             If True, use quarterly frequency data (forecast_y_qtr_df).
             If False, use original frequency data (forecast_y_df).
             Only used when forecast_data is None.
+        show_actual : bool, default=False
+            If True, draw the Actual line on plots; otherwise do not include Actual
             
         Returns
         -------
@@ -988,7 +991,8 @@ class ScenManager:
             target_df = self.forecast_y_df[scen_set].copy()
             base_df = self.forecast_y_base_df.get(scen_set)
             base_qtr_df = None
-            if show_qtr and getattr(self.dm, 'freq', 'M') == 'M':
+            # Show quarterly base row whenever requested and available
+            if show_qtr:
                 base_qtr_df = self.forecast_y_base_qtr_df.get(scen_set)
         else:
             # Backward-compat: if provided, infer left/right
@@ -1027,25 +1031,25 @@ class ScenManager:
                 except Exception:
                     pass
             # Plot Actual
-            if 'Actual' in df.columns:
-                actual_series = df['Actual'].dropna()
+            if show_actual and 'Actual' in df.columns:
+                actual_series = pd.to_numeric(df['Actual'], errors='coerce').dropna()
                 if not actual_series.empty:
-                    ax.plot(actual_series.index, actual_series.values, color='red', linestyle='-', linewidth=2, alpha=0.6, label='Actual')
+                    ax.plot(actual_series.index, actual_series.values, color='red', linestyle='-', linewidth=2, alpha=0.3, label='Actual')
             # Plot Fitted_IS
             fitted_color = 'black'
             if 'Fitted_IS' in df.columns:
-                fitted_series = df['Fitted_IS'].dropna()
+                fitted_series = pd.to_numeric(df['Fitted_IS'], errors='coerce').dropna()
                 if not fitted_series.empty:
                     ax.plot(fitted_series.index, fitted_series.values, color=fitted_color, linestyle='-', linewidth=2, label='Fitted_IS')
             # Plot Pred_OOS (same color as Fitted_IS, dashed)
             if 'Pred_OOS' in df.columns:
-                pred_series = df['Pred_OOS'].dropna()
+                pred_series = pd.to_numeric(df['Pred_OOS'], errors='coerce').dropna()
                 if not pred_series.empty:
                     ax.plot(pred_series.index, pred_series.values, color=fitted_color, linestyle='--', linewidth=2, label='Pred_OOS')
             # Plot scenarios
             scenario_cols = [c for c in df.columns if c not in {'Period', 'Fitted_IS', 'Pred_OOS', 'Actual'}]
             for i, scenario in enumerate(sorted(scenario_cols)):
-                series = df[scenario].dropna()
+                series = pd.to_numeric(df[scenario], errors='coerce').dropna()
                 if series.empty:
                     continue
                 if style and scenario in style:
@@ -1058,9 +1062,10 @@ class ScenManager:
             # Axes formatting: YY-MM, auto monthly/quarterly/yearly density
             if isinstance(df.index, pd.DatetimeIndex):
                 n = len(df.index)
-                if n > 60:
+                # Slightly denser ticks for left plot to improve readability
+                if n > 90:
                     ax.xaxis.set_major_locator(YearLocator())
-                elif n > 18:
+                elif n > 24:
                     ax.xaxis.set_major_locator(MonthLocator(bymonth=[3, 6, 9, 12]))
                 else:
                     ax.xaxis.set_major_locator(MonthLocator(interval=1))
@@ -1249,10 +1254,10 @@ class ScenManager:
             ax.legend(fontsize=8)
             ax.grid(True, alpha=0.3)
             
-            # Format X-axis (simplified for subplots)
-            from matplotlib.dates import DateFormatter, YearLocator
-            ax.xaxis.set_major_locator(YearLocator())
-            ax.xaxis.set_major_formatter(DateFormatter('%Y'))
+            # Format X-axis: always show quarter-end ticks for scenario variables
+            from matplotlib.dates import DateFormatter, MonthLocator
+            ax.xaxis.set_major_locator(MonthLocator(bymonth=[3, 6, 9, 12]))
+            ax.xaxis.set_major_formatter(DateFormatter('%y-%m'))
             plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=8)
         
         # Hide unused subplots
@@ -1289,7 +1294,8 @@ class ScenManager:
         save_path: Optional[str] = None,
         subplot_width: float = 5.0,
         subplot_height: float = 3.5,
-        show_qtr: bool = True
+        show_qtr: bool = True,
+        show_actual: bool = False
     ) -> Dict[str, Dict[str, plt.Figure]]:
         """
         Plot both forecasts and scenario variables for all scenario sets.
@@ -1314,6 +1320,8 @@ class ScenManager:
         show_qtr : bool, default=True
             If True, use quarterly frequency data (forecast_y_qtr_df).
             If False, use original frequency data (forecast_y_df).
+        show_actual : bool, default=False
+            If True, draw the Actual line on plots; otherwise do not include Actual
             
         Returns
         -------
@@ -1330,8 +1338,8 @@ class ScenManager:
         # Get forecast DataFrames and scenario feature matrices
         # Target forecasts are always shown in original frequency (monthly if M, quarterly if Q)
         forecast_dfs = self.forecast_y_df
-        # Base forecasts can be shown as quarterly if show_qtr is True and freq is monthly
-        base_forecast_dfs = self.forecast_y_base_qtr_df if show_qtr else self.forecast_y_base_df
+        # Base forecasts for side-by-side when not showing quarterly row
+        base_forecast_dfs = self.forecast_y_base_df
         X_scens = self.X_scens
         
         # Store all figures for return
@@ -1340,14 +1348,17 @@ class ScenManager:
         for scen_set in forecast_dfs.keys():
             all_figures[scen_set] = {}
             
-            # Prepare forecast data - combine target and base if available
-            target_df = forecast_dfs[scen_set]
-            base_df = base_forecast_dfs.get(scen_set) if base_forecast_dfs else None
-            
-            if base_df is not None and not base_df.empty:
-                forecast_data = (target_df, base_df)
+            # Prepare forecast data
+            if show_qtr:
+                # Let plot_forecasts compute both monthly and quarterly views
+                forecast_data = None
             else:
-                forecast_data = target_df
+                target_df = forecast_dfs[scen_set]
+                base_df = base_forecast_dfs.get(scen_set) if base_forecast_dfs else None
+                if base_df is not None and not base_df.empty:
+                    forecast_data = (target_df, base_df)
+                else:
+                    forecast_data = target_df
             
             # Create forecast plot
             forecast_fig = self.plot_forecasts(
@@ -1357,7 +1368,8 @@ class ScenManager:
                 style=style,
                 title_prefix=title_prefix,
                 save_path=save_path,
-                show_qtr=show_qtr
+                show_qtr=show_qtr,
+                show_actual=show_actual
             )
             all_figures[scen_set]['forecasts'] = forecast_fig
             
