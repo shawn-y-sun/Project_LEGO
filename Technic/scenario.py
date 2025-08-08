@@ -898,25 +898,34 @@ class ScenManager:
                 scen_quarterly = aggregate_to_quarterly(scen_series, self.qtr_method)
                 all_data[scen_name] = scen_quarterly
             
-            # Get all unique quarter-end dates
+            # Get all unique quarter-end dates (include IS/OOS so fitted appears on the plot)
             all_quarters = pd.Index([])
             for series in all_data.values():
                 all_quarters = all_quarters.union(series.index)
+            if not combined_quarterly.empty:
+                all_quarters = all_quarters.union(combined_quarterly.index)
+            if not y_base_full is None and not y_base_full.empty:
+                # Include actuals' quarterly index to keep alignment if needed
+                all_quarters = all_quarters.union(
+                    aggregate_to_quarterly(y_base_full, self.qtr_method).index
+                )
             all_quarters = all_quarters.sort_values()
             
             # Create quarterly DataFrame
             df = pd.DataFrame(index=all_quarters)
             
             # Add core series
+            df['Fitted_IS'] = np.nan
+            df['Pred_OOS'] = np.nan
             if not combined_quarterly.empty:
-                # Split combined into Fitted_IS and Pred_OOS by availability
-                df['Fitted_IS'] = pd.to_numeric(combined_quarterly.reindex(all_quarters), errors='coerce')
-                df['Pred_OOS'] = np.nan
+                # Initialize Fitted_IS with fitted_quarterly where available
+                if not fitted_quarterly.empty:
+                    df.loc[fitted_quarterly.index, 'Fitted_IS'] = pd.to_numeric(fitted_quarterly, errors='coerce')
+                # Fill Pred_OOS with pred_oos_quarterly
                 if not pred_oos_quarterly.empty:
                     df.loc[pred_oos_quarterly.index, 'Pred_OOS'] = pd.to_numeric(pred_oos_quarterly, errors='coerce')
-                if not fitted_quarterly.empty:
-                    # Where Pred_OOS is present, clear Fitted_IS
-                    df.loc[df['Pred_OOS'].notna(), 'Fitted_IS'] = np.nan
+                # Where Pred_OOS is present, clear Fitted_IS to avoid overlap
+                df.loc[df['Pred_OOS'].notna(), 'Fitted_IS'] = np.nan
             # Add scenario series
             for col_name, series in all_data.items():
                 df[col_name] = pd.to_numeric(series, errors='coerce')
