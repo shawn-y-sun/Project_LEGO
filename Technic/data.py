@@ -329,7 +329,7 @@ class DataManager:
         Get the pseudo-out-of-sample periods for Walk Forward Test.
         
         Returns frequency-based defaults if not specified at initialization:
-        - For quarterly data (freq='Q'): [4, 9, 12] 
+        - For quarterly data (freq='Q'): [4, 8, 12] 
         - For monthly data (freq='M'): [3, 6, 12]
         
         Returns
@@ -342,14 +342,14 @@ class DataManager:
         Example
         -------
         >>> periods = dm.poos_periods
-        >>> print(f"POOS periods: {periods}")  # [3, 6, 12] for monthly or [4, 9, 12] for quarterly
+        >>> print(f"POOS periods: {periods}")  # [3, 6, 12] for monthly or [4, 8, 12] for quarterly
         """
         if self._poos_periods is not None:
             return self._poos_periods
         
         # Return frequency-based defaults
         if self.freq == 'Q':
-            return [4, 9, 12]
+            return [4, 8, 12]
         else:  # 'M'
             return [3, 6, 12]
 

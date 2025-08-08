@@ -81,7 +81,8 @@ class ModelSearch:
         model_cls: Type[ModelBase],
         model_type: Optional[Any] = None,
         target_base: Optional[str] = None,
-        target_exposure: Optional[str] = None
+        target_exposure: Optional[str] = None,
+        qtr_method: str = 'mean'
     ):
         self.dm = dm
         self.target = target
@@ -89,6 +90,7 @@ class ModelSearch:
         self.model_type = model_type
         self.target_base = target_base
         self.target_exposure = target_exposure
+        self.qtr_method = qtr_method
         self.all_specs: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
         self.passed_cms: List[CM] = []
         self.failed_info: List[Tuple[List[Any], List[str]]] = []
@@ -333,7 +335,8 @@ class ModelSearch:
             target_base=self.target_base,
             target_exposure=self.target_exposure,
             model_cls=self.model_cls, 
-            data_manager=self.dm
+            data_manager=self.dm,
+            qtr_method=self.qtr_method
         )
         cm.build(specs, sample=sample, outlier_idx=outlier_idx)
         mdl = cm.model_in if sample == 'in' else cm.model_full
