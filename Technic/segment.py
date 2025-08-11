@@ -97,7 +97,8 @@ class Segment:
         export_template_cls: Optional[Type[ExportTemplateBase]] = None,
         reportset_cls: Type[ReportSet] = ReportSet,
         search_cls: Type[ModelSearch] = ModelSearch,
-        scen_cls: Optional[Type[ScenManager]] = None
+        scen_cls: Optional[Type[ScenManager]] = None,
+        qtr_method: str = 'mean'
     ):
         self.segment_id = segment_id
         self.target = target
@@ -109,6 +110,7 @@ class Segment:
         self.export_template_cls = export_template_cls
         self.reportset_cls = reportset_cls
         self.search_cls = search_cls
+        self.qtr_method = qtr_method
         # Import and set default ScenManager if not provided
         if scen_cls is None:
             self.scen_cls = ScenManager
@@ -180,6 +182,7 @@ class Segment:
             data_manager=self.dm,
             model_cls=self.model_cls,
             scen_cls=self.scen_cls,
+            qtr_method=self.qtr_method,
         )
         cm.build(specs, sample=sample)
         self.cms[cm_id] = cm
@@ -1103,7 +1106,8 @@ class Segment:
                 self.model_cls,
                 model_type=self.model_type,
                 target_base=self.target_base,
-                target_exposure=self.target_exposure
+                target_exposure=self.target_exposure,
+                qtr_method=self.qtr_method
             )
         searcher = self.searcher
 
