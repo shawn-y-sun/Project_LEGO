@@ -97,8 +97,6 @@ class ModelSearch:
         self.error_log: List[Tuple[List[Any], str, str]] = []
         self.df_scores: Optional[pd.DataFrame] = None
         self.top_cms: List[CM] = []
-        # Pruning memory: variables observed to consistently fail tests
-        self._banned_vars: set = set()
     
     def build_spec_combos(
         self,
@@ -408,11 +406,6 @@ class ModelSearch:
             for i, specs in enumerate(self.all_specs):
                 model_id = f"{model_id_prefix}{i}"
                 try:
-                    # Prune by banned variables before any build work
-                    spec_var_names = self._extract_var_names_from_specs(specs)
-                    if self._banned_vars and (spec_var_names & self._banned_vars):
-                        # Skip this combo entirely
-                        continue
                     # Suppress all output during assessment
                     with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
                         result = self.assess_spec(
@@ -432,15 +425,6 @@ class ModelSearch:
                         # Extract specs, failed_tests, and filter_test_info from failed result
                         specs_failed, failed_tests, filter_test_info = result
                         failed_info.append((specs_failed, failed_tests))
-                        # Update pruned variables based on this failed model's diagnostics
-                        try:
-                            mdl = None
-                            # When failed, we don't get CM; attempt to rebuild minimal model reference if available
-                            # Skip if not easily accessible
-                        except Exception:
-                            mdl = None
-                        # We can still update bans based on test info by re-assessing if necessary
-                        # More robustly, rely on later dedicated analysis, or keep bans as-is
                     
                     # Update batch filter_test_info (will overwrite duplicates)
                     batch_filter_test_infos.update(filter_test_info)
@@ -507,75 +491,6 @@ class ModelSearch:
             # Final newline after progress bar
             print("")
             return passed_cms, failed_info, error_log
-
-    # --- Pruning helpers ---
-    def _extract_var_names_from_specs(self, specs: List[Any]) -> set:
-        names: set = set()
-        def add_spec(s):
-            if isinstance(s, TSFM):
-                # Prefer transformed name if available; fallback to base var
-                nm = getattr(s, 'name', None) or getattr(s, 'var', None)
-                if nm:
-                    names.add(str(nm))
-            elif isinstance(s, Feature):
-                nm = getattr(s, 'name', None)
-                if nm:
-                    names.add(str(nm))
-            elif isinstance(s, str):
-                names.add(s)
-            elif isinstance(s, tuple):
-                for el in s:
-                    add_spec(el)
-            # ignore DumVar and others here
-        for sp in specs:
-            if isinstance(sp, DumVar):
-                continue
-            add_spec(sp)
-        return names
-
-    def _update_banned_from_model(self, mdl: ModelBase) -> None:
-        """Update banned variables from model test results to prune future combos.
-        Heuristics: Any variable rows with Passed == False in assumption/category tests.
-        For VIF, variables with VIF greater than threshold are banned.
-        """
-        try:
-            tests = getattr(mdl, 'testset', None)
-            if tests is None:
-                return
-            for t in tests.tests:
-                tr = None
-                try:
-                    tr = t.test_result
-                except Exception:
-                    tr = None
-                if isinstance(tr, pd.DataFrame):
-                    # Stationarity / MultiStationarity: expect 'Passed' col, index vars
-                    if 'Passed' in tr.columns and tr.index.name in (None, 'Variable'):
-                        # Exclude residuals row if present
-                        for var_name, row in tr.iterrows():
-                            if isinstance(var_name, str) and var_name.lower() == 'residuals':
-                                continue
-                            passed = row.get('Passed')
-                            if pd.notnull(passed) and not bool(passed):
-                                self._banned_vars.add(str(var_name))
-                    # VIF: ban variables above threshold
-                    elif 'VIF' in tr.columns:
-                        for var_name, row in tr.iterrows():
-                            vif_val = row.get('VIF')
-                            try:
-                                if pd.notnull(vif_val) and float(vif_val) > 10.0:
-                                    self._banned_vars.add(str(var_name))
-                            except Exception:
-                                continue
-                    # SignCheck: variables failing expected sign
-                    elif 'Passed' in tr.columns and {'Expected', 'Coefficient'}.issubset(set(tr.columns)):
-                        for var_name, row in tr.iterrows():
-                            passed = row.get('Passed')
-                            if pd.notnull(passed) and not bool(passed):
-                                self._banned_vars.add(str(var_name))
-        except Exception:
-            # Non-fatal: pruning is best-effort
-            return
 
     @staticmethod
     def rank_cms(
