@@ -18,6 +18,23 @@ from typing import Dict, List, Any, Optional, Set, Type
 import pandas as pd
 from pathlib import Path
 import numpy as np
+import logging
+
+# Module logger
+logger = logging.getLogger(__name__)
+
+# Shared column schemas
+TIMESERIES_COLUMNS = ['date', 'model', 'series_type', 'value_type', 'value']
+STATICSTATS_COLUMNS = ['category', 'model', 'type', 'value_type', 'value']
+SCENARIO_COLUMNS = ['model', 'scenario_name', 'severity', 'date', 'frequency', 'value_type', 'value']
+TEST_RESULTS_COLUMNS = ['model', 'test', 'index', 'metric', 'value']
+SENSITIVITY_COLUMNS = ['model', 'test', 'scenario_name', 'severity', 'variable/parameter', 'shock', 'date', 'frequency', 'value_type', 'value']
+
+# Series type constants
+SERIES_TYPE_TARGET = 'Target'
+SERIES_TYPE_BASE = 'Base'
+SERIES_TYPE_RESIDUAL = 'Residual'
+SERIES_TYPE_IV = 'Independent Variable'
 
 # Define available export content types as constants
 EXPORT_CONTENT_TYPES = {
@@ -81,7 +98,7 @@ class ExportStrategy(ABC):
         Args:
             format_handler: Handler for the output format
             content_types: Set of content types to export. If None, exports all content.
-                         Valid types are: 'timeseries_data', 'staticStats', 'scenario_testing', 'test_results'
+                         Valid types are: 'timeseries_data', 'staticStats', 'scenario_testing', 'test_results', 'sensitivity_testing'
         """
         self.format_handler = format_handler
         self.content_types = content_types or set(EXPORT_CONTENT_TYPES.keys())
@@ -128,8 +145,8 @@ class ExportFormatHandler(ABC):
     """Abstract base class for handling different export formats."""
     
     @abstractmethod
-    def save_dataframe(self, df: pd.DataFrame, filepath: Path) -> None:
-        """Save DataFrame in specific format."""
+    def save_dataframe(self, df: pd.DataFrame, filepath: Path, mode: str = 'w', header: bool = True) -> None:
+        """Save DataFrame in specific format with append support."""
         pass
     
     @abstractmethod
@@ -140,8 +157,8 @@ class ExportFormatHandler(ABC):
 class CSVFormatHandler(ExportFormatHandler):
     """Handler for CSV format exports."""
     
-    def save_dataframe(self, df: pd.DataFrame, filepath: Path) -> None:
-        df.to_csv(filepath, index=False)
+    def save_dataframe(self, df: pd.DataFrame, filepath: Path, mode: str = 'w', header: bool = True) -> None:
+        df.to_csv(filepath, mode=mode, header=header, index=False)
     
     def save_dict(self, data: Dict[str, Any], filepath: Path) -> None:
         pd.DataFrame([data]).to_csv(filepath, index=False)
@@ -231,7 +248,14 @@ class OLSExportStrategy(ExportStrategy):
         self._scenario_chunks = []
         self._test_results_chunks = []
         self._sensitivity_chunks = []  # New container for sensitivity results
-        self._current_chunk_size = 0
+        # Per-content chunk counters
+        self._chunk_sizes = {
+            'timeseries_data': 0,
+            'staticStats': 0,
+            'scenario_testing': 0,
+            'test_results': 0,
+            'sensitivity_testing': 0,
+        }
         self._written_files = set()  # Track which files have been written
     
     def _write_chunk(self, output_dir: Path, content_type: str, force_write: bool = False):
@@ -246,28 +270,27 @@ class OLSExportStrategy(ExportStrategy):
         content_config = {
             'timeseries_data': {
                 'chunks': self._timeseries_chunks,
-                'columns': ['date', 'model', 'value_type', 'value'],
+                'columns': TIMESERIES_COLUMNS,
                 'filename': 'timeseries_data.csv'
             },
             'staticStats': {
                 'chunks': self._statistics_chunks,
-                'columns': ['category', 'model', 'type', 'value_type', 'value'],
+                'columns': STATICSTATS_COLUMNS,
                 'filename': 'staticStats.csv'
             },
             'scenario_testing': {
                 'chunks': self._scenario_chunks,
-                'columns': ['model', 'scenario_name', 'severity', 'date', 'frequency', 'value_type', 'value'],
+                'columns': SCENARIO_COLUMNS,
                 'filename': 'scenario_testing.csv'
             },
             'test_results': {
                 'chunks': self._test_results_chunks,
-                'columns': ['model', 'test_name', 'test_target', 'test_statistic', 'test_statistic_value', 'pass'],
+                'columns': TEST_RESULTS_COLUMNS,
                 'filename': 'test_results.csv'
             },
             'sensitivity_testing': {
                 'chunks': self._sensitivity_chunks,
-                'columns': ['model', 'test', 'scenario_name', 'severity', 'variable/parameter', 
-                          'shock', 'date', 'frequency', 'value_type', 'value'],
+                'columns': SENSITIVITY_COLUMNS,
                 'filename': 'sensitivity_testing.csv'
             }
         }
@@ -291,23 +314,20 @@ class OLSExportStrategy(ExportStrategy):
         
         try:
             # Write data (append if file exists, otherwise create new)
-            df.to_csv(filepath, mode=write_mode, header=write_header, index=False)
+            # Delegate to format handler for flexibility and control of mode/header
+            self.format_handler.save_dataframe(df, filepath, mode=write_mode, header=write_header)
             
-            # Print appropriate success message only for new files or force_write
+            # Log appropriate success message only for new files or force_write
             if force_write or not file_exists:
-                if file_exists:
-                    print(f"\n✓ Successfully updated {content_type} file: {filepath}")
-                else:
-                    print(f"\n✓ Successfully wrote {content_type} file: {filepath}")
-                # Mark this file as written only when we print the message
+                action = "updated" if file_exists else "wrote"
+                logger.info("Successfully %s %s file: %s", action, content_type, filepath)
                 self._written_files.add(filepath)
-            
         except Exception as e:
-            print(f"\n✗ Failed to write {content_type} file to {filepath}: {str(e)}")
+            logger.exception("Failed to write %s file to %s: %s", content_type, filepath, e)
         
-        # Clear the chunks
+        # Clear the chunks and reset per-content chunk size
         chunks.clear()
-        self._current_chunk_size = 0
+        self._chunk_sizes[content_type] = 0
     
     def export_sensitivity_results(self, model: ExportableModel, output_dir: Path) -> None:
         """Export sensitivity testing results with chunking support.
@@ -323,22 +343,28 @@ class OLSExportStrategy(ExportStrategy):
         df = model.get_sensitivity_results()
         if isinstance(df, pd.DataFrame) and not df.empty:
             self._sensitivity_chunks.append(df)
-            self._current_chunk_size += len(df)
-            
-            if self._current_chunk_size >= self.chunk_size:
+            self._chunk_sizes['sensitivity_testing'] += len(df)
+            if self._chunk_sizes['sensitivity_testing'] >= self.chunk_size:
                 self._write_chunk(output_dir, 'sensitivity_testing')
     
     def export_test_results(self, model: ExportableModel, output_dir: Path) -> None:
-        """Export comprehensive test results with chunking support."""
+        """Export comprehensive test results with chunking support.
+        
+        Exports test results in long format with columns:
+        - model: Model identifier
+        - test: Descriptive test name (e.g., 'Residual Autocorrelation')
+        - index: Variable name or specific test name (e.g., 'Durbin-Watson')
+        - metric: Test metric type (e.g., 'Statistic', 'P-value', 'Passed')
+        - value: Numerical value
+        """
         if not self.should_export('test_results'):
             return
         
         df = model.get_test_results()
         if isinstance(df, pd.DataFrame) and not df.empty:
             self._test_results_chunks.append(df)
-            self._current_chunk_size += len(df)
-            
-            if self._current_chunk_size >= self.chunk_size:
+            self._chunk_sizes['test_results'] += len(df)
+            if self._chunk_sizes['test_results'] >= self.chunk_size:
                 self._write_chunk(output_dir, 'test_results')
     
     def export_timeseries_data(self, model: ExportableModel, output_dir: Path) -> None:
@@ -348,9 +374,8 @@ class OLSExportStrategy(ExportStrategy):
         df = model.get_timeseries_data()
         if isinstance(df, pd.DataFrame) and not df.empty:
             self._timeseries_chunks.append(df)
-            self._current_chunk_size += len(df)
-            
-            if self._current_chunk_size >= self.chunk_size:
+            self._chunk_sizes['timeseries_data'] += len(df)
+            if self._chunk_sizes['timeseries_data'] >= self.chunk_size:
                 self._write_chunk(output_dir, 'timeseries_data')
     
     def export_statistics(self, model: ExportableModel, output_dir: Path) -> None:
@@ -361,18 +386,17 @@ class OLSExportStrategy(ExportStrategy):
         df = model.get_model_statistics()
         if isinstance(df, pd.DataFrame) and not df.empty:
             self._statistics_chunks.append(df)
-            self._current_chunk_size += len(df)
-            
-            if self._current_chunk_size >= self.chunk_size:
+            self._chunk_sizes['staticStats'] += len(df)
+            if self._chunk_sizes['staticStats'] >= self.chunk_size:
                 self._write_chunk(output_dir, 'staticStats')
     
     def export_scenarios(self, model: ExportableModel, output_dir: Path) -> None:
         """Export scenario results with chunking support.
         
         The output will include:
-        - Target variable forecasts
-        - Base variable forecasts (if available)
-        - Both monthly and quarterly data in datetime format
+        - Target variable forecasts (monthly frequency only)
+        - Base variable forecasts (monthly and quarterly frequencies, if available)
+        - All data in datetime format
         
         Output format:
         - model: Model identifier
@@ -390,9 +414,8 @@ class OLSExportStrategy(ExportStrategy):
         df = model.get_scenario_results()
         if isinstance(df, pd.DataFrame) and not df.empty:
             self._scenario_chunks.append(df)
-            self._current_chunk_size += len(df)
-            
-            if self._current_chunk_size >= self.chunk_size:
+            self._chunk_sizes['scenario_testing'] += len(df)
+            if self._chunk_sizes['scenario_testing'] >= self.chunk_size:
                 self._write_chunk(output_dir, 'scenario_testing')
     
     def save_consolidated_results(self, output_dir: Path) -> None:
@@ -455,84 +478,81 @@ class OLSModelAdapter(ExportableModel):
         Returns a DataFrame with columns:
         - date: Time index
         - model: Model identifier
+        - series_type: One of ['Target','Base','Residual','Independent Variable']
         - value_type: Sample identifier or variable name
             - 'In-Sample': For in-sample predictions
             - 'Out-of-Sample': For out-of-sample predictions
             - 'Actual': For actual target values
             - 'Residual': For residuals
             - driver names: For feature/driver values
+            - For Base series_type, value_type mimics Target: 'Actual', 'In-Sample', 'Out-of-Sample' (if available)
         - value: The actual value
         """
-        # Pre-calculate common values
         model_id = self._model_id
-        data_list = []
-        
-        # Combine target data efficiently
-        target_data_full = pd.concat([self.model.y_in, self.model.y_out])
-        target_data_full = target_data_full.sort_index()
-        
-        # Prepare base dictionaries for efficiency
-        base_dict = {
-            'model': model_id,
-            'date': target_data_full.index,
-            'value': target_data_full.values,
-            'value_type': 'Actual'
-        }
-        
-        # Add actual values
-        data_list.append(pd.DataFrame(base_dict))
-        
-        # Add in-sample predictions
+        blocks: List[pd.DataFrame] = []
+ 
+        # Target - Actual
+        target_data_full = pd.concat([self.model.y_in, self.model.y_out]).sort_index()
+        blocks.append(self._build_ts_block(target_data_full.index, model_id, SERIES_TYPE_TARGET, 'Actual', target_data_full.values))
+ 
+        # Target - In-Sample / Out-of-Sample
         predicted_in = self.model.y_fitted_in
-        data_list.append(pd.DataFrame({
-            'date': predicted_in.index,
-            'model': model_id,
-            'value_type': 'In-Sample',
-            'value': predicted_in.values
-        }))
-        
-        # Process features (in-sample) efficiently
-        feature_data_in = self.model.X_in
-        for col in feature_data_in.columns:
-            data_list.append(pd.DataFrame({
-                'date': feature_data_in.index,
-                'model': model_id,
-                'value_type': col,
-                'value': feature_data_in[col].values
-            }))
-        
-        # Process out-of-sample data if available
+        blocks.append(self._build_ts_block(predicted_in.index, model_id, SERIES_TYPE_TARGET, 'In-Sample', predicted_in.values))
+ 
         if not self.model.X_out.empty:
             predicted_out = self.model.y_pred_out
+            blocks.append(self._build_ts_block(predicted_out.index, model_id, SERIES_TYPE_TARGET, 'Out-of-Sample', predicted_out.values))
+ 
+        # Features (Independent Variables) — vectorized for efficiency
+        feature_data_in = self.model.X_in
+        if not feature_data_in.empty:
+            stacked_in = feature_data_in.stack().reset_index()
+            stacked_in.columns = ['date', 'value_type', 'value']
+            stacked_in['model'] = model_id
+            stacked_in['series_type'] = SERIES_TYPE_IV
+            # Reorder columns to schema
+            stacked_in = stacked_in[['date', 'model', 'series_type', 'value_type', 'value']]
+            blocks.append(stacked_in)
+ 
+        if not self.model.X_out.empty:
             feature_data_out = self.model.X_out
-            
-            # Add out-of-sample predictions
-            data_list.append(pd.DataFrame({
-                'date': predicted_out.index,
-                'model': model_id,
-                'value_type': 'Out-of-Sample',
-                'value': predicted_out.values
-            }))
-            
-            # Process out-of-sample features
-            for col in feature_data_out.columns:
-                data_list.append(pd.DataFrame({
-                    'date': feature_data_out.index,
-                    'model': model_id,
-                    'value_type': col,
-                    'value': feature_data_out[col].values
-                }))
-        
-        # Add residuals
-        data_list.append(pd.DataFrame({
-            'date': self.model.resid.index,
-            'model': model_id,
-            'value_type': 'Residual',
-            'value': self.model.resid.values
-        }))
-        
-        # Combine all data efficiently
-        return pd.concat(data_list, ignore_index=True, copy=False)
+            stacked_out = feature_data_out.stack().reset_index()
+            stacked_out.columns = ['date', 'value_type', 'value']
+            stacked_out['model'] = model_id
+            stacked_out['series_type'] = SERIES_TYPE_IV
+            stacked_out = stacked_out[['date', 'model', 'series_type', 'value_type', 'value']]
+            blocks.append(stacked_out)
+ 
+        # Residuals
+        blocks.append(self._build_ts_block(self.model.resid.index, model_id, SERIES_TYPE_RESIDUAL, 'Residual', self.model.resid.values))
+ 
+        # Base variable series if available
+        y_base_full = getattr(self.model, 'y_base_full', None)
+        if y_base_full is not None and not y_base_full.empty:
+            blocks.append(self._build_ts_block(y_base_full.index, model_id, SERIES_TYPE_BASE, 'Actual', y_base_full.values))
+        y_base_fitted_in = getattr(self.model, 'y_base_fitted_in', None)
+        if y_base_fitted_in is not None and not y_base_fitted_in.empty:
+            blocks.append(self._build_ts_block(y_base_fitted_in.index, model_id, SERIES_TYPE_BASE, 'In-Sample', y_base_fitted_in.values))
+        y_base_pred_out = getattr(self.model, 'y_base_pred_out', None)
+        if y_base_pred_out is not None and not y_base_pred_out.empty:
+            blocks.append(self._build_ts_block(y_base_pred_out.index, model_id, SERIES_TYPE_BASE, 'Out-of-Sample', y_base_pred_out.values))
+
+        # Base residuals (computed if actuals exist)
+        if y_base_full is not None and not y_base_full.empty:
+            # In-sample residuals for Base: Actual - Fitted_IS
+            if y_base_fitted_in is not None and not y_base_fitted_in.empty:
+                aligned_actual_in = y_base_full.reindex(y_base_fitted_in.index)
+                base_resid_in = (aligned_actual_in - y_base_fitted_in).dropna()
+                if not base_resid_in.empty:
+                    blocks.append(self._build_ts_block(base_resid_in.index, model_id, SERIES_TYPE_BASE, 'Residual', base_resid_in.values))
+            # Out-of-sample residuals for Base: Actual - Pred_OOS (if overlapping actuals exist)
+            if y_base_pred_out is not None and not y_base_pred_out.empty:
+                aligned_actual_out = y_base_full.reindex(y_base_pred_out.index)
+                base_resid_out = (aligned_actual_out - y_base_pred_out).dropna()
+                if not base_resid_out.empty:
+                    blocks.append(self._build_ts_block(base_resid_out.index, model_id, SERIES_TYPE_BASE, 'Residual', base_resid_out.values))
+ 
+        return pd.concat(blocks, ignore_index=True, copy=False)
     
     def get_model_statistics(self) -> pd.DataFrame:
         """Return model statistics and metrics with optimized performance.
@@ -580,36 +600,68 @@ class OLSModelAdapter(ExportableModel):
         if hasattr(self.model, 'testset') and self.model.testset is not None:
             test_dict = {t.name: t for t in self.model.testset.tests}
             
-            # Process in-sample error measures
+            def append_error_measures(df_like: Any, sample_label: str):
+                if isinstance(df_like, pd.DataFrame):
+                    # Expect index='Metric' and a single 'Value' column
+                    value_col = 'Value' if 'Value' in df_like.columns else None
+                    if value_col is not None:
+                        for metric_name, row in df_like.iterrows():
+                            metric_value = row.get(value_col)
+                            if pd.notnull(metric_value):
+                                stats_list.append({
+                                    'category': 'Goodness of Fit',
+                                    'model': model_id,
+                                    'type': sample_label,
+                                    'value_type': str(metric_name),
+                                    'value': float(metric_value)
+                                })
+                elif isinstance(df_like, pd.Series):
+                    # Series keyed by metric name
+                    for metric_name, metric_value in df_like.items():
+                        if pd.notnull(metric_value):
+                            stats_list.append({
+                                'category': 'Goodness of Fit',
+                                'model': model_id,
+                                'type': sample_label,
+                                'value_type': str(metric_name),
+                                'value': float(metric_value)
+                            })
+                elif isinstance(df_like, dict):
+                    for metric_name, metric_value in df_like.items():
+                        if pd.notnull(metric_value):
+                            stats_list.append({
+                                'category': 'Goodness of Fit',
+                                'model': model_id,
+                                'type': sample_label,
+                                'value_type': str(metric_name),
+                                'value': float(metric_value)
+                            })
+            
+            # Prefer explicit IS/OOS error measure tests if available
             if 'IS Error Measures' in test_dict:
                 is_errors = test_dict['IS Error Measures'].test_result
-                stats_list.extend([
-                    {
-                        'category': 'Goodness of Fit',
-                        'model': model_id,
-                        'type': 'In-Sample',
-                        'value_type': metric,
-                        'value': value
-                    }
-                    for metric, value in is_errors.items()
-                    if value is not None
-                ])
-            
-            # Process out-of-sample error measures
-            if not self.model.X_out.empty and 'OOS Error Measures' in test_dict:
+                append_error_measures(is_errors, 'In-Sample')
+             
+            if not getattr(self.model, 'X_out', pd.DataFrame()).empty and 'OOS Error Measures' in test_dict:
                 oos_errors = test_dict['OOS Error Measures'].test_result
-                stats_list.extend([
-                    {
-                        'category': 'Goodness of Fit',
-                        'model': model_id,
-                        'type': 'Out-of-Sample',
-                        'value_type': metric,
-                        'value': value
-                    }
-                    for metric, value in oos_errors.items()
-                    if value is not None
-                ])
-            
+                append_error_measures(oos_errors, 'Out-of-Sample')
+             
+            # Fallback: scan all tests for error-measure-shaped tables if explicit names are absent
+            # This handles cases where aliases differ but structure matches
+            if 'IS Error Measures' not in test_dict or ('OOS Error Measures' not in test_dict and not getattr(self.model, 'X_out', pd.DataFrame()).empty):
+                for test in self.model.testset.tests:
+                    name_lower = str(test.name).lower()
+                    try:
+                        tr = test.test_result
+                    except Exception:
+                        continue
+                    if isinstance(tr, pd.DataFrame) and 'Value' in tr.columns and tr.index.name == 'Metric':
+                        # Heuristic: treat as error measures table
+                        sample_label = 'In-Sample'
+                        if 'oos' in name_lower or 'out' in name_lower:
+                            sample_label = 'Out-of-Sample'
+                        append_error_measures(tr, sample_label)
+             
             # Process group F-test results if available
             if 'GroupTest' in test_dict:
                 group_test = test_dict['GroupTest']
@@ -694,8 +746,10 @@ class OLSModelAdapter(ExportableModel):
         - value_type: string ['Target'/'Base']
         - value: numerical
         
-        The method processes both target and base variable forecasts if available,
-        includes scen_p0 baseline data, and includes both monthly and quarterly results.
+        The method processes both target and base variable forecasts if available:
+        - Target variable: Monthly frequency only (quarterly target forecasts deprecated)
+        - Base variable: Both monthly and quarterly frequencies
+        - Includes scen_p0 baseline data for both target and base variables
         """
         if self.model.scen_manager is None:
             return None
@@ -738,31 +792,7 @@ class OLSModelAdapter(ExportableModel):
                     }
                     data_list.append(pd.DataFrame(df_data))
         
-        # Process target variable quarterly forecasts
-        if hasattr(self.model.scen_manager, 'forecast_y_qtr_df'):
-            qtr_forecasts = self.model.scen_manager.forecast_y_qtr_df
-            for scen_set, qtr_df in qtr_forecasts.items():
-                if qtr_df is not None and not qtr_df.empty:
-                    # Get scenarios for this scenario set
-                    scen_scenarios = scen_results.get(scen_set, {})
-                    for scen_name in scen_scenarios.keys():
-                        # Check if this scenario has quarterly data
-                        if scen_name in qtr_df.columns or f"{scen_set}_{scen_name}" in qtr_df.columns:
-                            col_name = scen_name if scen_name in qtr_df.columns else f"{scen_set}_{scen_name}"
-                            qtr_forecast = qtr_df[col_name].dropna()
-                            
-                            if not qtr_forecast.empty:
-                                # Create quarterly target data
-                                df_data = {
-                                    'model': model_id,
-                                    'scenario_name': scen_set,
-                                    'severity': scen_name,
-                                    'date': qtr_forecast.index,
-                                    'value_type': 'Target',
-                                    'value': qtr_forecast.values,
-                                    'frequency': 'quarterly'
-                                }
-                                data_list.append(pd.DataFrame(df_data))
+        # Target variable quarterly forecasts are no longer available (forecast_y_qtr_df deprecated)
         
         # Process base variable forecasts (monthly) if available
         if hasattr(self.model.scen_manager, 'y_base_scens'):
@@ -837,680 +867,163 @@ class OLSModelAdapter(ExportableModel):
         return result[['model', 'scenario_name', 'severity', 'date', 'frequency', 'value_type', 'value']]
 
     def get_test_results(self) -> Optional[pd.DataFrame]:
-        """Return test results in standardized three-layer format for specific test categories.
-        
-        This function follows the exact same test retrieval pattern as ModelReportBase.show_test_tbl()
-        in the report module, but converts only the required test results to a structured three-layer format
-        suitable for export and analysis.
-        
-        INCLUDED TEST CATEGORIES:
-        
-        Assumption Testing:
-        - Stationarity (ADF, KPSS, etc.)
-        - Normality (Jarque-Bera, Shapiro-Wilk, etc.)
-        - Autocorrelation (Durbin-Watson, Ljung-Box, etc.)
-        - Heteroscedasticity (White, Breusch-Pagan, etc.)
-        - Multicollinearity (VIF, etc.)
-        
-        Model Estimation:
-        - Coefficient Significance (t-tests, p-values)
-        - Coefficient Sign Check (expected vs actual signs)
-        - Group Driver F-test (joint significance of variable groups)
-        
-        EXCLUDED TEST CATEGORIES:
-        - Error Measures (RMSE, MAE, MAPE, etc.)
-        - Goodness-of-Fit (R², Adj R², AIC, BIC, etc.)
-        - Performance Metrics (other fit measures)
-        
-        CLEAN NAMING APPROACH:
-        - test_name: Clean category names without test-statistic suffixes
-          Examples: 'Stationarity', 'Normality', 'Multicollinearity'
-        - test_target: Clean target names without test-statistic suffixes  
-          Examples: 'Residual', 'GDP', 'UNRATE'
-        - test_statistics: Specific statistic with test type
-          Examples: 'P-value_ADF', 'Statistic_JB', 'VIF Observed'
+        """Return test results in long format.
         
         Returns a DataFrame with columns:
         - model: string, model_id
-        - test_name: string (e.g., 'Normality', 'Stationarity', 'Coefficient Significance')
-        - test_target: string (e.g., 'Residual', variable name, target variable name)
-        - test_statistic: string (e.g., 'Statistic_JB', 'P-value_ADF', 'VIF Observed')
-        - test_statistic_value: numerical
-        - pass: boolean (True/False indicating if the test passed)
+        - test: string (e.g., 'Residual Autocorrelation', 'Coefficient Significance')
+        - index: string (variable name or specific test name like 'Durbin-Watson')
+        - metric: string ('Statistic', 'P-value', 'Threshold', 'Passed', etc.)
+        - value: numerical
         
-        Each test provides three layers of information:
-        1. Expected/criteria/threshold value
-        2. Observed/estimated value  
-        3. Pass/fail indicator (1/0)
+        Excludes error measures (RMSE, MAE) and fit measures (R², etc.) from export.
         
-        Following report module pattern from ModelReportBase.show_test_tbl():
-        ```python
-        results = self.model.testset.all_test_results
-        for test_name, result in results.items():
-            # Process only required test categories...
-        ```
+        Example output:
+        - model='cm1', test='Residual Autocorrelation', index='Durbin-Watson', metric='Statistic', value=2.01
+        - model='cm1', test='Residual Autocorrelation', index='Durbin-Watson', metric='Threshold', value=1.5
+        - model='cm1', test='Residual Autocorrelation', index='Durbin-Watson', metric='Passed', value=1
         """
-  
-        # === EXACT REPORT MODULE PATTERN ===
-        # Follow ModelReportBase.show_test_tbl() pattern exactly:
-        # results = self.model.testset.all_test_results
-        # for test_name, result in results.items():
         try:
-            # Gather all test results (both active and inactive) - same as report module
+            # Follow the exact same pattern as ModelReportBase.show_test_tbl()
             results = self.model.testset.all_test_results
-        except Exception as e:
+        except Exception:
             return None
-        
-        # Check if test results have data
+            
         if not results or len(results) == 0:
             return None
-        
+            
         model_id = self._model_id
-        results_list = []
+        all_results = []
         
-        # Process each test result following the same iteration pattern as report module
-        # for test_name, result in results.items():
-        for test_name, result in results.items():
-            initial_count = len(results_list)
-            
-            # Convert raw test results to three-layer structure based on test type
-            # Note: report module just prints result.to_string(), we convert to structured data
-            
-            # === ASSUMPTION TESTING ===
-            
-            # Handle Normality Tests (Jarque-Bera, Shapiro-Wilk, etc.)
-            if 'Normality' in test_name or 'JB' in test_name or 'Jarque' in test_name:
-                self._process_assumption_test(results_list, model_id, result, 'Normality', 'Residual', 'JB')
-            
-            # Handle Stationarity Tests (ADF, KPSS, etc.)
-            elif 'Stationarity' in test_name or 'ADF' in test_name or 'KPSS' in test_name:
-                self._process_assumption_test(results_list, model_id, result, 'Stationarity', 'Residual', 'ADF')
-            
-            # Handle Autocorrelation Tests (Durbin-Watson, Ljung-Box, etc.)
-            elif 'Autocorrelation' in test_name or 'DW' in test_name or 'Durbin' in test_name:
-                self._process_autocorrelation_test(results_list, model_id, result)
-            
-            # Handle Heteroscedasticity Tests (White, Breusch-Pagan, etc.)
-            elif 'Heteroscedasticity' in test_name or 'White' in test_name or 'Breusch' in test_name:
-                self._process_assumption_test(results_list, model_id, result, 'Heteroscedasticity', 'Residual', 'White')
-            
-            # Handle Multicollinearity Tests (VIF, etc.)
-            elif 'Multicollinearity' in test_name or 'VIF' in test_name or 'Collinearity' in test_name:
-                self._process_multicollinearity_test(results_list, model_id, result)
-            
-            # === MODEL ESTIMATION ===
-            
-            # Handle Coefficient Significance Tests (process before Sign Check to avoid conflicts)
-            elif 'Significance' in test_name or 'significance' in test_name:
-                self._process_coefficient_significance_test(results_list, model_id, result)
-            
-            # Handle Sign Check Tests
-            elif 'Sign' in test_name or 'sign' in test_name:
-                self._process_sign_check_test(results_list, model_id, result)
-            
-            # Handle Group Driver F-tests (Group Test, F-test, etc.)
-            elif 'Group' in test_name or 'F-test' in test_name or 'Joint' in test_name:
-                self._process_group_f_test(results_list, model_id, result)
-            
-            # === EXCLUDED TESTS (documented for clarity) ===
-            # Skip Error Measures (RMSE, MAE, etc.) - not included in test results export
-            # Skip Goodness-of-Fit measures (R², Adj R², etc.) - not included in test results export
-            # Skip other performance metrics - not included in test results export
-            else:
+        # Process each test result
+        for test_name, result_df in results.items():
+            # Skip measure category tests (FitMeasure, ErrorMeasure)
+            if any(keyword in test_name for keyword in ['Error Measures', 'Fit Measures']):
                 continue
+                
+            # Map test names to descriptive names
+            descriptive_test_name = self._map_test_name(test_name)
+            
+            # Transform the test result DataFrame to long format
+            transformed_results = self._transform_test_to_long_format(
+                result_df, model_id, descriptive_test_name
+            )
+            all_results.extend(transformed_results)
         
-        if not results_list:
+        if not all_results:
             return None
             
-        return pd.DataFrame(results_list)
-
-    def _process_assumption_test(self, results_list: list, model_id: str, result: pd.DataFrame, 
-                                test_name: str, test_target: str, test_type: str):
-        """Process assumption tests (Normality, Stationarity, Heteroscedasticity) with three-layer structure."""
-        if not isinstance(result, pd.DataFrame):
-            return
+        return pd.DataFrame(all_results)
+    
+    def _map_test_name(self, test_name: str) -> str:
+        """Map internal test names to descriptive names."""
+        test_name_lower = test_name.lower()
         
-        if result.empty:
-            return
+        # Residual-based tests
+        if 'autocorr' in test_name_lower or 'durbin' in test_name_lower:
+            return 'Residual Autocorrelation'
+        elif 'heteroscedasticity' in test_name_lower or 'het' in test_name_lower:
+            return 'Residual Heteroscedasticity'
+        elif 'normality' in test_name_lower or 'jarque' in test_name_lower:
+            return 'Residual Normality'
         
-        added_count = 0
+        # Stationarity tests - determine context
+        elif 'stationarity' in test_name_lower:
+            if 'resid' in test_name_lower:
+                return 'Residual Stationarity'
+            elif any(keyword in test_name_lower for keyword in ['x', 'independent', 'input']):
+                return 'Independent Variable Stationarity'
+            elif any(keyword in test_name_lower for keyword in ['y', 'dependent', 'target']):
+                return 'Dependent Variable Stationarity'
+            else:
+                return 'Stationarity Test'
         
-        # Process each row in the DataFrame (each test within the test class)
-        for test_idx in result.index:
-            test_row = result.loc[test_idx]
+        # Model estimation tests
+        elif 'significance' in test_name_lower or 'coef' in test_name_lower:
+            return 'Coefficient Significance'
+        elif 'sign' in test_name_lower:
+            return 'Coefficient Sign Check'
+        elif 'group' in test_name_lower or 'f-test' in test_name_lower:
+            return 'Group Driver F-test'
+        
+        # Multicollinearity
+        elif 'vif' in test_name_lower or 'collinearity' in test_name_lower:
+            return 'Multicollinearity'
+        
+        # Cointegration
+        elif 'coint' in test_name_lower:
+            return 'Cointegration'
+        
+        # Default fallback
+        else:
+            return test_name
+    
+    def _transform_test_to_long_format(
+        self, 
+        test_df: pd.DataFrame, 
+        model_id: str, 
+        test_name: str
+    ) -> List[Dict[str, Any]]:
+        """Transform test result DataFrame to long format."""
+        if not isinstance(test_df, pd.DataFrame) or test_df.empty:
+            return []
             
-            # Extract statistic value (multiple possible column names)
-            statistic_value = None
-            for col in ['Statistic', 'F-statistic', 'Test-statistic']:
-                if col in test_row and pd.notnull(test_row[col]):
-                    statistic_value = float(test_row[col])
-                    break
-            
-            # Extract p-value
-            pvalue_value = None
-            for col in ['P-value', 'p-value', 'pvalue']:
-                if col in test_row and pd.notnull(test_row[col]):
-                    pvalue_value = float(test_row[col])
-                    break
-            
-            # Extract pass status
-            pass_value = None
-            if 'Passed' in test_row and pd.notnull(test_row['Passed']):
-                pass_value = float(1.0 if test_row['Passed'] else 0.0)
-            
-            # Create clean test target name (no test-statistic names)
-            # Use clean target name without test index
-            clean_test_target = test_target
-            
-            # Add test statistic and p-value with pass status
-            test_passed = None
-            if pass_value is not None:
-                test_passed = bool(pass_value)
-                
-            if statistic_value is not None:
-                results_list.append({
-                    'model': model_id,
-                    'test_name': test_name,
-                    'test_target': clean_test_target,
-                    'test_statistic': f'Statistic_{test_type}',
-                    'test_statistic_value': statistic_value,
-                    'pass': test_passed
-                })
-                added_count += 1
-            
-            if pvalue_value is not None:
-                results_list.append({
-                    'model': model_id,
-                    'test_name': test_name,
-                    'test_target': clean_test_target,
-                    'test_statistic': f'P-value_{test_type}',
-                    'test_statistic_value': pvalue_value,
-                    'pass': test_passed
-                })
-                added_count += 1
-
-    def _process_autocorrelation_test(self, results_list: list, model_id: str, result):
-        """Process autocorrelation tests with three-layer structure."""
-        if isinstance(result, pd.DataFrame):
-            if result.empty:
-                return
-            
-            # Process each row in the autocorrelation test DataFrame
-            for test_idx in result.index:
-                test_row = result.loc[test_idx]
-                
-                # Extract DW statistic or general statistic
-                dw_value = None
-                if 'Statistic' in test_row and pd.notnull(test_row['Statistic']):
-                    dw_value = float(test_row['Statistic'])
-                
-                # Extract pass status
-                pass_value = None
-                if 'Passed' in test_row and pd.notnull(test_row['Passed']):
-                    pass_value = float(1.0 if test_row['Passed'] else 0.0)
-                
-                # Extract threshold information if available
-                threshold_info = None
-                if 'Threshold' in test_row and pd.notnull(test_row['Threshold']):
-                    threshold_info = test_row['Threshold']
-                
-                # Use clean test name without test-statistic names
-                clean_test_name = 'Autocorrelation'
-                clean_test_target = 'Residual'
-                
-                # Determine test pass status
-                test_passed = None
-                if pass_value is not None:
-                    test_passed = bool(pass_value)
-                
-                # Handle Durbin-Watson test specifically
-                if 'Durbin' in test_idx or 'DW' in test_idx or isinstance(threshold_info, (tuple, list)):
-                    # Add threshold information with separate upper and lower limits
-                    if isinstance(threshold_info, (tuple, list)) and len(threshold_info) >= 2:
-                        lower_limit, upper_limit = threshold_info[0], threshold_info[1]
-                    else:
-                        # Standard DW acceptable range
-                        lower_limit, upper_limit = 1.5, 2.5
-                    
-                    results_list.extend([
+        results = []
+        
+        for index_name, row in test_df.iterrows():
+            for column_name, value in row.items():
+                # Handle special cases for thresholds (tuples)
+                if isinstance(value, (tuple, list)) and len(value) == 2:
+                    # Split threshold tuples into separate entries
+                    lower_val, upper_val = value
+                    results.extend([
                         {
                             'model': model_id,
-                            'test_name': clean_test_name,
-                            'test_target': clean_test_target,
-                            'test_statistic': 'Threshold Lower Limit',
-                            'test_statistic_value': float(lower_limit),
-                            'pass': test_passed
+                            'test': test_name,
+                            'index': str(index_name),
+                            'metric': f'{column_name}_Lower',
+                            'value': float(lower_val) if pd.notnull(lower_val) else None
                         },
                         {
                             'model': model_id,
-                            'test_name': clean_test_name,
-                            'test_target': clean_test_target,
-                            'test_statistic': 'Threshold Upper Limit',
-                            'test_statistic_value': float(upper_limit),
-                            'pass': test_passed
+                            'test': test_name,
+                            'index': str(index_name),
+                            'metric': f'{column_name}_Upper', 
+                            'value': float(upper_val) if pd.notnull(upper_val) else None
                         }
                     ])
-                    
-                    if dw_value is not None:
-                        results_list.append({
-                            'model': model_id,
-                            'test_name': clean_test_name,
-                            'test_target': clean_test_target,
-                            'test_statistic': 'Durbin-Watson Observed',
-                            'test_statistic_value': dw_value,
-                            'pass': test_passed
-                        })
                 else:
-                    # For other autocorrelation tests, just add the statistic
-                    if dw_value is not None:
-                        results_list.append({
-                            'model': model_id,
-                            'test_name': clean_test_name,
-                            'test_target': clean_test_target,
-                            'test_statistic': 'Statistic Observed',
-                            'test_statistic_value': dw_value,
-                            'pass': test_passed
-                        })
-        
-        elif isinstance(result, (int, float)):
-            # Handle direct DW statistic value (legacy support)
-            # Determine pass status based on DW statistic
-            dw_stat = float(result)
-            dw_passed = 1.5 <= dw_stat <= 2.5  # Standard DW acceptable range
-            
-            results_list.extend([
-                {
-                    'model': model_id,
-                    'test_name': 'Autocorrelation',
-                    'test_target': 'Residual',
-                    'test_statistic': 'Threshold Lower Limit',
-                    'test_statistic_value': 1.5,
-                    'pass': dw_passed
-                },
-                {
-                    'model': model_id,
-                    'test_name': 'Autocorrelation',
-                    'test_target': 'Residual',
-                    'test_statistic': 'Threshold Upper Limit',
-                    'test_statistic_value': 2.5,
-                    'pass': dw_passed
-                },
-                {
-                    'model': model_id,
-                    'test_name': 'Autocorrelation',
-                    'test_target': 'Residual',
-                    'test_statistic': 'Durbin-Watson Observed',
-                    'test_statistic_value': dw_stat,
-                    'pass': dw_passed
-                }
-            ])
-
-    def _process_sign_check_test(self, results_list: list, model_id: str, result):
-        """Process sign check tests with three-layer structure."""
-        if not isinstance(result, pd.DataFrame):
-            return
-        
-        if result.empty:
-            return
-        
-        # Process each row in the sign check DataFrame (each variable)
-        for var_name in result.index:
-            test_row = result.loc[var_name]
-            
-            # Extract expected sign
-            expected_sign_value = None
-            if 'Expected' in test_row and pd.notnull(test_row['Expected']):
-                expected_str = str(test_row['Expected'])
-                if expected_str == '+' or 'positive' in expected_str.lower():
-                    expected_sign_value = 1.0
-                elif expected_str == '-' or 'negative' in expected_str.lower():
-                    expected_sign_value = -1.0
-                else:
-                    expected_sign_value = 0.0
-            
-            # Extract coefficient value
-            coefficient_value = None
-            if 'Coefficient' in test_row and pd.notnull(test_row['Coefficient']):
-                coefficient_value = float(test_row['Coefficient'])
-            
-            # Extract pass status
-            pass_value = None
-            if 'Passed' in test_row and pd.notnull(test_row['Passed']):
-                pass_value = float(1.0 if test_row['Passed'] else 0.0)
-            
-            # Determine test pass status
-            test_passed = None
-            if pass_value is not None:
-                test_passed = bool(pass_value)
-            
-            # Add expected sign and coefficient information with pass status
-            if expected_sign_value is not None:
-                sign_str = 'positive' if expected_sign_value > 0 else 'negative' if expected_sign_value < 0 else 'zero'
-                results_list.append({
-                    'model': model_id,
-                    'test_name': 'Coefficient Sign Check',
-                    'test_target': var_name,
-                    'test_statistic': f'Expected Sign ({sign_str})',
-                    'test_statistic_value': expected_sign_value,
-                    'pass': test_passed
-                })
-            
-            if coefficient_value is not None:
-                results_list.append({
-                    'model': model_id,
-                    'test_name': 'Coefficient Sign Check',
-                    'test_target': var_name,
-                    'test_statistic': 'Coefficient Estimated',
-                    'test_statistic_value': coefficient_value,
-                    'pass': test_passed
-                })
-
-    def _process_coefficient_significance_test(self, results_list: list, model_id: str, result):
-        """Process coefficient significance tests with three-layer structure."""
-        if not isinstance(result, pd.DataFrame):
-            return
-        
-        if result.empty:
-            return
-        
-        # Process each row in the coefficient significance DataFrame (each variable)
-        for var_name in result.index:
-            test_row = result.loc[var_name]
-            
-            # Standard significance threshold
-            threshold_value = 0.05
-            
-            # Extract p-value
-            pvalue_value = None
-            for col in ['P-value', 'p-value', 'pvalue']:
-                if col in test_row and pd.notnull(test_row[col]):
-                    pvalue_value = float(test_row[col])
-                    break
-            
-            # Extract t-statistic if available
-            tstat_value = None
-            for col in ['T-statistic', 't-statistic', 'tstat', 'Statistic']:
-                if col in test_row and pd.notnull(test_row[col]):
-                    tstat_value = float(test_row[col])
-                    break
-            
-            # Extract pass status
-            pass_value = None
-            if 'Passed' in test_row and pd.notnull(test_row['Passed']):
-                pass_value = float(1.0 if test_row['Passed'] else 0.0)
-            
-            # Determine test pass status
-            test_passed = None
-            if pass_value is not None:
-                test_passed = bool(pass_value)
-            
-            # Add threshold, p-value, and t-statistic information with pass status
-            results_list.append({
-                'model': model_id,
-                'test_name': 'Coefficient Significance',
-                'test_target': var_name,
-                'test_statistic': 'Significance Threshold',
-                'test_statistic_value': threshold_value,
-                'pass': test_passed
-            })
-            
-            if pvalue_value is not None:
-                results_list.append({
-                    'model': model_id,
-                    'test_name': 'Coefficient Significance',
-                    'test_target': var_name,
-                    'test_statistic': 'P-value Observed',
-                    'test_statistic_value': pvalue_value,
-                    'pass': test_passed
-                })
-            
-            if tstat_value is not None:
-                results_list.append({
-                    'model': model_id,
-                    'test_name': 'Coefficient Significance',
-                    'test_target': var_name,
-                    'test_statistic': 'T-statistic Observed',
-                    'test_statistic_value': tstat_value,
-                    'pass': test_passed
-                })
-
-    def _process_error_measures_test(self, results_list: list, model_id: str, result, test_name: str):
-        """Process error measures with single layer (no threshold/pass concept)."""
-        if isinstance(result, pd.DataFrame):
-            if result.empty:
-                print(f"⚠️  {test_name}: Empty DataFrame")
-                return
-            
-            sample_type = 'In-Sample' if 'IS' in test_name else 'Out-of-Sample' if 'OOS' in test_name else 'Unknown'
-            
-            # Process each row/column in the error measures DataFrame
-            for metric_idx in result.index:
-                for col in result.columns:
-                    value = result.loc[metric_idx, col]
-                    if pd.notnull(value):
-                        metric_name = f"{metric_idx}_{col}" if metric_idx != col else str(metric_idx)
-                        results_list.append({
-                            'model': model_id,
-                            'test_name': 'Error Measures',
-                            'test_target': f'{sample_type} Prediction',
-                            'test_statistic': f'{metric_name} Observed',
-                            'test_statistic_value': float(value),
-                            'pass': None  # Error measures don't have pass/fail concept
-                        })
-        
-        elif isinstance(result, dict):
-            # Legacy support for dictionary format
-            sample_type = 'In-Sample' if 'IS' in test_name else 'Out-of-Sample' if 'OOS' in test_name else 'Unknown'
-            
-            for metric_name, value in result.items():
-                if pd.notnull(value):
-                    results_list.append({
-                        'model': model_id,
-                        'test_name': 'Error Measures',
-                        'test_target': f'{sample_type} Prediction',
-                        'test_statistic': f'{metric_name} Observed',
-                        'test_statistic_value': float(value),
-                        'pass': None  # Error measures don't have pass/fail concept
-                    })
-        else:
-            print(f"⚠️  {test_name}: Expected DataFrame or dict, got {type(result).__name__}")
-
-    def _process_generic_test(self, results_list: list, model_id: str, result, test_name: str):
-        """Process generic tests with simplified structure."""
-        added_count = 0
-        
-        if isinstance(result, pd.DataFrame):
-            if result.empty:
-                print(f"⚠️  {test_name}: Empty DataFrame")
-                return 0
-            
-            # Process each row/column in the DataFrame
-            for row_idx in result.index:
-                for col_name in result.columns:
-                    value = result.loc[row_idx, col_name]
-                    
-                    # Initialize numeric_value to None
-                    numeric_value = None
-                    
-                    # Convert value to numeric
-                    if isinstance(value, bool):
-                        numeric_value = float(1.0 if value else 0.0)
-                    elif pd.notnull(value):
+                    # Special-case for sign check expected sign mapping to numeric 1/-1/0
+                    if test_name == 'Coefficient Sign Check' and column_name == 'Expected':
+                        expected_str = str(value).strip().lower()
+                        if expected_str in ['+', 'positive']:
+                            numeric_value = 1.0
+                        elif expected_str in ['-', 'negative']:
+                            numeric_value = -1.0
+                        else:
+                            numeric_value = 0.0
+                    # Convert other values to appropriate numeric format
+                    elif isinstance(value, bool):
+                        numeric_value = 1.0 if value else 0.0
+                    elif pd.isnull(value):
+                        numeric_value = None
+                    else:
                         try:
                             numeric_value = float(value)
                         except (ValueError, TypeError):
-                            continue  # Skip non-numeric values
+                            # Skip non-numeric values to ensure 'value' stays numeric
+                            numeric_value = None
                     
-                    # Only add to results if we have a valid numeric_value
                     if numeric_value is not None:
-                        # Create meaningful statistic name
-                        if str(row_idx) == str(col_name):
-                            stat_name = str(row_idx)
-                        else:
-                            stat_name = f"{row_idx}_{col_name}"
-                            
-                        results_list.append({
+                        results.append({
                             'model': model_id,
-                            'test_name': test_name,
-                            'test_target': str(row_idx) if row_idx != test_name else 'Unknown',
-                            'test_statistic': f'{stat_name} Observed',
-                            'test_statistic_value': numeric_value,
-                            'pass': None  # Generic tests don't have pass/fail concept
+                            'test': test_name,
+                            'index': str(index_name),
+                            'metric': column_name,
+                            'value': numeric_value
                         })
-                        added_count += 1
         
-        elif isinstance(result, dict):
-            # Legacy support for dictionary format
-            for stat_name, value in result.items():
-                # Initialize numeric_value to None at the start of each iteration
-                numeric_value = None
-                
-                # Convert boolean to 1/0
-                if isinstance(value, bool):
-                    numeric_value = float(1.0 if value else 0.0)
-                elif pd.notnull(value):
-                    try:
-                        numeric_value = float(value)
-                    except (ValueError, TypeError):
-                        continue  # Skip non-numeric values
-                
-                # Only add to results if we have a valid numeric_value
-                if numeric_value is not None:
-                    results_list.append({
-                        'model': model_id,
-                        'test_name': test_name,
-                        'test_target': 'Unknown',
-                        'test_statistic': f'{stat_name} Observed',
-                        'test_statistic_value': numeric_value,
-                        'pass': None  # Generic tests don't have pass/fail concept
-                    })
-                    added_count += 1
-        
-        elif isinstance(result, (int, float, bool)):
-            # Convert boolean to 1/0
-            if isinstance(result, bool):
-                numeric_value = float(1.0 if result else 0.0)
-            else:
-                numeric_value = float(result)
-            
-            results_list.append({
-                'model': model_id,
-                'test_name': test_name,
-                'test_target': 'Unknown',
-                'test_statistic': 'Value Observed',
-                'test_statistic_value': numeric_value,
-                'pass': None  # Generic tests don't have pass/fail concept
-            })
-            added_count += 1
-        
-        else:
-            print(f"⚠️  Unhandled data type for {test_name}: {type(result)} = {result}")
-        
-        # Debug: Report if no data was added
-        if added_count == 0:
-            print(f"⚠️  No data extracted from generic test {test_name} for {model_id}")
-            if isinstance(result, pd.DataFrame):
-                print(f"   DataFrame shape: {result.shape}, columns: {list(result.columns)}")
-            else:
-                print(f"   Data type: {type(result)}, content: {result}")
-            
-        return added_count
-
-    def _process_multicollinearity_test(self, results_list: list, model_id: str, result):
-        """Process multicollinearity tests with VIF threshold filtering (default: 10).
-        
-        VIF filtering criteria:
-        - VIF <= 10: Pass (no multicollinearity concern)
-        - VIF > 10: Fail (multicollinearity detected)
-        """
-        if not isinstance(result, pd.DataFrame):
-            return
-        
-        if result.empty:
-            return
-        
-        # Default VIF threshold for multicollinearity detection
-        VIF_THRESHOLD = 10.0
-        
-        # Process each row in the multicollinearity test DataFrame (each variable)
-        for var_name in result.index:
-            test_row = result.loc[var_name]
-            
-            # Extract VIF value
-            vif_value = None
-            if 'VIF' in test_row and pd.notnull(test_row['VIF']):
-                vif_value = float(test_row['VIF'])
-            
-            # Calculate pass status based on VIF threshold
-            test_passed = None
-            if vif_value is not None:
-                # VIF <= 10: Pass (no multicollinearity), VIF > 10: Fail (multicollinearity)
-                test_passed = vif_value <= VIF_THRESHOLD
-            else:
-                # If no VIF value, check if original test result has 'Passed' column
-                if 'Passed' in test_row and pd.notnull(test_row['Passed']):
-                    test_passed = bool(test_row['Passed'])
-            
-            # Add VIF threshold information
-            results_list.append({
-                'model': model_id,
-                'test_name': 'Multicollinearity',
-                'test_target': var_name,
-                'test_statistic': 'VIF Threshold',
-                'test_statistic_value': VIF_THRESHOLD,
-                'pass': test_passed
-            })
-            
-            # Add VIF observed value with pass status
-            if vif_value is not None:
-                results_list.append({
-                    'model': model_id,
-                    'test_name': 'Multicollinearity',
-                    'test_target': var_name,
-                    'test_statistic': 'VIF Observed',
-                    'test_statistic_value': vif_value,
-                    'pass': test_passed
-                })
-
-    def _process_group_f_test(self, results_list: list, model_id: str, result):
-        """Process group F-tests with three-layer structure."""
-        if not isinstance(result, pd.DataFrame):
-            return
-        
-        if result.empty:
-            return
-        
-        # Process each row in the group F-test DataFrame (each group)
-        for group_name in result.index:
-            test_row = result.loc[group_name]
-            
-            # Extract p-value
-            pvalue_value = None
-            for col in ['P-value', 'p-value', 'pvalue']:
-                if col in test_row and pd.notnull(test_row[col]):
-                    pvalue_value = float(test_row[col])
-                    break
-            
-            # Extract pass status
-            pass_value = None
-            if 'Passed' in test_row and pd.notnull(test_row['Passed']):
-                pass_value = float(1.0 if test_row['Passed'] else 0.0)
-            
-            # Determine test pass status
-            test_passed = None
-            if pass_value is not None:
-                test_passed = bool(pass_value)
-            
-            # Add p-value information with pass status
-            if pvalue_value is not None:
-                results_list.append({
-                    'model': model_id,
-                    'test_name': 'Group Driver F-test',
-                    'test_target': group_name,
-                    'test_statistic': 'P-value Observed',
-                    'test_statistic_value': pvalue_value,
-                    'pass': test_passed
-                })
+        return results
 
     def get_sensitivity_results(self) -> Optional[pd.DataFrame]:
         """Return sensitivity testing results in long format.
@@ -1887,3 +1400,13 @@ class OLSModelAdapter(ExportableModel):
         result = pd.concat(data_list, ignore_index=True)
         return result[['model', 'test', 'scenario_name', 'severity', 'variable/parameter', 
                       'shock', 'date', 'frequency', 'value_type', 'value']] 
+
+    # Helper to build a standardized time series DataFrame row block
+    def _build_ts_block(self, index, model_id: str, series_type: str, value_type: str, values) -> pd.DataFrame:
+        return pd.DataFrame({
+            'date': index,
+            'model': model_id,
+            'series_type': series_type,
+            'value_type': value_type,
+            'value': values
+        }) 
