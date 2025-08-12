@@ -848,7 +848,13 @@ class ScenManager:
             if qtr_method == 'mean':
                 result = quarterly_grouped.mean()
             elif qtr_method == 'sum':
-                result = quarterly_grouped.sum()
+                # Avoid rendering artificial zeros when a quarter has only NaNs
+                try:
+                    # pandas >= 1.1 supports min_count
+                    result = quarterly_grouped.sum(min_count=1)
+                except TypeError:
+                    # Fallback: explicit apply to ensure NaN if all values are NaN
+                    result = quarterly_grouped.apply(lambda s: s.sum() if s.notna().any() else np.nan)
             elif qtr_method == 'end':
                 # Use last value in quarter (quarter-end)
                 result = quarterly_grouped.last()
@@ -892,28 +898,37 @@ class ScenManager:
                 scen_quarterly = aggregate_to_quarterly(scen_series, self.qtr_method)
                 all_data[scen_name] = scen_quarterly
             
-            # Get all unique quarter-end dates
+            # Get all unique quarter-end dates (include IS/OOS so fitted appears on the plot)
             all_quarters = pd.Index([])
             for series in all_data.values():
                 all_quarters = all_quarters.union(series.index)
+            if not combined_quarterly.empty:
+                all_quarters = all_quarters.union(combined_quarterly.index)
+            if not y_base_full is None and not y_base_full.empty:
+                # Include actuals' quarterly index to keep alignment if needed
+                all_quarters = all_quarters.union(
+                    aggregate_to_quarterly(y_base_full, self.qtr_method).index
+                )
             all_quarters = all_quarters.sort_values()
             
             # Create quarterly DataFrame
             df = pd.DataFrame(index=all_quarters)
             
             # Add core series
+            df['Fitted_IS'] = np.nan
+            df['Pred_OOS'] = np.nan
             if not combined_quarterly.empty:
-                # Split combined into Fitted_IS and Pred_OOS by availability
-                df['Fitted_IS'] = combined_quarterly.reindex(all_quarters)
-                df['Pred_OOS'] = np.nan
-                if not pred_oos_quarterly.empty:
-                    df.loc[pred_oos_quarterly.index, 'Pred_OOS'] = pred_oos_quarterly
+                # Initialize Fitted_IS with fitted_quarterly where available
                 if not fitted_quarterly.empty:
-                    # Where Pred_OOS is present, clear Fitted_IS
-                    df.loc[df['Pred_OOS'].notna(), 'Fitted_IS'] = np.nan
+                    df.loc[fitted_quarterly.index, 'Fitted_IS'] = pd.to_numeric(fitted_quarterly, errors='coerce')
+                # Fill Pred_OOS with pred_oos_quarterly
+                if not pred_oos_quarterly.empty:
+                    df.loc[pred_oos_quarterly.index, 'Pred_OOS'] = pd.to_numeric(pred_oos_quarterly, errors='coerce')
+                # Where Pred_OOS is present, clear Fitted_IS to avoid overlap
+                df.loc[df['Pred_OOS'].notna(), 'Fitted_IS'] = np.nan
             # Add scenario series
             for col_name, series in all_data.items():
-                df[col_name] = series
+                df[col_name] = pd.to_numeric(series, errors='coerce')
             
             # Get P0 quarter-end date
             p0_quarter_end = get_quarter_end(self.P0)
@@ -923,7 +938,7 @@ class ScenManager:
             # Add Actual quarterly if available
             if y_base_full is not None and not y_base_full.empty:
                 actual_q = aggregate_to_quarterly(y_base_full, self.qtr_method).reindex(all_quarters)
-                df['Actual'] = actual_q
+                df['Actual'] = pd.to_numeric(actual_q, errors='coerce')
             
             results[scen_set] = df
             
@@ -937,7 +952,8 @@ class ScenManager:
         style: Optional[Dict[str, Dict[str, Any]]] = None,
         title_prefix: str = "",
         save_path: Optional[str] = None,
-        show_qtr: bool = False
+        show_qtr: bool = False,
+        show_actual: bool = False
     ) -> plt.Figure:
         """
         Plot forecasting results for a single scenario set.
@@ -970,6 +986,8 @@ class ScenManager:
             If True, use quarterly frequency data (forecast_y_qtr_df).
             If False, use original frequency data (forecast_y_df).
             Only used when forecast_data is None.
+        show_actual : bool, default=False
+            If True, draw the Actual line on plots; otherwise do not include Actual
             
         Returns
         -------
@@ -988,7 +1006,8 @@ class ScenManager:
             target_df = self.forecast_y_df[scen_set].copy()
             base_df = self.forecast_y_base_df.get(scen_set)
             base_qtr_df = None
-            if show_qtr and getattr(self.dm, 'freq', 'M') == 'M':
+            # Show quarterly base row whenever requested and available
+            if show_qtr:
                 base_qtr_df = self.forecast_y_base_qtr_df.get(scen_set)
         else:
             # Backward-compat: if provided, infer left/right
@@ -1027,25 +1046,25 @@ class ScenManager:
                 except Exception:
                     pass
             # Plot Actual
-            if 'Actual' in df.columns:
-                actual_series = df['Actual'].dropna()
+            if show_actual and 'Actual' in df.columns:
+                actual_series = pd.to_numeric(df['Actual'], errors='coerce').dropna()
                 if not actual_series.empty:
-                    ax.plot(actual_series.index, actual_series.values, color='red', linestyle='-', linewidth=2, alpha=0.6, label='Actual')
+                    ax.plot(actual_series.index, actual_series.values, color='red', linestyle='-', linewidth=2, alpha=0.3, label='Actual')
             # Plot Fitted_IS
             fitted_color = 'black'
             if 'Fitted_IS' in df.columns:
-                fitted_series = df['Fitted_IS'].dropna()
+                fitted_series = pd.to_numeric(df['Fitted_IS'], errors='coerce').dropna()
                 if not fitted_series.empty:
                     ax.plot(fitted_series.index, fitted_series.values, color=fitted_color, linestyle='-', linewidth=2, label='Fitted_IS')
             # Plot Pred_OOS (same color as Fitted_IS, dashed)
             if 'Pred_OOS' in df.columns:
-                pred_series = df['Pred_OOS'].dropna()
+                pred_series = pd.to_numeric(df['Pred_OOS'], errors='coerce').dropna()
                 if not pred_series.empty:
                     ax.plot(pred_series.index, pred_series.values, color=fitted_color, linestyle='--', linewidth=2, label='Pred_OOS')
             # Plot scenarios
             scenario_cols = [c for c in df.columns if c not in {'Period', 'Fitted_IS', 'Pred_OOS', 'Actual'}]
             for i, scenario in enumerate(sorted(scenario_cols)):
-                series = df[scenario].dropna()
+                series = pd.to_numeric(df[scenario], errors='coerce').dropna()
                 if series.empty:
                     continue
                 if style and scenario in style:
@@ -1058,9 +1077,10 @@ class ScenManager:
             # Axes formatting: YY-MM, auto monthly/quarterly/yearly density
             if isinstance(df.index, pd.DatetimeIndex):
                 n = len(df.index)
-                if n > 60:
+                # Slightly denser ticks for left plot to improve readability
+                if n > 90:
                     ax.xaxis.set_major_locator(YearLocator())
-                elif n > 18:
+                elif n > 24:
                     ax.xaxis.set_major_locator(MonthLocator(bymonth=[3, 6, 9, 12]))
                 else:
                     ax.xaxis.set_major_locator(MonthLocator(interval=1))
@@ -1077,8 +1097,14 @@ class ScenManager:
         if nrows == 2:
             plot_df(ax_qtr, base_qtr_df, f"{title_prefix}Base Variable (Quarterly)" if title_prefix else "Base Variable (Quarterly)")
         
-        # Set overall title for dual plots
-        overall_title = f"{title_prefix}Scenario Forecast - {scen_set}" if title_prefix else f"Scenario Forecast - {scen_set}"
+        # Set overall title for dual plots with variable names
+        target_name = getattr(self, 'target', getattr(self.model, 'target', 'Target'))
+        base_name = getattr(self.model, 'target_base', None)
+        if not base_name:
+            base_name = 'Base'
+        base_fragment = f" | Base Variable: {base_name}" if base_name else ""
+        title_core = f"Scenario Forecast - {scen_set} | Target Variable: {target_name}{base_fragment}"
+        overall_title = f"{title_prefix}{title_core}" if title_prefix else title_core
         fig.suptitle(overall_title, fontsize=12)
         
         # Adjust layout to prevent label cutoff
@@ -1249,10 +1275,10 @@ class ScenManager:
             ax.legend(fontsize=8)
             ax.grid(True, alpha=0.3)
             
-            # Format X-axis (simplified for subplots)
-            from matplotlib.dates import DateFormatter, YearLocator
-            ax.xaxis.set_major_locator(YearLocator())
-            ax.xaxis.set_major_formatter(DateFormatter('%Y'))
+            # Format X-axis: always show quarter-end ticks for scenario variables
+            from matplotlib.dates import DateFormatter, MonthLocator
+            ax.xaxis.set_major_locator(MonthLocator(bymonth=[3, 6, 9, 12]))
+            ax.xaxis.set_major_formatter(DateFormatter('%y-%m'))
             plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=8)
         
         # Hide unused subplots
@@ -1289,7 +1315,8 @@ class ScenManager:
         save_path: Optional[str] = None,
         subplot_width: float = 5.0,
         subplot_height: float = 3.5,
-        show_qtr: bool = True
+        show_qtr: bool = True,
+        show_actual: bool = False
     ) -> Dict[str, Dict[str, plt.Figure]]:
         """
         Plot both forecasts and scenario variables for all scenario sets.
@@ -1314,6 +1341,8 @@ class ScenManager:
         show_qtr : bool, default=True
             If True, use quarterly frequency data (forecast_y_qtr_df).
             If False, use original frequency data (forecast_y_df).
+        show_actual : bool, default=False
+            If True, draw the Actual line on plots; otherwise do not include Actual
             
         Returns
         -------
@@ -1330,8 +1359,8 @@ class ScenManager:
         # Get forecast DataFrames and scenario feature matrices
         # Target forecasts are always shown in original frequency (monthly if M, quarterly if Q)
         forecast_dfs = self.forecast_y_df
-        # Base forecasts can be shown as quarterly if show_qtr is True and freq is monthly
-        base_forecast_dfs = self.forecast_y_base_qtr_df if show_qtr else self.forecast_y_base_df
+        # Base forecasts for side-by-side when not showing quarterly row
+        base_forecast_dfs = self.forecast_y_base_df
         X_scens = self.X_scens
         
         # Store all figures for return
@@ -1340,14 +1369,17 @@ class ScenManager:
         for scen_set in forecast_dfs.keys():
             all_figures[scen_set] = {}
             
-            # Prepare forecast data - combine target and base if available
-            target_df = forecast_dfs[scen_set]
-            base_df = base_forecast_dfs.get(scen_set) if base_forecast_dfs else None
-            
-            if base_df is not None and not base_df.empty:
-                forecast_data = (target_df, base_df)
+            # Prepare forecast data
+            if show_qtr:
+                # Let plot_forecasts compute both monthly and quarterly views
+                forecast_data = None
             else:
-                forecast_data = target_df
+                target_df = forecast_dfs[scen_set]
+                base_df = base_forecast_dfs.get(scen_set) if base_forecast_dfs else None
+                if base_df is not None and not base_df.empty:
+                    forecast_data = (target_df, base_df)
+                else:
+                    forecast_data = target_df
             
             # Create forecast plot
             forecast_fig = self.plot_forecasts(
@@ -1357,7 +1389,8 @@ class ScenManager:
                 style=style,
                 title_prefix=title_prefix,
                 save_path=save_path,
-                show_qtr=show_qtr
+                show_qtr=show_qtr,
+                show_actual=show_actual
             )
             all_figures[scen_set]['forecasts'] = forecast_fig
             

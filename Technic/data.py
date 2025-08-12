@@ -96,17 +96,15 @@ class DataManager:
     >>> features = dm.build_features(specs)
 
     Applying Functions to Data:
-    >>> # Add a new column to internal data
-    >>> def add_gdp_growth(df):
-    ...     df['GDP_growth'] = df['GDP'].pct_change()
-    ...     return None  # In-place modification
-    >>> dm.apply_to_internal(add_gdp_growth)
+    >>> # Add a new column to internal data via apply_to_all()
+    >>> def add_gdp_growth(mev_df, int_df):
+    ...     return None, int_df['GDP'].pct_change().rename('GDP_growth')
+    >>> dm.apply_to_all(add_gdp_growth)
     >>> 
-    >>> # Add features to MEV data
-    >>> def add_mev_features(mev_df, internal_df):
-    ...     mev_df['GDP_to_UNRATE'] = mev_df['GDP'] / mev_df['UNRATE']
-    ...     return mev_df
-    >>> dm.apply_to_mevs(add_mev_features)
+    >>> # Add features to MEV data via apply_to_all()
+    >>> def add_mev_features(mev_df, int_df):
+    ...     return pd.DataFrame({'GDP_to_UNRATE': mev_df['GDP'] / mev_df['UNRATE']}), None
+    >>> dm.apply_to_all(add_mev_features)
 
     Working with Transforms:
     >>> # Generate transform specifications for variables
@@ -139,7 +137,7 @@ class DataManager:
     Notes
     -----
     - The DataManager maintains caches for all data to improve performance and isolation
-    - All data modifications through apply_* methods are made to cached data, not loaders
+    - All data modifications through apply_to_all() are made to cached data, not loaders
     - The class provides dynamic access to cached data, ensuring consistency
     - Sample splits are managed by the internal_loader and accessed through properties
     - Use refresh() to update cached data after loader modifications or to replace loaders
@@ -254,8 +252,8 @@ class DataManager:
         Returns
         -------
         pd.DataFrame
-            Cached internal data. Any modifications made through
-            apply_to_internal() will be reflected in this data.
+        Cached internal data. Any modifications made through
+        apply_to_all() will be reflected in this data.
 
         Example
         -------
@@ -1292,159 +1290,108 @@ class DataManager:
 
         return df
     
-    def apply_to_mevs(
+    def apply_to_mevs(self, *args, **kwargs):
+        raise AttributeError("apply_to_mevs() has been removed. Use apply_to_all(fn) instead.")
+
+    def apply_to_internal(self, *args, **kwargs):
+        raise AttributeError("apply_to_internal() has been removed. Use apply_to_all(fn) instead.")
+
+    def apply_to_all(
         self,
-        fn: Callable[
-            [pd.DataFrame, pd.DataFrame],
-            pd.DataFrame
-        ]
+        fn: Callable[[pd.DataFrame, pd.DataFrame], Union[
+            Tuple[Optional[pd.DataFrame], Optional[Union[pd.Series, pd.DataFrame]]],
+            pd.DataFrame,
+            None
+        ]]
     ) -> None:
         """
-        Apply a feature engineering function to all cached MEV tables (model and scenarios).
+        Apply a feature engineering function to both MEV and internal data (model and scenarios).
 
-        This method allows you to add derived features to all MEV tables at once.
-        The function is applied to both the model MEVs and all scenario MEVs.
-        Changes are made to the cached data in the DataManager, not the original loaders.
+        This method enables joint feature engineering where a single function has access to
+        both the MEV DataFrame and the internal DataFrame. The function can modify either or
+        both datasets and may operate in-place and/or return new data to merge back.
+
+        The updates are broadcast to all cached data in the DataManager (model and all
+        scenarios). Changes are applied to the cached data only; loaders remain unchanged.
 
         Parameters
         ----------
         fn : callable
-            Function that takes two arguments:
-            1. df_mev: DataFrame of MEV data to modify
-            2. internal_df: DataFrame of internal data for reference
-            Must return a DataFrame with new/modified columns.
+            Function that takes two arguments and may return updates for one or both:
+            - df_mev: DataFrame of MEV data to read/modify
+            - df_in: DataFrame of internal data to read/modify
+
+            Supported return values:
+            - (mev_ret, in_ret): tuple of two elements, where each element can be:
+              * None: if modifications for that dataset were done in-place
+              * Series: a single new/updated column to merge
+              * DataFrame: one or more new/updated columns to merge
+            - DataFrame: treated as MEV return only (internal assumed in-place/no return)
+            - None: if all modifications were done in-place
 
         Examples
         --------
-        >>> # Add GDP/UNRATE ratio to all MEV tables
-        >>> def add_gdp_ratio(mev_df, internal_df):
-        ...     mev_df['GDP_UNRATE_RATIO'] = mev_df['GDP'] / mev_df['UNRATE']
-        ...     return mev_df
-        >>> dm.apply_to_mevs(add_gdp_ratio)
+        >>> # Modify both MEV and internal using a single function
+        >>> def new_features(df_mev, df_in):
+        ...     df_mev['NGDP-Price'] = df_mev['NGDP'] - df_in['VR_price']
+        ...     df_mev['PDI-FixBal'] = df_mev['PDI'] - df_in['Fixed_balance']
+        ...     df_in['internal_var'] = df_in['VR_price'] - df_in['Fixed_balance']
+        ...     return df_mev, df_in
+        >>> dm.apply_to_all(new_features)
         >>> 
-        >>> # Add multiple features using internal data
-        >>> def add_features(mev_df, internal_df):
-        ...     # Relative to historical average
-        ...     hist_mean = internal_df['GDP'].mean()
-        ...     mev_df['GDP_REL'] = mev_df['GDP'] / hist_mean
-        ...     # Composite indicator
-        ...     mev_df['COMPOSITE'] = mev_df['GDP'] * mev_df['UNRATE']
-        ...     return mev_df
-        >>> dm.apply_to_mevs(add_features)
+        >>> # In-place internal changes and returned MEV features
+        >>> def add_mev_only(df_mev, df_in):
+        ...     df_in['g'] = df_in['VALUE'].pct_change()  # in-place
+        ...     return pd.DataFrame({'X': df_mev['GDP'] / 100})  # MEV only
+        >>> dm.apply_to_all(add_mev_only)
 
         Notes
         -----
-        - The function must return a DataFrame (modified or new)
-        - Changes are applied to cached MEV data in DataManager
-        - Original loaders remain unchanged
-        - The function has access to internal data for reference calculations
-        """
-        internal_df = self.internal_data
-
-        def _apply_mev(mev_df: pd.DataFrame):
-            result = fn(mev_df.copy(), internal_df)
-            if not isinstance(result, pd.DataFrame):
-                raise TypeError(f"apply_to_mevs: fn must return a DataFrame, got {type(result)}")
-            for col in result.columns:
-                mev_df[col] = result[col].reindex(mev_df.index)
-
-        # Apply to cached model MEV data
-        model_mev_df = self.model_mev  # This ensures cache is created
-        _apply_mev(model_mev_df)
-
-        # Apply to cached scenario MEV data
-        scen_mevs_dict = self.scen_mevs  # This ensures cache is created
-        for scen_set, scen_dict in scen_mevs_dict.items():
-            for scen_name, scen_df in scen_dict.items():
-                _apply_mev(scen_df)
-    
-    def apply_to_internal(
-        self,
-        fn: Callable[
-            [pd.DataFrame],
-            Optional[Union[pd.Series, pd.DataFrame]]
-        ]
-    ) -> None:
-        """
-        Apply a feature engineering function to all cached internal data (main and scenarios).
-
-        This method allows you to add derived features to both the main internal data
-        and all scenario internal data. Changes can be made either in-place or by 
-        returning new data to merge. Changes are made to the cached data in the 
-        DataManager, not the original loader.
-
-        Parameters
-        ----------
-        fn : callable
-            Function that takes one argument:
-            - internal_df: DataFrame of internal data to modify
-            Can return:
-            - None: If modifications were made in-place
-            - Series: Single new column to add
-            - DataFrame: Multiple new columns to add
-
-        Examples
-        --------
-        >>> # In-place modification applied to all internal data
-        >>> def add_growth_rate(df):
-        ...     df['GROWTH'] = df['VALUE'].pct_change()
-        ...     # No return needed for in-place changes
-        >>> dm.apply_to_internal(add_growth_rate)
-        >>> 
-        >>> # Return new features for all internal data
-        >>> def create_indicators(df):
-        ...     return pd.DataFrame({
-        ...         'HIGH_VALUE': df['VALUE'] > df['VALUE'].mean(),
-        ...         'LOW_VALUE': df['VALUE'] < df['VALUE'].mean()
-        ...     })
-        >>> dm.apply_to_internal(create_indicators)
-        >>> 
-        >>> # Return single feature as Series for all internal data
-        >>> def moving_average(df):
-        ...     return df['VALUE'].rolling(window=3).mean().rename('MA3')
-        >>> dm.apply_to_internal(moving_average)
-
-        Notes
-        -----
-        - The function is applied to both main internal data and all scenario internal data
-        - The function can modify data in-place and/or return new features
         - Returned Series must have a name
-        - All new columns are aligned to the respective DataFrame indices
-        - Changes are made to cached data in DataManager, not the original loader
-        - If no scenario data exists, a warning is issued but main data is still processed
+        - All new/updated columns are aligned to the respective DataFrame indices
+        - Changes apply to cached data in DataManager, not the original loaders
+        - If scenario internal data is missing, scenario MEV updates will use the main
+          internal data as context; internal scenario updates will be skipped with a warning
+
+        Raises
+        ------
+        TypeError
+            If the function's return types are invalid.
         """
-        def _apply_internal(internal_df: pd.DataFrame):
-            """Helper function to apply the user function to a single DataFrame."""
-            ret = fn(internal_df)
-            if ret is None:
-                return
-            if isinstance(ret, pd.Series):
-                internal_df[ret.name] = ret.reindex(internal_df.index)
-            elif isinstance(ret, pd.DataFrame):
-                for col in ret.columns:
-                    internal_df[col] = ret[col].reindex(internal_df.index)
-            else:
-                raise TypeError(
-                    f"apply_to_internal(): fn must return None, Series or DataFrame, got {type(ret)}"
-                )
+        # Ensure caches are created
+        model_mev_df = self.model_mev
+        main_internal_df = self.internal_data
 
-        # Apply to cached main internal data
-        main_internal_df = self.internal_data  # This ensures cache is created
-        _apply_internal(main_internal_df)
+        # Apply to model pair
+        ret = fn(model_mev_df.copy(), main_internal_df.copy())
+        if not (isinstance(ret, tuple) and len(ret) == 2 and isinstance(ret[0], pd.DataFrame) and isinstance(ret[1], pd.DataFrame)):
+            raise TypeError("apply_to_all(): fn must return a tuple of (mev_df, internal_df) DataFrames")
+        mev_ret, in_ret = ret
+        # Replace caches for model data
+        self._model_mev_cache = mev_ret.copy()
+        self._internal_data_cache = in_ret.copy()
 
-        # Apply to cached scenario internal data
-        scen_internal_dict = self.scen_internal_data  # This ensures cache is created
-        
-        if not scen_internal_dict:
-            warnings.warn(
-                "No scenario internal data found. Function only applied to main internal data. "
-                "Load scenario data using load_scens() if you want to apply the function to scenarios as well.",
-                UserWarning
-            )
-        else:
-            for scen_set, scen_dict in scen_internal_dict.items():
-                for scen_name, scen_df in scen_dict.items():
-                    _apply_internal(scen_df)
+        # Apply to scenario pairs
+        scen_mevs_dict = self.scen_mevs
+        scen_internal_dict = self.scen_internal_data
+        for scen_set, scen_mev_map in scen_mevs_dict.items():
+            for scen_name, scen_mev in scen_mev_map.items():
+                scen_internal = scen_internal_dict.get(scen_set, {}).get(scen_name)
+                if scen_internal is None:
+                    warnings.warn(
+                        f"apply_to_all(): No scenario internal data for {scen_set}/{scen_name}; skipping this scenario.",
+                        UserWarning
+                    )
+                    continue
+                scen_ret = fn(scen_mev.copy(), scen_internal.copy())
+                if not (isinstance(scen_ret, tuple) and len(scen_ret) == 2 and isinstance(scen_ret[0], pd.DataFrame) and isinstance(scen_ret[1], pd.DataFrame)):
+                    raise TypeError(
+                        f"apply_to_all(): fn must return (mev_df, internal_df) for scenarios as well; got {type(scen_ret)}"
+                    )
+                scen_mev_ret, scen_in_ret = scen_ret
+                # Replace caches for scenario data
+                self._scen_mevs_cache[scen_set][scen_name] = scen_mev_ret.copy()
+                self._scen_internal_data_cache[scen_set][scen_name] = scen_in_ret.copy()
 
     @property
     def var_map(self) -> Dict[str, Dict[str, str]]:

@@ -346,8 +346,8 @@ class ModelSearch:
         # Reload testset, applying update if provided
         mdl.load_testset(test_update_func=test_update_func)
 
-        # Run filtering on updated testset
-        passed, failed = mdl.testset.filter_pass()
+        # Run filtering on updated testset (fast mode to short-circuit on first failure)
+        passed, failed = mdl.testset.filter_pass(fast_filter=True)
         if passed:
             return cm
         return specs, failed, mdl.testset.filter_test_info
