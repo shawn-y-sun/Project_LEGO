@@ -1106,6 +1106,125 @@ class SignCheck(ModelTestBase):
 
 
 # ----------------------------------------------------------------------------
+# BaseGrowthTest class
+# ----------------------------------------------------------------------------
+
+class BaseGrowthTest(ModelTestBase):
+    """
+    Estimate a model's base growth rate implied by intercept and periodic dummies.
+
+    The base growth rate measures the model's growth when all non-periodic drivers
+    are held neutral (no change), allowing only periodical dummies to contribute.
+
+    Parameters
+    ----------
+    coeffs : pd.Series
+        Series of model coefficients indexed by variable names. Should include
+        'const' if an intercept is present, and any monthly or quarterly dummy
+        coefficients named like 'M:2', 'M:3', ... or 'Q:2', 'Q:3', ...
+        (column naming convention produced by `DumVar`).
+    freq : {'M','Q'}
+        Frequency of the target variable. 'M' for monthly, 'Q' for quarterly.
+    alias : str, optional
+        Display name for this test (defaults to class name).
+    filter_mode : {'strict','moderate'}, default 'moderate'
+        - 'strict': require base growth to be within ±0.10
+        - 'moderate': require base growth to be within ±0.15
+    filter_on : bool, default False
+        Whether this test participates in filtering (default off).
+
+    Example
+    -------
+    >>> coeffs = pd.Series({
+    ...     'const': 0.01,
+    ...     'M:2': 0.001,
+    ...     'M:3': -0.0005,
+    ...     'x1': 0.2
+    ... })
+    >>> test = BaseGrowthTest(coeffs=coeffs, freq='M')
+    >>> test.test_result  # doctest: +SKIP
+    
+    Notes
+    -----
+    Base growth calculation:
+    - If freq = 'M': base_growth = 12 * const + sum(M:"*")
+    - If freq = 'Q': base_growth = 4  * const + sum(Q:"*")
+    """
+    category = 'performance'
+
+    def __init__(
+        self,
+        coeffs: pd.Series,
+        freq: str,
+        alias: Optional[str] = None,
+        filter_mode: str = 'moderate',
+        filter_on: bool = False
+    ):
+        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        if not isinstance(coeffs, pd.Series):
+            raise TypeError("coeffs must be a pandas Series")
+        self.coeffs = coeffs
+        self.freq = (freq or '').upper()
+        if self.freq not in {'M', 'Q'}:
+            raise ValueError("freq must be 'M' or 'Q'")
+        self._thresholds = {'strict': 0.10, 'moderate': 0.15}
+
+    @property
+    def filter_mode_descs(self):
+        return {
+            'strict':   f"Base growth must be within ±{self._thresholds['strict']:.2f}.",
+            'moderate': f"Base growth must be within ±{self._thresholds['moderate']:.2f}."
+        }
+
+    @property
+    def filter_mode_desc(self):
+        return self.filter_mode_descs[self.filter_mode]
+
+    def _compute_base_growth(self) -> float:
+        const = float(self.coeffs.get('const', 0.0))
+        if self.freq == 'M':
+            scale = 12.0
+            dummy_sum = float(self.coeffs[[c for c in self.coeffs.index if isinstance(c, str) and c.startswith('M:')]].sum())
+        else:  # 'Q'
+            scale = 4.0
+            dummy_sum = float(self.coeffs[[c for c in self.coeffs.index if isinstance(c, str) and c.startswith('Q:')]].sum())
+        return scale * const + dummy_sum
+
+    @property
+    def test_result(self) -> pd.DataFrame:
+        """
+        Compute base growth and indicate pass/fail against mode-specific bounds.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Single-row table with columns: 'Value', 'Lower', 'Upper', 'Passed'.
+
+        Example output structure
+        ------------------------
+        ┌─────────────┬────────┬────────┬────────┬────────┐
+        │ Metric      │ Value  │ Lower  │ Upper  │ Passed │
+        ├─────────────┼────────┼────────┼────────┼────────┤
+        │ Base Growth │  0.05  │ -0.15  │  0.15  │  True  │
+        └─────────────┴────────┴────────┴────────┴────────┘
+        """
+        value = self._compute_base_growth()
+        thr = self._thresholds[self.filter_mode]
+        lower, upper = -thr, thr
+        passed = (value >= lower) and (value <= upper)
+        df = pd.DataFrame([
+            {'Metric': 'Base Growth', 'Value': float(value), 'Lower': float(lower), 'Upper': float(upper), 'Passed': bool(passed)}
+        ]).set_index('Metric')
+        return df
+
+    @property
+    def test_filter(self) -> bool:
+        value = self._compute_base_growth()
+        thr = self._thresholds[self.filter_mode]
+        return (-thr <= value <= thr)
+
+
+# ----------------------------------------------------------------------------
 # VIF Test for Multicollinearity
 # ----------------------------------------------------------------------------
 

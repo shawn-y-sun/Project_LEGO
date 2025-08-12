@@ -935,7 +935,7 @@ class Segment:
         add_in: bool = True,
         override: bool = False,
         re_rank: bool = True
-    ) -> List[CM]:
+    ) -> None:
         """
         Run an exhaustive search to find the best performing model specifications.
 
@@ -991,30 +991,31 @@ class Segment:
 
         Returns
         -------
-        List[CM]
-            List of the top_n best performing CM instances.
+        None
+            Results are stored in `self.top_cms` and (optionally) `self.cms`.
 
         Example
         -------
         >>> # Basic search with default parameters
-        >>> top_models = segment.search_cms(
+        >>> segment.search_cms(
         ...     desired_pool=["gdp", "inflation", "unemployment"]
         ... )
+        >>> top_models = segment.top_cms  # access results
         >>> 
         >>> # Search and override existing models
-        >>> top_models = segment.search_cms(
+        >>> segment.search_cms(
         ...     desired_pool=["new_var1", "new_var2"],
         ...     override=True  # clears existing models first
         ... )
         >>> 
         >>> # Search and add without re-ranking
-        >>> top_models = segment.search_cms(
+        >>> segment.search_cms(
         ...     desired_pool=["additional_var"],
         ...     re_rank=False  # just append with unique IDs
         ... )
         >>> 
         >>> # Advanced search with re-ranking
-        >>> top_models = segment.search_cms(
+        >>> segment.search_cms(
         ...     desired_pool=[
         ...         {"var": "gdp", "transform": ["diff", "pct_change"]},
         ...         {"var": "cpi", "transform": "diff"},
@@ -1071,11 +1072,21 @@ class Segment:
             else:
                 # Add to existing cms
                 if re_rank and self.cms:
-                    # Combine new top_cms with existing cms for re-ranking
-                    all_cms = list(self.cms.values()) + self.top_cms
+                    # Before re-ranking: drop new models that duplicate existing ones by exact formula match
+                    existing_formulas = {getattr(cm, 'formula', None) for cm in self.cms.values()}
+                    distinct_new = [cm for cm in self.top_cms if getattr(cm, 'formula', None) not in existing_formulas]
+                    dup_count = len(self.top_cms) - len(distinct_new)
+                    print(f"\nDuplicate check: {dup_count} duplicate model(s) found among new results; {len(distinct_new)} distinct model(s) to consider.")
+
+                    if not distinct_new:
+                        print("No distinct new models to add. Skipping re-ranking.")
+                        return None
+
+                    # Combine existing with only distinct new for re-ranking
+                    all_cms = list(self.cms.values()) + distinct_new
                     
-                    # Keep track of newly searched CM objects for final position tracking
-                    newly_searched_cms = set(self.top_cms)
+                    # Keep track of newly searched CM object identities for stable tracking
+                    newly_searched_obj_ids = {id(cm) for cm in distinct_new}
                     
                     # Temporarily assign unique IDs to handle duplicates during ranking
                     original_ids = {}
@@ -1085,28 +1096,47 @@ class Segment:
                     
                     # Re-rank all models together
                     df_ranked = self.searcher.rank_cms(all_cms, sample, rank_weights)
-                    
+
                     # Clear and rebuild cms with new ranking-based IDs
                     self.cms.clear()
                     ordered_temp_ids = df_ranked['model_id'].tolist()
-                    
+
                     # Assign new sequential IDs and track newly searched models' final positions
                     newly_searched_final_positions = []
-                    
+                    temp_to_new_id: Dict[str, str] = {}
+
                     # Assign final IDs based on ranking order
                     for i, temp_id in enumerate(ordered_temp_ids):
                         cm = original_ids[temp_id]
                         new_id = f"cm{i+1}"
+                        temp_to_new_id[temp_id] = new_id
                         cm.model_id = new_id
                         self.cms[new_id] = cm
-                        
+
                         # Track final position if this was a newly searched CM
-                        if cm in newly_searched_cms:
+                        if id(cm) in newly_searched_obj_ids:
                             newly_searched_final_positions.append(new_id)
-                    
-                    print(f"\n=== Re-ranked All Models ===")
-                    print(f"Total models after re-ranking: {len(self.cms)}")
-                    print(f"Newly searched models ranked at: {', '.join(newly_searched_final_positions)}")
+
+                    # Prepare and print updated ranking table with new IDs
+                    df_updated = df_ranked.copy()
+                    df_updated['model_id'] = df_updated['model_id'].map(temp_to_new_id)
+                    print("\n=== Updated Ranked Results ===")
+                    print(df_updated.to_string(index=False))
+
+                    # Print positions for newly added CMs
+                    if newly_searched_final_positions:
+                        order_list = df_updated['model_id'].tolist()
+                        pos_map = {mid: (i + 1) for i, mid in enumerate(order_list)}
+                        positions_str = ", ".join(f"{mid} (#{pos_map.get(mid, '?')})" for mid in newly_searched_final_positions)
+                        print("\nNewly added models ranked at:")
+                        print(positions_str)
+
+                    # Print top model formulas for all CMs in current ranking order
+                    print("\n=== Top Model Formulas ===")
+                    for temp_id in ordered_temp_ids:
+                        new_id = temp_to_new_id[temp_id]
+                        cm = self.cms[new_id]
+                        print(f"{new_id}: {cm.formula}")
                 else:
                     # Simply add new cms with collision-resolved IDs (original behavior)
                     for cm in self.top_cms:
@@ -1123,4 +1153,4 @@ class Segment:
                         cm.model_id = new_id
                         self.cms[new_id] = cm
 
-        return self.top_cms
+        return None
