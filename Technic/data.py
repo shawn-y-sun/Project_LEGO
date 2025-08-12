@@ -1336,68 +1336,56 @@ class DataManager:
         TypeError
             If the function's return types are invalid.
         """
-        main_internal_df = self.internal_data  # ensure cache exists
+        # Reference internal (main) for all function calls (consistent with old apply_to_mevs)
+        internal_ref = self.internal_data  # ensure cache exists
 
-        def _merge_into(target_df: pd.DataFrame, ret: Optional[Union[pd.Series, pd.DataFrame]]) -> None:
-            if ret is None:
+        def _assign_like(target_df: pd.DataFrame, result: Optional[Union[pd.Series, pd.DataFrame]]) -> None:
+            if result is None:
                 return
-            if isinstance(ret, pd.Series):
-                if ret.name is None:
+            if isinstance(result, pd.Series):
+                if result.name is None:
                     raise TypeError("apply_to_all(): returned Series must have a name")
-                aligned = ret.reindex(target_df.index)
-                target_df.loc[:, ret.name] = aligned.values
-            elif isinstance(ret, pd.DataFrame):
-                aligned = ret.reindex(target_df.index)
-                target_df.loc[:, aligned.columns] = aligned.values
+                # Assign per-column with index alignment
+                target_df[result.name] = result.reindex(target_df.index)
+            elif isinstance(result, pd.DataFrame):
+                for col in result.columns:
+                    target_df[col] = result[col].reindex(target_df.index)
             else:
                 raise TypeError(
-                    f"apply_to_all(): returns must be None, Series or DataFrame, got {type(ret)}"
+                    f"apply_to_all(): returns must be None, Series or DataFrame, got {type(result)}"
                 )
 
-        def _apply_pair(mev_df: pd.DataFrame, internal_df: pd.DataFrame) -> None:
-            result = fn(mev_df.copy(), internal_df.copy())
-            # Normalize result into a (mev_ret, in_ret) tuple
-            mev_ret: Optional[Union[pd.Series, pd.DataFrame]]
-            in_ret: Optional[Union[pd.Series, pd.DataFrame]]
-
+        def _apply_pair(mev_df: pd.DataFrame, internal_target_df: pd.DataFrame) -> None:
+            # Call user fn with MEV table and the main internal reference
+            result = fn(mev_df.copy(), internal_ref)
             if result is None:
-                mev_ret, in_ret = None, None  # in-place only
+                mev_ret, in_ret = None, None
             elif isinstance(result, tuple) and len(result) == 2:
                 mev_ret, in_ret = result
             elif isinstance(result, (pd.Series, pd.DataFrame)):
                 mev_ret, in_ret = result, None
             else:
                 raise TypeError(
-                    "apply_to_all(): fn must return (mev, internal) tuple, a DataFrame/Series "
-                    "for MEV only, or None for in-place modifications"
+                    "apply_to_all(): fn must return (mev, internal) tuple, a DataFrame/Series for MEV only, or None"
                 )
+            # Assign back similar to old apply_to_mevs (column-wise with reindex)
+            _assign_like(mev_df, mev_ret)
+            _assign_like(internal_target_df, in_ret)
 
-            # Merge results back onto the cached DataFrames (align by index)
-            _merge_into(mev_df, mev_ret)
-            _merge_into(internal_df, in_ret)
+        # Apply to model data (MEV and main internal)
+        _apply_pair(self.model_mev, self.internal_data)
 
-        # Apply to cached model data
-        _apply_pair(self.model_mev, main_internal_df)
-
-        # Apply to cached scenario data
-        scen_mevs_dict = self.scen_mevs  # ensure cache exists
-        scen_internal_dict = self.scen_internal_data  # ensure cache exists
-
-        warned_missing_internal = False
+        # Apply to scenario data: MEV and their respective scenario internal if present
+        scen_mevs_dict = self.scen_mevs
+        scen_internal_dict = self.scen_internal_data
         for scen_set, scen_mev_map in scen_mevs_dict.items():
             for scen_name, scen_mev_df in scen_mev_map.items():
                 scen_in_df = scen_internal_dict.get(scen_set, {}).get(scen_name)
-                if scen_in_df is None:
-                    if not warned_missing_internal and not scen_internal_dict:
-                        warnings.warn(
-                            "No scenario internal data found. For scenario MEV updates, the main internal "
-                            "data is used as context; internal scenario updates are skipped.",
-                            UserWarning
-                        )
-                        warned_missing_internal = True
-                    _apply_pair(scen_mev_df, main_internal_df)
-                else:
+                if scen_in_df is not None:
                     _apply_pair(scen_mev_df, scen_in_df)
+                else:
+                    # No scenario internal available: still apply MEV updates using main internal reference
+                    _apply_pair(scen_mev_df, self.internal_data)
 
     @property
     def var_map(self) -> Dict[str, Dict[str, str]]:
