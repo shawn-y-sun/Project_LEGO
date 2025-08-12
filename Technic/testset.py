@@ -19,6 +19,7 @@ import numpy as np
 import statsmodels.api as sm
 from typing import Dict, Any, TYPE_CHECKING, List, Tuple
 from .test import *
+from .modeltype import Growth
 
 if TYPE_CHECKING:
     from .model import ModelBase
@@ -97,14 +98,14 @@ class TestSet:
 
     def filter_pass(
         self,
-        fast_filter: bool = True
+        fast_filter: bool = False
     ) -> Tuple[bool, List[str]]:
         """
         Run active tests and return overall pass flag and failed test names.
 
         Parameters
         ----------
-        fast_filter : bool, default True
+        fast_filter : bool, default False
             If True, stops on first failure.
 
         Returns
@@ -127,19 +128,22 @@ class TestSet:
     def print_test_info(self) -> None:
         """
         Print summary of test configurations using test_info property:
-          - Active tests: name, filter_mode, desc
-          - Inactive tests: name only, with note.
+          - Filtering Tests: name, filter_mode, desc
+          - No-Filtering Tests: name only (excluding measures), with note
+          - Measures: list of tests in 'measure' category
         """
         info = self.test_info
-        
-        print("Active Tests:")
+
+        # Filtering tests (filter_on=True)
+        print("Filtering Tests:")
         for test in self.tests:
             if test.filter_on:
                 test_info = info[test.name]
                 print(f"- {test.name} | filter_mode: {test_info['filter_mode']} | desc: {test_info['desc']}")
-        
-        print("\nInactive Tests:")
-        inactive = [t for t in self.tests if not t.filter_on]
+
+        # No-filtering tests (filter_on=False), excluding measures
+        print("\nNo-Filtering Tests:")
+        inactive = [t for t in self.tests if (not t.filter_on) and getattr(t, 'category', None) != 'measure']
         for test in inactive:
             print(f"- {test.name}")
         
@@ -149,11 +153,18 @@ class TestSet:
                 "Set `filter_on=True` on a test to include it in filter_pass results."
             )
 
+        # Measures (category == 'measure'), shown separately
+        measures = [t for t in self.tests if getattr(t, 'category', None) == 'measure']
+        if measures:
+            print("\nMeasures:")
+            for test in measures:
+                print(f"- {test.name}")
+
 
 def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
     """
     Pre-defined TestSet for PPNR OLS models with improved group labels:
-    - In-sample R²
+    - In-sample R-sq
     - Individual significance (CoefTest drivers)
     - Joint F-tests (GroupTest drivers)
     - Residual stationarity & normality
@@ -165,7 +176,7 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
     All future testset functions should define the following measure tests FIRST,
     before any other assumption and performance tests:
     
-    1. 'Fit Measures' - FitMeasure test for R² and Adj R² metrics
+    1. 'Fit Measures' - FitMeasure test for R-sq and Adj R-sq metrics
     2. 'IS Error Measures' - ErrorMeasure test for in-sample ME, MAE, RMSE
     3. 'OOS Error Measures' - ErrorMeasure test for out-of-sample ME, MAE, RMSE (if applicable)
     
@@ -197,8 +208,8 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
         )
 
     #---Filtering Test---
-    # In-sample R²
-    tests['In-Sample R²'] = R2Test(
+    # In-sample R-sq
+    tests['In-Sample R-sq'] = R2Test(
         r2=mdl.rsquared,
         filter_mode='moderate'
     )
@@ -319,5 +330,18 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
             coefficients=mdl.params,
             filter_mode='moderate'
         )
+
+    # --- Base Growth Test (for Growth model types) ---
+    if getattr(mdl, 'model_type', None) is Growth:
+        try:
+            freq = mdl.dm.freq if hasattr(mdl, 'dm') and hasattr(mdl.dm, 'freq') else 'M'
+            tests['Base Growth'] = BaseGrowthTest(
+                coeffs=mdl.params,
+                freq=freq,
+                filter_on=False
+            )
+        except Exception:
+            # If anything goes wrong (e.g., params not ready), skip adding this test
+            pass
 
     return tests 
