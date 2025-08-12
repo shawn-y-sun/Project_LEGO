@@ -1344,10 +1344,11 @@ class DataManager:
             if isinstance(ret, pd.Series):
                 if ret.name is None:
                     raise TypeError("apply_to_all(): returned Series must have a name")
-                target_df[ret.name] = ret.reindex(target_df.index)
+                aligned = ret.reindex(target_df.index)
+                target_df.loc[:, ret.name] = aligned.values
             elif isinstance(ret, pd.DataFrame):
-                for col in ret.columns:
-                    target_df[col] = ret[col].reindex(target_df.index)
+                aligned = ret.reindex(target_df.index)
+                target_df.loc[:, aligned.columns] = aligned.values
             else:
                 raise TypeError(
                     f"apply_to_all(): returns must be None, Series or DataFrame, got {type(ret)}"
