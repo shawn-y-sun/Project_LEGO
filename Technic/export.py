@@ -609,8 +609,8 @@ class OLSModelAdapter(ExportableModel):
                             metric_value = row.get(value_col)
                             if pd.notnull(metric_value):
                                 stats_list.append({
-                                    'category': 'Goodness of Fit',
-                                    'model': model_id,
+                        'category': 'Goodness of Fit',
+                        'model': model_id,
                                     'type': sample_label,
                                     'value_type': str(metric_name),
                                     'value': float(metric_value)
@@ -620,8 +620,8 @@ class OLSModelAdapter(ExportableModel):
                     for metric_name, metric_value in df_like.items():
                         if pd.notnull(metric_value):
                             stats_list.append({
-                                'category': 'Goodness of Fit',
-                                'model': model_id,
+                        'category': 'Goodness of Fit',
+                        'model': model_id,
                                 'type': sample_label,
                                 'value_type': str(metric_name),
                                 'value': float(metric_value)
@@ -661,7 +661,7 @@ class OLSModelAdapter(ExportableModel):
                         if 'oos' in name_lower or 'out' in name_lower:
                             sample_label = 'Out-of-Sample'
                         append_error_measures(tr, sample_label)
-             
+            
             # Process group F-test results if available
             if 'GroupTest' in test_dict:
                 group_test = test_dict['GroupTest']
@@ -791,9 +791,43 @@ class OLSModelAdapter(ExportableModel):
                         'frequency': 'monthly'
                     }
                     data_list.append(pd.DataFrame(df_data))
-        
+ 
+        # Add historical actuals (Target) monthly and quarterly (if applicable)
+        target_actual = getattr(self.model, 'y_full', None)
+        if target_actual is not None and not target_actual.empty:
+            # Monthly actuals per scenario set
+            for scen_set in scen_results.keys():
+                df_data = {
+                    'model': model_id,
+                    'scenario_name': scen_set,
+                    'severity': 'actual',
+                    'date': target_actual.index,
+                    'value_type': 'Target',
+                    'value': target_actual.values,
+                    'frequency': 'monthly'
+                }
+                data_list.append(pd.DataFrame(df_data))
+            # Quarterly actuals aggregated to quarter-end
+            actual_q = target_actual.copy()
+            actual_q.index = pd.to_datetime(actual_q.index)
+            actual_q = actual_q.groupby(pd.Grouper(freq='Q')).mean()
+            actual_q.index = actual_q.index.to_period('Q').to_timestamp(how='end').normalize()
+            if not actual_q.empty:
+                for scen_set in scen_results.keys():
+                    df_data = {
+                        'model': model_id,
+                        'scenario_name': scen_set,
+                        'severity': 'actual',
+                        'date': actual_q.index,
+                        'value_type': 'Target',
+                        'value': actual_q.values,
+                        'frequency': 'quarterly'
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
+        # Process target variable quarterly forecasts
         # Target variable quarterly forecasts are no longer available (forecast_y_qtr_df deprecated)
-        
+ 
         # Process base variable forecasts (monthly) if available
         if hasattr(self.model.scen_manager, 'y_base_scens'):
             base_results = self.model.scen_manager.y_base_scens
@@ -831,7 +865,39 @@ class OLSModelAdapter(ExportableModel):
                             'frequency': 'monthly'
                         }
                         data_list.append(pd.DataFrame(df_data))
-        
+ 
+        # Add historical actuals (Base) monthly and quarterly if base actuals exist on model
+        base_actual = getattr(self.model, 'y_base_full', None)
+        if base_actual is not None and not base_actual.empty:
+            for scen_set in scen_results.keys():
+                df_data = {
+                    'model': model_id,
+                    'scenario_name': scen_set,
+                    'severity': 'actual',
+                    'date': base_actual.index,
+                    'value_type': 'Base',
+                    'value': base_actual.values,
+                    'frequency': 'monthly'
+                }
+                data_list.append(pd.DataFrame(df_data))
+            # Quarterly aggregation
+            base_actual_q = base_actual.copy()
+            base_actual_q.index = pd.to_datetime(base_actual_q.index)
+            base_actual_q = base_actual_q.groupby(pd.Grouper(freq='Q')).mean()
+            base_actual_q.index = base_actual_q.index.to_period('Q').to_timestamp(how='end').normalize()
+            if not base_actual_q.empty:
+                for scen_set in scen_results.keys():
+                    df_data = {
+                        'model': model_id,
+                        'scenario_name': scen_set,
+                        'severity': 'actual',
+                        'date': base_actual_q.index,
+                        'value_type': 'Base',
+                        'value': base_actual_q.values,
+                        'frequency': 'quarterly'
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
         # Process base variable quarterly forecasts
         if hasattr(self.model.scen_manager, 'forecast_y_base_qtr_df'):
             base_qtr_forecasts = self.model.scen_manager.forecast_y_base_qtr_df
@@ -888,10 +954,10 @@ class OLSModelAdapter(ExportableModel):
             results = self.model.testset.all_test_results
         except Exception:
             return None
-            
+        
         if not results or len(results) == 0:
             return None
-            
+        
         model_id = self._model_id
         all_results = []
         
@@ -967,61 +1033,58 @@ class OLSModelAdapter(ExportableModel):
         """Transform test result DataFrame to long format."""
         if not isinstance(test_df, pd.DataFrame) or test_df.empty:
             return []
-            
-        results = []
+        
+        results: List[Dict[str, Any]] = []
         
         for index_name, row in test_df.iterrows():
             for column_name, value in row.items():
-                # Handle special cases for thresholds (tuples)
+                # Handle thresholds represented as (lower, upper)
                 if isinstance(value, (tuple, list)) and len(value) == 2:
-                    # Split threshold tuples into separate entries
                     lower_val, upper_val = value
-                    results.extend([
-                        {
-                            'model': model_id,
-                            'test': test_name,
-                            'index': str(index_name),
-                            'metric': f'{column_name}_Lower',
-                            'value': float(lower_val) if pd.notnull(lower_val) else None
-                        },
-                        {
-                            'model': model_id,
-                            'test': test_name,
-                            'index': str(index_name),
-                            'metric': f'{column_name}_Upper', 
-                            'value': float(upper_val) if pd.notnull(upper_val) else None
-                        }
-                    ])
-                else:
-                    # Special-case for sign check expected sign mapping to numeric 1/-1/0
-                    if test_name == 'Coefficient Sign Check' and column_name == 'Expected':
-                        expected_str = str(value).strip().lower()
-                        if expected_str in ['+', 'positive']:
-                            numeric_value = 1.0
-                        elif expected_str in ['-', 'negative']:
-                            numeric_value = -1.0
-                        else:
-                            numeric_value = 0.0
-                    # Convert other values to appropriate numeric format
-                    elif isinstance(value, bool):
-                        numeric_value = 1.0 if value else 0.0
-                    elif pd.isnull(value):
-                        numeric_value = None
+                    results.append({
+                        'model': model_id,
+                        'test': test_name,
+                        'index': str(index_name),
+                        'metric': f'{column_name}_Lower',
+                        'value': float(lower_val) if pd.notnull(lower_val) else None
+                    })
+                    results.append({
+                        'model': model_id,
+                        'test': test_name,
+                        'index': str(index_name),
+                        'metric': f'{column_name}_Upper',
+                        'value': float(upper_val) if pd.notnull(upper_val) else None
+                    })
+                    continue
+                
+                # Special-case: expected sign mapping
+                if test_name == 'Coefficient Sign Check' and column_name == 'Expected':
+                    expected_str = str(value).strip().lower()
+                    if expected_str in ['+', 'positive']:
+                        numeric_value = 1.0
+                    elif expected_str in ['-', 'negative']:
+                        numeric_value = -1.0
                     else:
-                        try:
-                            numeric_value = float(value)
-                        except (ValueError, TypeError):
-                            # Skip non-numeric values to ensure 'value' stays numeric
-                            numeric_value = None
-                    
-                    if numeric_value is not None:
-                        results.append({
-                            'model': model_id,
-                            'test': test_name,
-                            'index': str(index_name),
-                            'metric': column_name,
-                            'value': numeric_value
-                        })
+                        numeric_value = 0.0
+                elif isinstance(value, bool):
+                    numeric_value = 1.0 if value else 0.0
+                elif pd.isnull(value):
+                    numeric_value = None
+                else:
+                    try:
+                        numeric_value = float(value)
+                    except (ValueError, TypeError):
+                        # Skip non-numeric values to ensure 'value' stays numeric
+                        numeric_value = None
+                
+                if numeric_value is not None:
+                    results.append({
+                        'model': model_id,
+                        'test': test_name,
+                        'index': str(index_name),
+                        'metric': column_name,
+                        'value': numeric_value
+                    })
         
         return results
 
@@ -1138,6 +1201,22 @@ class OLSModelAdapter(ExportableModel):
                 # Get baseline column name
                 baseline_col = f"{scen_set}_{scen_name}"
                 
+                # Include baseline (no shock) target series
+                if baseline_col in df.columns:
+                    df_data = {
+                        'model': model_id,
+                        'test': 'Parameter Sensitivity Test',
+                        'scenario_name': scen_set,
+                        'severity': scen_name,
+                        'variable/parameter': 'no_shock',
+                        'shock': 'baseline',
+                        'date': df.index,
+                        'value_type': 'Target',
+                        'value': df[baseline_col].values,
+                        'frequency': 'monthly'
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
                 # Process each parameter's shocks (monthly)
                 for col in df.columns:
                     if col == baseline_col:
@@ -1170,6 +1249,24 @@ class OLSModelAdapter(ExportableModel):
                     if qtr_df is not None and not qtr_df.empty:
                         baseline_col = f"{scen_set}_{scen_name}"
                         
+                        # Include baseline (no shock) quarterly target series
+                        if baseline_col in qtr_df.columns:
+                            qtr_forecast = qtr_df[baseline_col].dropna()
+                            if not qtr_forecast.empty:
+                                df_data = {
+                                    'model': model_id,
+                                    'test': 'Parameter Sensitivity Test',
+                                    'scenario_name': scen_set,
+                                    'severity': scen_name,
+                                    'variable/parameter': 'no_shock',
+                                    'shock': 'baseline',
+                                    'date': qtr_forecast.index,
+                                    'value_type': 'Target',
+                                    'value': qtr_forecast.values,
+                                    'frequency': 'quarterly'
+                                }
+                                data_list.append(pd.DataFrame(df_data))
+
                         # Process each parameter's shocks (quarterly)
                         for col in qtr_df.columns:
                             if col == baseline_col:
@@ -1203,6 +1300,22 @@ class OLSModelAdapter(ExportableModel):
                 # Get baseline column name
                 baseline_col = f"{scen_set}_{scen_name}"
                 
+                # Include baseline (no shock) input series target
+                if baseline_col in df.columns:
+                    df_data = {
+                        'model': model_id,
+                        'test': 'Input Sensitivity Test',
+                        'scenario_name': scen_set,
+                        'severity': scen_name,
+                        'variable/parameter': 'no_shock',
+                        'shock': 'baseline',
+                        'date': df.index,
+                        'value_type': 'Target',
+                        'value': df[baseline_col].values,
+                        'frequency': 'monthly'
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
                 # Process each variable's shocks (monthly)
                 for col in df.columns:
                     if col == baseline_col:
@@ -1235,6 +1348,24 @@ class OLSModelAdapter(ExportableModel):
                     if qtr_df is not None and not qtr_df.empty:
                         baseline_col = f"{scen_set}_{scen_name}"
                         
+                        # Include baseline (no shock) quarterly target series
+                        if baseline_col in qtr_df.columns:
+                            qtr_forecast = qtr_df[baseline_col].dropna()
+                            if not qtr_forecast.empty:
+                                df_data = {
+                                    'model': model_id,
+                                    'test': 'Input Sensitivity Test',
+                                    'scenario_name': scen_set,
+                                    'severity': scen_name,
+                                    'variable/parameter': 'no_shock',
+                                    'shock': 'baseline',
+                                    'date': qtr_forecast.index,
+                                    'value_type': 'Target',
+                                    'value': qtr_forecast.values,
+                                    'frequency': 'quarterly'
+                                }
+                                data_list.append(pd.DataFrame(df_data))
+
                         # Process each variable's shocks (quarterly)
                         for col in qtr_df.columns:
                             if col == baseline_col:
@@ -1268,6 +1399,23 @@ class OLSModelAdapter(ExportableModel):
                 for scen_name, df in scen_dict.items():
                     baseline_col = f"{scen_set}_{scen_name}"
                     
+                    # Include baseline (no shock) base conversion for parameter sensitivity monthly
+                    if baseline_col in df.columns:
+                        base_values = self.model.base_predictor.predict_base(df[baseline_col], self.model.dm.scen_p0)
+                        df_data = {
+                            'model': model_id,
+                            'test': 'Parameter Sensitivity Test',
+                            'scenario_name': scen_set,
+                            'severity': scen_name,
+                            'variable/parameter': 'no_shock',
+                            'shock': 'baseline',
+                            'date': base_values.index,
+                            'value_type': 'Base',
+                            'value': base_values.values,
+                            'frequency': 'monthly'
+                        }
+                        data_list.append(pd.DataFrame(df_data))
+
                     for col in df.columns:
                         if col == baseline_col:
                             continue
@@ -1292,7 +1440,7 @@ class OLSModelAdapter(ExportableModel):
                             'frequency': 'monthly'
                         }
                         data_list.append(pd.DataFrame(df_data))
-
+ 
             # Process parameter sensitivity base quarterly results
             if hasattr(sens_test, 'param_shock_qtr_df'):
                 param_shock_qtr_df = sens_test.param_shock_qtr_df
@@ -1301,6 +1449,25 @@ class OLSModelAdapter(ExportableModel):
                         if qtr_df is not None and not qtr_df.empty:
                             baseline_col = f"{scen_set}_{scen_name}"
                             
+                            # Include baseline (no shock) base conversion for quarterly
+                            if baseline_col in qtr_df.columns:
+                                qtr_forecast = qtr_df[baseline_col].dropna()
+                                if not qtr_forecast.empty:
+                                    base_values = self.model.base_predictor.predict_base(qtr_forecast, self.model.dm.scen_p0)
+                                    df_data = {
+                                        'model': model_id,
+                                        'test': 'Parameter Sensitivity Test',
+                                        'scenario_name': scen_set,
+                                        'severity': scen_name,
+                                        'variable/parameter': 'no_shock',
+                                        'shock': 'baseline',
+                                        'date': base_values.index,
+                                        'value_type': 'Base',
+                                        'value': base_values.values,
+                                        'frequency': 'quarterly'
+                                    }
+                                    data_list.append(pd.DataFrame(df_data))
+
                             for col in qtr_df.columns:
                                 if col == baseline_col:
                                     continue
@@ -1327,12 +1494,29 @@ class OLSModelAdapter(ExportableModel):
                                         'frequency': 'quarterly'
                                     }
                                     data_list.append(pd.DataFrame(df_data))
-
+ 
             # Process input sensitivity base results (monthly)
             for scen_set, scen_dict in input_shock_df.items():
                 for scen_name, df in scen_dict.items():
                     baseline_col = f"{scen_set}_{scen_name}"
                     
+                    # Include baseline (no shock) base conversion for input monthly
+                    if baseline_col in df.columns:
+                        base_values = self.model.base_predictor.predict_base(df[baseline_col], self.model.dm.scen_p0)
+                        df_data = {
+                            'model': model_id,
+                            'test': 'Input Sensitivity Test',
+                            'scenario_name': scen_set,
+                            'severity': scen_name,
+                            'variable/parameter': 'no_shock',
+                            'shock': 'baseline',
+                            'date': base_values.index,
+                            'value_type': 'Base',
+                            'value': base_values.values,
+                            'frequency': 'monthly'
+                        }
+                        data_list.append(pd.DataFrame(df_data))
+
                     for col in df.columns:
                         if col == baseline_col:
                             continue
@@ -1357,7 +1541,7 @@ class OLSModelAdapter(ExportableModel):
                             'frequency': 'monthly'
                         }
                         data_list.append(pd.DataFrame(df_data))
-
+ 
             # Process input sensitivity base quarterly results
             if hasattr(sens_test, 'input_shock_qtr_df'):
                 input_shock_qtr_df = sens_test.input_shock_qtr_df
@@ -1366,6 +1550,25 @@ class OLSModelAdapter(ExportableModel):
                         if qtr_df is not None and not qtr_df.empty:
                             baseline_col = f"{scen_set}_{scen_name}"
                             
+                            # Include baseline (no shock) base conversion for input quarterly
+                            if baseline_col in qtr_df.columns:
+                                qtr_forecast = qtr_df[baseline_col].dropna()
+                                if not qtr_forecast.empty:
+                                    base_values = self.model.base_predictor.predict_base(qtr_forecast, self.model.dm.scen_p0)
+                                    df_data = {
+                                        'model': model_id,
+                                        'test': 'Input Sensitivity Test',
+                                        'scenario_name': scen_set,
+                                        'severity': scen_name,
+                                        'variable/parameter': 'no_shock',
+                                        'shock': 'baseline',
+                                        'date': base_values.index,
+                                        'value_type': 'Base',
+                                        'value': base_values.values,
+                                        'frequency': 'quarterly'
+                                    }
+                                    data_list.append(pd.DataFrame(df_data))
+
                             for col in qtr_df.columns:
                                 if col == baseline_col:
                                     continue
