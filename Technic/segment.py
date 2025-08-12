@@ -1110,8 +1110,16 @@ class Segment:
                     # Prepare and print updated ranking table with new IDs
                     df_updated = df_ranked.copy()
                     df_updated['model_id'] = df_updated['model_id'].map(temp_to_new_id)
-                    print("=== Updated Ranked Results ===")
+                    print("\n=== Updated Ranked Results ===")
                     print(df_updated.to_string(index=False))
+
+                    # Print positions for newly added CMs
+                    if newly_searched_final_positions:
+                        order_list = df_updated['model_id'].tolist()
+                        pos_map = {mid: (i + 1) for i, mid in enumerate(order_list)}
+                        positions_str = ", ".join(f"{mid} (#{pos_map.get(mid, '?')})" for mid in newly_searched_final_positions)
+                        print("\nNewly added models ranked at:")
+                        print(positions_str)
 
                     # Print top model formulas for all CMs in current ranking order
                     print("\n=== Top Model Formulas ===")
