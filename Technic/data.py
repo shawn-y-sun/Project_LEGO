@@ -1336,56 +1336,40 @@ class DataManager:
         TypeError
             If the function's return types are invalid.
         """
-        # Reference internal (main) for all function calls (consistent with old apply_to_mevs)
-        internal_ref = self.internal_data  # ensure cache exists
+        # Ensure caches are created
+        model_mev_df = self.model_mev
+        main_internal_df = self.internal_data
 
-        def _assign_like(target_df: pd.DataFrame, result: Optional[Union[pd.Series, pd.DataFrame]]) -> None:
-            if result is None:
-                return
-            if isinstance(result, pd.Series):
-                if result.name is None:
-                    raise TypeError("apply_to_all(): returned Series must have a name")
-                # Assign per-column with index alignment
-                target_df[result.name] = result.reindex(target_df.index)
-            elif isinstance(result, pd.DataFrame):
-                for col in result.columns:
-                    target_df[col] = result[col].reindex(target_df.index)
-            else:
-                raise TypeError(
-                    f"apply_to_all(): returns must be None, Series or DataFrame, got {type(result)}"
-                )
+        # Apply to model pair
+        ret = fn(model_mev_df.copy(), main_internal_df.copy())
+        if not (isinstance(ret, tuple) and len(ret) == 2 and isinstance(ret[0], pd.DataFrame) and isinstance(ret[1], pd.DataFrame)):
+            raise TypeError("apply_to_all(): fn must return a tuple of (mev_df, internal_df) DataFrames")
+        mev_ret, in_ret = ret
+        # Replace caches for model data
+        self._model_mev_cache = mev_ret.copy()
+        self._internal_data_cache = in_ret.copy()
 
-        def _apply_pair(mev_df: pd.DataFrame, internal_target_df: pd.DataFrame) -> None:
-            # Call user fn with MEV table and the main internal reference
-            result = fn(mev_df.copy(), internal_ref)
-            if result is None:
-                mev_ret, in_ret = None, None
-            elif isinstance(result, tuple) and len(result) == 2:
-                mev_ret, in_ret = result
-            elif isinstance(result, (pd.Series, pd.DataFrame)):
-                mev_ret, in_ret = result, None
-            else:
-                raise TypeError(
-                    "apply_to_all(): fn must return (mev, internal) tuple, a DataFrame/Series for MEV only, or None"
-                )
-            # Assign back similar to old apply_to_mevs (column-wise with reindex)
-            _assign_like(mev_df, mev_ret)
-            _assign_like(internal_target_df, in_ret)
-
-        # Apply to model data (MEV and main internal)
-        _apply_pair(self.model_mev, self.internal_data)
-
-        # Apply to scenario data: MEV and their respective scenario internal if present
+        # Apply to scenario pairs
         scen_mevs_dict = self.scen_mevs
         scen_internal_dict = self.scen_internal_data
         for scen_set, scen_mev_map in scen_mevs_dict.items():
-            for scen_name, scen_mev_df in scen_mev_map.items():
-                scen_in_df = scen_internal_dict.get(scen_set, {}).get(scen_name)
-                if scen_in_df is not None:
-                    _apply_pair(scen_mev_df, scen_in_df)
-                else:
-                    # No scenario internal available: still apply MEV updates using main internal reference
-                    _apply_pair(scen_mev_df, self.internal_data)
+            for scen_name, scen_mev in scen_mev_map.items():
+                scen_internal = scen_internal_dict.get(scen_set, {}).get(scen_name)
+                if scen_internal is None:
+                    warnings.warn(
+                        f"apply_to_all(): No scenario internal data for {scen_set}/{scen_name}; skipping this scenario.",
+                        UserWarning
+                    )
+                    continue
+                scen_ret = fn(scen_mev.copy(), scen_internal.copy())
+                if not (isinstance(scen_ret, tuple) and len(scen_ret) == 2 and isinstance(scen_ret[0], pd.DataFrame) and isinstance(scen_ret[1], pd.DataFrame)):
+                    raise TypeError(
+                        f"apply_to_all(): fn must return (mev_df, internal_df) for scenarios as well; got {type(scen_ret)}"
+                    )
+                scen_mev_ret, scen_in_ret = scen_ret
+                # Replace caches for scenario data
+                self._scen_mevs_cache[scen_set][scen_name] = scen_mev_ret.copy()
+                self._scen_internal_data_cache[scen_set][scen_name] = scen_in_ret.copy()
 
     @property
     def var_map(self) -> Dict[str, Dict[str, str]]:
