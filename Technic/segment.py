@@ -1072,11 +1072,21 @@ class Segment:
             else:
                 # Add to existing cms
                 if re_rank and self.cms:
-                    # Combine new top_cms with existing cms for re-ranking
-                    all_cms = list(self.cms.values()) + self.top_cms
+                    # Before re-ranking: drop new models that duplicate existing ones by exact formula match
+                    existing_formulas = {getattr(cm, 'formula', None) for cm in self.cms.values()}
+                    distinct_new = [cm for cm in self.top_cms if getattr(cm, 'formula', None) not in existing_formulas]
+                    dup_count = len(self.top_cms) - len(distinct_new)
+                    print(f"\nDuplicate check: {dup_count} duplicate model(s) found among new results; {len(distinct_new)} distinct model(s) to consider.")
+
+                    if not distinct_new:
+                        print("No distinct new models to add. Skipping re-ranking.")
+                        return None
+
+                    # Combine existing with only distinct new for re-ranking
+                    all_cms = list(self.cms.values()) + distinct_new
                     
                     # Keep track of newly searched CM object identities for stable tracking
-                    newly_searched_obj_ids = {id(cm) for cm in self.top_cms}
+                    newly_searched_obj_ids = {id(cm) for cm in distinct_new}
                     
                     # Temporarily assign unique IDs to handle duplicates during ranking
                     original_ids = {}
