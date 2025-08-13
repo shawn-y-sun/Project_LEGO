@@ -2,6 +2,7 @@
 import warnings
 warnings.simplefilter(action="ignore", category=FutureWarning)
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import math
 from typing import Type, Dict, List, Optional, Any, Union, Callable, Tuple, Set
@@ -485,7 +486,8 @@ class Segment:
                 # Remove NaN values for correlation calculation
                 combined = pd.concat([var_series, target_series_aligned], axis=1).dropna()
                 if len(combined) > 1:
-                    corr = combined.iloc[:, 0].corr(combined.iloc[:, 1])
+                    with np.errstate(invalid='ignore', divide='ignore'):
+                        corr = combined.iloc[:, 0].corr(combined.iloc[:, 1])
                     corr_text = f"Corr: {corr:.2f}"
                 else:
                     corr_text = "Corr: N/A"
@@ -648,7 +650,8 @@ class Segment:
                 # Calculate correlation, handling NaN values
                 combined = pd.concat([var_aligned[col], target_aligned], axis=1).dropna()
                 if len(combined) > 1:
-                    corr = combined.iloc[:, 0].corr(combined.iloc[:, 1])
+                    with np.errstate(invalid='ignore', divide='ignore'):
+                        corr = combined.iloc[:, 0].corr(combined.iloc[:, 1])
                     if pd.isna(corr):
                         corr = 0.0
                 else:
@@ -894,7 +897,8 @@ class Segment:
                 target_aligned = target_data.loc[common_idx]
                 
                 # Calculate correlation, handling NaN values
-                corr = feature_aligned.corr(target_aligned)
+                with np.errstate(invalid='ignore', divide='ignore'):
+                    corr = feature_aligned.corr(target_aligned)
                 
                 # Skip if correlation is NaN (e.g., constant feature)
                 if pd.isna(corr):
