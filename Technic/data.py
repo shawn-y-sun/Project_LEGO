@@ -1116,14 +1116,17 @@ class DataManager:
         """
         Interpolate quarterly MEV DataFrames to match monthly frequency using cubic spline.
         The interpolation ensures that quarterly averages of the monthly values match
-        the original quarterly values.
+        the original quarterly values. For valid series, quarterly values are first shifted
+        to the middle month of each quarter before interpolation.
 
         The process:
         1. Forward fills any NA values in the quarterly series
-        2. Extends the quarterly series by 4 quarters by holding the last value flat
-        3. Performs cubic spline interpolation on the extended series
-        4. Scales interpolated values to preserve quarterly averages
-        5. Returns only the original date range (removes the extended quarters)
+        2. For valid series:
+           - Shifts quarterly values to mid-quarter dates
+           - Extends the series by 4 quarters
+           - Performs cubic spline interpolation
+           - Scales interpolated values to preserve quarterly averages
+        3. Returns only the original date range
 
         Parameters
         ----------
@@ -1139,6 +1142,7 @@ class DataManager:
         Notes
         -----
         - Uses scipy's CubicSpline with natural boundary conditions
+        - Shifts quarterly values to mid-quarter for better interpolation
         - Scales interpolated values to preserve quarterly averages
         - Handles missing values by preserving them in output
         - Normalizes all dates to midnight UTC
@@ -1196,22 +1200,32 @@ class DataManager:
                     monthly_df[col] = valid_series
                     continue
                 
-                # Extend the valid series by 4 quarters
-                last_value = valid_series.iloc[-1]
-                extended_qtrs = pd.date_range(
-                    start=pd.Period(valid_series.index[-1], freq='Q').end_time + pd.Timedelta(days=1),
-                    periods=4,
-                    freq='Q'
-                )
+                # Shift quarterly values to mid-quarter dates
+                mid_quarter_series = pd.Series(index=pd.DatetimeIndex([]), dtype=float)
+                for idx, val in valid_series.items():
+                    qtr = pd.Period(idx, freq='Q')
+                    # Calculate middle month of the quarter (2nd month)
+                    mid_month = qtr.asfreq('M', how='s') + 1
+                    mid_quarter_date = mid_month.to_timestamp()
+                    mid_quarter_series[mid_quarter_date] = val
+                
+                # Extend the series by 4 quarters
+                last_value = mid_quarter_series.iloc[-1]
+                last_qtr = pd.Period(mid_quarter_series.index[-1], freq='Q')
+                extended_qtrs = []
+                for i in range(1, 5):  # 4 additional quarters
+                    next_qtr = last_qtr + i
+                    mid_month = next_qtr.asfreq('M', how='s') + 1
+                    extended_qtrs.append(mid_month.to_timestamp())
                 extended_data = pd.Series([last_value] * 4, index=extended_qtrs)
-                extended_series = pd.concat([valid_series, extended_data])
+                extended_series = pd.concat([mid_quarter_series, extended_data])
                 
                 # Convert dates to numeric for spline interpolation
                 x = extended_series.index.map(pd.Timestamp.toordinal)
                 y = extended_series.values
                 
                 # Fit cubic spline
-                spline = CubicSpline(x, y, bc_type='natural')
+                spline = CubicSpline(x, y, bc_type='not-a-knot')
                 
                 # Get monthly points within the valid range
                 valid_start = pd.Period(valid_series.index[0], freq='Q').start_time
@@ -1229,12 +1243,19 @@ class DataManager:
                 scaled_series = m_series.copy()
                 
                 # Map months to corresponding quarter ends for scaling
-                month_to_qtr = pd.PeriodIndex(valid_months, freq='Q').end_time
+                # Ensure all dates are normalized to midnight UTC
+                month_to_qtr = pd.PeriodIndex(valid_months, freq='Q').end_time.normalize()
                 
                 # Apply scaling for each quarter
                 for qtr_end in valid_series.index:
-                    mask = month_to_qtr == qtr_end
+                    # Normalize quarter end date to midnight UTC
+                    qtr_end_normalized = pd.Timestamp(qtr_end).normalize()
+                    mask = month_to_qtr == qtr_end_normalized
+                    
                     if not mask.any():
+                        print(f"Warning: No matching months found for quarter {qtr_end}")
+                        print(f"Quarter end: {qtr_end_normalized}")
+                        print(f"Available quarter ends: {sorted(set(month_to_qtr))}")
                         continue
                     
                     interpolated_avg = m_series[mask].mean()
@@ -1247,6 +1268,7 @@ class DataManager:
                         scale_factor = observed_value / interpolated_avg
                     
                     scaled_series.loc[mask] = m_series.loc[mask] * scale_factor
+                    
                 
                 # Assign the scaled values to the result DataFrame
                 monthly_df[col] = scaled_series
