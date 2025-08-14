@@ -30,25 +30,37 @@ While OLS is the primary model today, the framework is designed to be model‑ag
 
 -
 ```mermaid
-flowchart LR
-    DL["Data Loading &\nPreprocessing"]:::step --> EDA["Exploratory Analysis &\nDriver Selection"]:::step
+flowchart TB
+    %% Top node
+    T["Exhaustive Search &\nSelection"]:::step
 
-    %% Iterative loop (dashed)
-    EDA -.-> SRCH["Exhaustive Search &\nSelection"]:::step
-    SRCH -.-> EVAL["Model Evaluation &\nValidation"]:::step
-    EVAL -.-> FT["Fine‑Tuning &\nEnhancement"]:::step
-    FT -.-> EDA
+    %% Middle row (left-right)
+    subgraph ROW_MIDDLE[ ]
+      direction LR
+      L["Exploratory Analysis &\nDriver Selection"]:::step
+      R["Model Evaluation &\nValidation"]:::step
+    end
 
-    %% Deliverable path
-    EVAL --> DOC["Presentation &\nDocumentation"]:::step
+    %% Bottom node
+    B["Fine‑Tuning &\nEnhancement"]:::step
 
-    %% Subtle styling closer to the reference image
-    linkStyle 1 stroke:#9aa0a6,stroke-width:1.2px,stroke-dasharray:6 4
-    linkStyle 2 stroke:#9aa0a6,stroke-width:1.2px,stroke-dasharray:6 4
-    linkStyle 3 stroke:#9aa0a6,stroke-width:1.2px,stroke-dasharray:6 4
-    linkStyle 4 stroke:#9aa0a6,stroke-width:1.2px,stroke-dasharray:6 4
+    %% Linear entry/exit
+    DL["Data Loading &\nPreprocessing"]:::step --> L
+    R --> DOC["Presentation &\nDocumentation"]:::step
 
-    classDef step fill:#f6f7ff,stroke:#b3b7ff,color:#1f2937,rx:8,ry:8
+    %% Dashed loop
+    T -.-> R
+    R -.-> B
+    B -.-> L
+    L -.-> T
+
+    %% Styling approximating the reference
+    linkStyle 2 stroke:#9aa0a6,stroke-width:1.2px,stroke-dasharray:8 5
+    linkStyle 3 stroke:#9aa0a6,stroke-width:1.2px,stroke-dasharray:8 5
+    linkStyle 4 stroke:#9aa0a6,stroke-width:1.2px,stroke-dasharray:8 5
+    linkStyle 5 stroke:#9aa0a6,stroke-width:1.2px,stroke-dasharray:8 5
+
+    classDef step fill:#f8fafc,stroke:#cbd5e1,color:#1f2937,rx:14,ry:14
 ```
 
 - **1) Data Preprocessing**: Clean/construct internal data, then load with `PPNRInternalLoader` (or panel `PanelLoader`). Load historical MEVs and scenario MEVs with `MEVLoader`.
