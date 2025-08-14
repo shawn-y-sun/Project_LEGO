@@ -345,3 +345,30 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
             pass
 
     return tests 
+
+def fixed_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
+    """
+    Minimal TestSet for fixed-coefficient OLS-style models.
+
+    Includes only fundamental measures that do not require a statsmodels fit:
+    - 'Fit Measures' (R², Adj R²) from in-sample actual vs fitted
+    - 'IS Error Measures' (ME, MAE, RMSE)
+    - 'OOS Error Measures' (ME, MAE, RMSE) if OOS data available
+    """
+    tests: Dict[str, ModelTestBase] = {}
+
+    tests['Fit Measures'] = FitMeasure(
+        actual=mdl.y,
+        predicted=mdl.y_fitted_in,
+        n_features=max(0, len(getattr(mdl, 'params', [])) - 1)
+    )
+    tests['IS Error Measures'] = ErrorMeasure(
+        actual=mdl.y,
+        predicted=mdl.y_fitted_in
+    )
+    if not mdl.X_out.empty:
+        tests['OOS Error Measures'] = ErrorMeasure(
+            actual=mdl.y_out,
+            predicted=mdl.y_pred_out
+        )
+    return tests

@@ -1497,3 +1497,247 @@ class OLS(ModelBase):
 
     def __repr__(self) -> str:
         return f'OLS-{self.cov_type}'
+
+class FixedOLS(OLS):
+    """
+    OLS-compatible model that uses fixed, pre-trained coefficients.
+
+    This model skips estimation and computes predictions directly from provided
+    coefficients. It is fully compatible with reports, stability hooks, and export.
+    Statistics that require an estimated covariance or a fitted statsmodels
+    result (p-values, F-statistic, CI, etc.) are set to NaN or None.
+
+    Parameters
+    ----------
+    fixed_params : dict or pandas.Series
+        Mapping from variable name to coefficient. Include 'const' for intercept
+        (if omitted, intercept is assumed 0.0). Variable names must align with
+        the built feature columns.
+    testset_func : callable, optional
+        Testset builder function. Defaults to a minimal function that only
+        computes fit/error measures and does not require a statsmodels fit.
+    """
+    def __init__(
+        self,
+        dm: Any,
+        specs: List[Union[str, Dict[str, Any]]],
+        sample: str,
+        fixed_params: Union[pd.Series, Dict[str, float]],
+        outlier_idx: Optional[List[Any]] = None,
+        target: str = None,
+        testset_func: Optional[Callable[['ModelBase'], Dict[str, 'ModelTestBase']]] = None,
+        test_update_func: Optional[Callable[['ModelBase'], Dict[str, Any]]] = None,
+        testset_cls: Type = TestSet,
+        scen_cls: Optional[Type] = None,
+        model_type: Optional[Type] = None,
+        target_base: Optional[str] = None,
+        target_exposure: Optional[str] = None,
+        report_cls: Type = OLS_ModelReport,
+        stability_test_cls: Optional[Type] = None,
+        X: Optional[pd.DataFrame] = None,
+        y: Optional[pd.Series] = None,
+        X_out: Optional[pd.DataFrame] = None,
+        y_out: Optional[pd.Series] = None,
+        qtr_method: str = 'mean'
+    ):
+        if testset_func is None:
+            from .testset import fixed_ols_testset_func
+            testset_func = fixed_ols_testset_func
+
+        super().__init__(
+            dm=dm,
+            specs=specs,
+            sample=sample,
+            outlier_idx=outlier_idx,
+            target=target,
+            testset_func=testset_func,
+            test_update_func=test_update_func,
+            testset_cls=testset_cls,
+            scen_cls=scen_cls,
+            model_type=model_type,
+            target_base=target_base,
+            target_exposure=target_exposure,
+            report_cls=report_cls,
+            stability_test_cls=stability_test_cls,
+            X=X,
+            y=y,
+            X_out=X_out,
+            y_out=y_out,
+            qtr_method=qtr_method
+        )
+        # Store provided coefficients in raw form (may include Feature/TSFM keys)
+        self._fixed_params_raw = fixed_params
+
+    def fit(self) -> 'FixedOLS':
+        """
+        Compute in-sample fitted values and residuals using fixed coefficients.
+        """
+        # Validate data
+        self._validate_data(self.X, self.y)
+
+        # Build constant-augmented design and resolve provided coefficients to columns
+        Xc = sm.add_constant(self.X, has_constant='add')
+        params = self._resolve_fixed_params_to_columns(Xc)
+
+        # Save params, and initialize stats placeholders
+        self.params = params
+        self.pvalues = pd.Series(np.nan, index=params.index, dtype=float)
+        self.bse = pd.Series(np.nan, index=params.index, dtype=float)
+        self.se = self.bse
+        self.tvalues = pd.Series(np.nan, index=params.index, dtype=float)
+        self.vif = pd.Series(np.nan, index=params.index, dtype=float)
+        self.fvalue = None
+        self.f_pvalue = None
+        self.llf = None
+        self.aic = None
+        self.bic = None
+        self.cov_type = 'Fixed'
+
+        # Predictions and residuals
+        y_hat = pd.Series(np.dot(Xc.values, params.values), index=Xc.index, name=self.target)
+        self.y_fitted_in = y_hat
+        self.resid = self.y - y_hat
+        self.is_fitted = True
+
+        # Goodness of fit
+        ss_res = float(((self.y - y_hat) ** 2).sum())
+        ss_tot = float(((self.y - self.y.mean()) ** 2).sum())
+        r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+        p = max(0, len(params) - 1)
+        n = len(self.y)
+        adj_r2 = 1 - (1 - r2) * (n - 1) / (n - p - 1) if n > p + 1 and not np.isnan(r2) else np.nan
+        self.rsquared = r2
+        self.rsquared_adj = adj_r2
+
+        # Confidence intervals placeholder
+        self.conf_int_alpha = 0.05
+        self.conf_int_df = pd.DataFrame(
+            np.nan, index=params.index, columns=[0, 1]
+        )
+
+        # Build tests (minimal) and scen manager
+        self.load_testset()
+        self._create_scenario_manager()
+        return self
+
+    def predict(self, X_new: pd.DataFrame) -> pd.Series:
+        """
+        Predict using fixed coefficients (adds intercept automatically).
+        """
+        if not self.is_fitted:
+            raise RuntimeError("Model has not been fitted yet.")
+        Xc_new = sm.add_constant(X_new, has_constant='add')
+        coef = self.params.reindex(Xc_new.columns, fill_value=0.0).astype(float)
+        return pd.Series(np.dot(Xc_new.values, coef.values), index=Xc_new.index, name=self.target)
+
+    def conf_int(self, alpha: float = 0.05) -> pd.DataFrame:
+        """
+        Return stored (NaN) confidence intervals without requiring statsmodels results.
+        """
+        if alpha != self.conf_int_alpha:
+            self.conf_int_alpha = alpha
+        # Ensure we always return a DataFrame with the current params index
+        if self.conf_int_df is None or not isinstance(self.conf_int_df, pd.DataFrame):
+            self.conf_int_df = pd.DataFrame(np.nan, index=self.params.index, columns=[0, 1])
+        else:
+            # Reindex to current params
+            self.conf_int_df = self.conf_int_df.reindex(self.params.index)
+            self.conf_int_df.loc[:, 0] = self.conf_int_df.loc[:, 0].astype(float)
+            self.conf_int_df.loc[:, 1] = self.conf_int_df.loc[:, 1].astype(float)
+        return self.conf_int_df
+
+    def _resolve_fixed_params_to_columns(self, Xc: pd.DataFrame) -> pd.Series:
+        """
+        Map user-provided coefficient keys (strings or Feature/TSFM instances) to Xc columns.
+
+        Supported key forms:
+        - exact column names in Xc
+        - 'const' / 'intercept' aliases for intercept
+        - canonical TSFM names without MM/QQ prefixes (e.g., 'GDP_DF2_L1')
+        - Feature/TSFM objects from self.specs (uses their output_names)
+        """
+        from .feature import Feature  # local import to avoid cycles
+        # Start with zeros for all columns
+        params = pd.Series(0.0, index=Xc.columns, dtype=float)
+
+        # Helper to canonicalize a TSFM-style name by removing MM/QQ in the first token after var
+        def canonicalize(name: str) -> str:
+            try:
+                parts = name.split('_')
+                if len(parts) < 2:
+                    return name
+                var, fn = parts[0], parts[1]
+                if fn.startswith('MM') or fn.startswith('QQ'):
+                    fn = fn[2:]
+                return '_'.join([var, fn] + parts[2:])
+            except Exception:
+                return name
+
+        # Build maps for resolution
+        # 1) Column canonical map
+        col_by_canonical = {}
+        for col in Xc.columns:
+            col_by_canonical[canonicalize(col)] = col
+
+        # 2) Spec object/name to columns map
+        def _flatten(items):
+            for it in items:
+                if isinstance(it, list):
+                    yield from _flatten(it)
+                else:
+                    yield it
+        specobj_to_cols = {}
+        specname_to_cols = {}
+        for spec in _flatten(self.specs or []):
+            if isinstance(spec, Feature):
+                names = getattr(spec, 'output_names', None) or []
+                names = [n for n in names if n in Xc.columns]
+                if names:
+                    specobj_to_cols[spec] = names
+                    specname_to_cols[getattr(spec, 'name', '')] = names
+
+        # Normalize input mapping to an iterable of (key, value)
+        raw = self._fixed_params_raw
+        if isinstance(raw, pd.Series):
+            items = list(raw.items())
+        elif isinstance(raw, dict):
+            items = list(raw.items())
+        else:
+            raise TypeError("fixed_params must be a dict or pandas Series")
+
+        for key, value in items:
+            # Intercept handling
+            if isinstance(key, str) and key.strip().lower() in {'const', 'intercept'}:
+                if 'const' in Xc.columns:
+                    params['const'] = float(value)
+                continue
+
+            # Exact column match
+            if isinstance(key, str) and key in Xc.columns:
+                params[key] = float(value)
+                continue
+
+            # Feature object mapping (TSFM/Interaction/DumVar)
+            if hasattr(key, 'output_names') and key in specobj_to_cols:
+                for col in specobj_to_cols[key]:
+                    params[col] = float(value)
+                continue
+
+            # Spec name mapping
+            if isinstance(key, str) and key in specname_to_cols:
+                for col in specname_to_cols[key]:
+                    params[col] = float(value)
+                continue
+
+            # Canonical string mapping (strip MM/QQ in transform token)
+            if isinstance(key, str):
+                canon = canonicalize(key)
+                if canon in col_by_canonical:
+                    params[col_by_canonical[canon]] = float(value)
+                    continue
+
+            # If nothing matched and key is also in params index, set directly (last resort)
+            if isinstance(key, str) and key in params.index:
+                params[key] = float(value)
+
+        return params

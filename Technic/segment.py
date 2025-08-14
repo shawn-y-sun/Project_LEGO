@@ -9,7 +9,7 @@ from typing import Type, Dict, List, Optional, Any, Union, Callable, Tuple, Set
 from pathlib import Path
 
 from .cm import CM
-from .model import ModelBase, OLS
+from .model import ModelBase, OLS, FixedOLS
 from .template import ExportTemplateBase
 from .report import ReportSet
 from .search import ModelSearch
@@ -771,6 +771,67 @@ class Segment:
         # Print final success message
         print(f"\nExport completed successfully for segment '{self.segment_id}'!")
         print(f"Results have been saved to: {output_dir}")
+
+    def add_benchmark_cm(
+        self,
+        cm_id: str,
+        specs: Any,
+        fixed_params: Union[Dict[str, float], pd.Series],
+        sample: str = 'both',
+        coef_map_mode: str = 'auto'
+    ) -> CM:
+        """
+        Add a benchmark CM with fixed, pre-trained coefficients.
+
+        This constructs a `CM` whose underlying model is `FixedOLS`, so the model
+        will not estimate coefficients—it computes fitted/predicted values directly
+        from the supplied `fixed_params`.
+
+        Coefficient mapping convenience:
+        - Users may specify keys using any of the following forms:
+          * exact feature column names (e.g., 'GDP_QQDF2_L1')
+          * TSFM instances used in specs
+          * canonical names without MM/QQ prefixes (e.g., 'GDP_DF2_L1')
+          * raw MEV names or internal variables
+        - Mapping resolution is handled automatically when building the model.
+
+        Parameters
+        ----------
+        cm_id : str
+            Unique identifier for this candidate model.
+        specs : Any
+            Feature specifications passed to DataManager for building drivers.
+        fixed_params : dict or Series
+            Mapping from feature identifier to coefficient. Include 'const' for intercept
+            (assumed 0.0 if omitted). Names can be flexible as described above.
+        sample : {'in','full','both'}, default 'both'
+            Which sample(s) to construct.
+        coef_map_mode : {'auto'}, optional
+            Reserved for future mapping strategies; currently only 'auto'.
+
+        Returns
+        -------
+        CM
+            The constructed benchmark CM instance (also stored in `self.cms`).
+        """
+        cm = CM(
+            model_id=cm_id,
+            target=self.target,
+            model_type=self.model_type,
+            target_base=self.target_base,
+            target_exposure=self.target_exposure,
+            data_manager=self.dm,
+            model_cls=FixedOLS,
+            scen_cls=self.scen_cls,
+            qtr_method=self.qtr_method,
+        )
+        cm.build(
+            specs=specs,
+            sample=sample,
+            model_kwargs={'fixed_params': pd.Series(fixed_params, dtype=float)}
+        )
+        self.cms[cm_id] = cm
+        return cm
 
     def clear_cms(self) -> None:
         """
