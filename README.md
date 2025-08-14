@@ -30,35 +30,24 @@ While OLS is the primary model today, the framework is designed to be model‑ag
 
 -
 ```mermaid
-flowchart TB
-    %% Top node
-    T["Exhaustive Search &\nSelection"]:::step
+flowchart LR
+    %% Nodes declared left-to-right
+    DL["Data Loading &\nPreprocessing"]:::step
+    EDA["Exploratory Analysis &\nDriver Selection"]:::step
+    SRCH["Exhaustive Search &\nSelection"]:::step
+    EVAL["Model Evaluation &\nValidation"]:::step
+    DOC["Presentation &\nDocumentation"]:::step
+    FT["Fine‑Tuning &\nEnhancement"]:::step
 
-    %% Middle row (left-right)
-    subgraph ROW_MIDDLE[ ]
-      direction LR
-      L["Exploratory Analysis &\nDriver Selection"]:::step
-      R["Model Evaluation &\nValidation"]:::step
-    end
+    %% Solid linear path only for entry and exit
+    DL --> EDA
+    EVAL --> DOC
 
-    %% Bottom node
-    B["Fine‑Tuning &\nEnhancement"]:::step
-
-    %% Linear entry/exit
-    DL["Data Loading &\nPreprocessing"]:::step --> L
-    R --> DOC["Presentation &\nDocumentation"]:::step
-
-    %% Dashed loop
-    T -.-> R
-    R -.-> B
-    B -.-> L
-    L -.-> T
-
-    %% Styling approximating the reference
-    linkStyle 2 stroke:#9aa0a6,stroke-width:1.2px,stroke-dasharray:8 5
-    linkStyle 3 stroke:#9aa0a6,stroke-width:1.2px,stroke-dasharray:8 5
-    linkStyle 4 stroke:#9aa0a6,stroke-width:1.2px,stroke-dasharray:8 5
-    linkStyle 5 stroke:#9aa0a6,stroke-width:1.2px,stroke-dasharray:8 5
+    %% Dashed iterative loop
+    EDA -.-> SRCH
+    SRCH -.-> EVAL
+    EVAL -.-> FT
+    FT -.-> EDA
 
     classDef step fill:#f8fafc,stroke:#cbd5e1,color:#1f2937,rx:14,ry:14
 ```
