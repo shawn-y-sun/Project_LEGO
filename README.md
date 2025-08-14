@@ -28,30 +28,6 @@ While OLS is the primary model today, the framework is designed to be model‑ag
 
 ## 🔄 The LEGO Six‑Step Workflow
 
--
-```mermaid
-flowchart LR
-    %% Nodes declared left-to-right
-    DL["Data Loading &\nPreprocessing"]:::step
-    EDA["Exploratory Analysis &\nDriver Selection"]:::step
-    SRCH["Exhaustive Search &\nSelection"]:::step
-    EVAL["Model Evaluation &\nValidation"]:::step
-    DOC["Presentation &\nDocumentation"]:::step
-    FT["Fine‑Tuning &\nEnhancement"]:::step
-
-    %% Solid linear path only for entry and exit
-    DL --> EDA
-    EVAL --> DOC
-
-    %% Dashed iterative loop
-    EDA -.-> SRCH
-    SRCH -.-> EVAL
-    EVAL -.-> FT
-    FT -.-> EDA
-
-    classDef step fill:#f8fafc,stroke:#cbd5e1,color:#1f2937,rx:14,ry:14
-```
-
 - **1) Data Preprocessing**: Clean/construct internal data, then load with `PPNRInternalLoader` (or panel `PanelLoader`). Load historical MEVs and scenario MEVs with `MEVLoader`.
 - **2) EDA & Driver Selection**: Create exploratory plots and correlation tables with `Segment.explore_vars()`. Engineer features via `DataManager.apply_to_all()` and update variable mapping with `DataManager.update_var_map()`.
 - **3) Exhaustive Search**: Generate driver pools using raw names, `TSFM`, `CondVar`, `DumVar('*')`, etc., and run `Segment.search_cms()` with optional sign expectations and test criteria.
