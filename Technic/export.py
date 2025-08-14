@@ -18,13 +18,31 @@ from typing import Dict, List, Any, Optional, Set, Type
 import pandas as pd
 from pathlib import Path
 import numpy as np
+import logging
+
+# Module logger
+logger = logging.getLogger(__name__)
+
+# Shared column schemas
+TIMESERIES_COLUMNS = ['date', 'model', 'series_type', 'value_type', 'value']
+STATICSTATS_COLUMNS = ['category', 'model', 'type', 'value_type', 'value']
+SCENARIO_COLUMNS = ['model', 'scenario_name', 'severity', 'date', 'frequency', 'value_type', 'value']
+TEST_RESULTS_COLUMNS = ['model', 'test', 'index', 'metric', 'value']
+SENSITIVITY_COLUMNS = ['model', 'test', 'scenario_name', 'severity', 'variable/parameter', 'shock', 'date', 'frequency', 'value_type', 'value']
+
+# Series type constants
+SERIES_TYPE_TARGET = 'Target'
+SERIES_TYPE_BASE = 'Base'
+SERIES_TYPE_RESIDUAL = 'Residual'
+SERIES_TYPE_IV = 'Independent Variable'
 
 # Define available export content types as constants
 EXPORT_CONTENT_TYPES = {
     'timeseries_data': 'Combined modeling dataset and fit results',
     'staticStats': 'Model statistics and metrics',
     'scenario_testing': 'Scenario testing results',
-    'test_results': 'Comprehensive test results from all tests'
+    'test_results': 'Comprehensive test results from all tests',
+    'sensitivity_testing': 'Sensitivity testing results for parameters and inputs'
 }
 
 class ExportableModel(ABC):
@@ -54,6 +72,11 @@ class ExportableModel(ABC):
     def get_test_results(self) -> Optional[pd.DataFrame]:
         """Return comprehensive test results if available."""
         pass
+    
+    @abstractmethod
+    def get_sensitivity_results(self) -> Optional[pd.DataFrame]:
+        """Return sensitivity testing results if available."""
+        pass
 
 class ModelExportAdapter:
     """Adapter class to make existing models compatible with ExportableModel interface."""
@@ -75,7 +98,7 @@ class ExportStrategy(ABC):
         Args:
             format_handler: Handler for the output format
             content_types: Set of content types to export. If None, exports all content.
-                         Valid types are: 'timeseries_data', 'staticStats', 'scenario_testing', 'test_results'
+                         Valid types are: 'timeseries_data', 'staticStats', 'scenario_testing', 'test_results', 'sensitivity_testing'
         """
         self.format_handler = format_handler
         self.content_types = content_types or set(EXPORT_CONTENT_TYPES.keys())
@@ -122,8 +145,8 @@ class ExportFormatHandler(ABC):
     """Abstract base class for handling different export formats."""
     
     @abstractmethod
-    def save_dataframe(self, df: pd.DataFrame, filepath: Path) -> None:
-        """Save DataFrame in specific format."""
+    def save_dataframe(self, df: pd.DataFrame, filepath: Path, mode: str = 'w', header: bool = True) -> None:
+        """Save DataFrame in specific format with append support."""
         pass
     
     @abstractmethod
@@ -134,8 +157,8 @@ class ExportFormatHandler(ABC):
 class CSVFormatHandler(ExportFormatHandler):
     """Handler for CSV format exports."""
     
-    def save_dataframe(self, df: pd.DataFrame, filepath: Path) -> None:
-        df.to_csv(filepath, index=False)
+    def save_dataframe(self, df: pd.DataFrame, filepath: Path, mode: str = 'w', header: bool = True) -> None:
+        df.to_csv(filepath, mode=mode, header=header, index=False)
     
     def save_dict(self, data: Dict[str, Any], filepath: Path) -> None:
         pd.DataFrame([data]).to_csv(filepath, index=False)
@@ -159,10 +182,40 @@ class ExportManager:
         
         # Process each model
         for model in models:
-            self.strategy.export_timeseries_data(model, output_dir)
-            self.strategy.export_statistics(model, output_dir)
-            self.strategy.export_scenarios(model, output_dir)
-            self.strategy.export_test_results(model, output_dir)
+            try:
+                if self.strategy.should_export('timeseries_data'):
+                    try:
+                        self.strategy.export_timeseries_data(model, output_dir)
+                    except Exception as e:
+                        print(f"Warning: Failed to export timeseries_data for {model.get_model_id()}: {e}")
+                
+                if self.strategy.should_export('staticStats'):
+                    try:
+                        self.strategy.export_statistics(model, output_dir)
+                    except Exception as e:
+                        print(f"Warning: Failed to export staticStats for {model.get_model_id()}: {e}")
+                
+                if self.strategy.should_export('scenario_testing'):
+                    try:
+                        self.strategy.export_scenarios(model, output_dir)
+                    except Exception as e:
+                        print(f"Warning: Failed to export scenario_testing for {model.get_model_id()}: {e}")
+                
+                if self.strategy.should_export('test_results'):
+                    try:
+                        self.strategy.export_test_results(model, output_dir)
+                    except Exception as e:
+                        print(f"Warning: Failed to export test_results for {model.get_model_id()}: {e}")
+                
+                if self.strategy.should_export('sensitivity_testing'):
+                    try:
+                        self.strategy.export_sensitivity_results(model, output_dir)
+                    except Exception as e:
+                        print(f"Warning: Failed to export sensitivity_testing for {model.get_model_id()}: {e}")
+                        
+            except Exception as e:
+                print(f"Error: Failed to process model {model.get_model_id()}: {e}")
+                continue
         
         # Save consolidated results
         self.strategy.save_consolidated_results(output_dir)
@@ -194,37 +247,51 @@ class OLSExportStrategy(ExportStrategy):
         self._statistics_chunks = []
         self._scenario_chunks = []
         self._test_results_chunks = []
-        self._current_chunk_size = 0
+        self._sensitivity_chunks = []  # New container for sensitivity results
+        # Per-content chunk counters
+        self._chunk_sizes = {
+            'timeseries_data': 0,
+            'staticStats': 0,
+            'scenario_testing': 0,
+            'test_results': 0,
+            'sensitivity_testing': 0,
+        }
         self._written_files = set()  # Track which files have been written
     
-    def _write_chunk(self, output_dir: Path, content_type: str):
+    def _write_chunk(self, output_dir: Path, content_type: str, force_write: bool = False):
         """Write a chunk of data to disk with proper file handling and user feedback.
         
         Args:
             output_dir: Directory to write the file to
             content_type: Type of content being written ('timeseries_data', 'staticStats', etc.)
+            force_write: If True, forces writing regardless of chunk size
         """
         # Configuration for different content types
         content_config = {
             'timeseries_data': {
                 'chunks': self._timeseries_chunks,
-                'columns': ['date', 'model', 'value_type', 'value'],
+                'columns': TIMESERIES_COLUMNS,
                 'filename': 'timeseries_data.csv'
             },
             'staticStats': {
                 'chunks': self._statistics_chunks,
-                'columns': ['category', 'model', 'type', 'value_type', 'value'],
+                'columns': STATICSTATS_COLUMNS,
                 'filename': 'staticStats.csv'
             },
             'scenario_testing': {
                 'chunks': self._scenario_chunks,
-                'columns': ['date', 'model', 'scenario', 'severity', 'value'],
+                'columns': SCENARIO_COLUMNS,
                 'filename': 'scenario_testing.csv'
             },
             'test_results': {
                 'chunks': self._test_results_chunks,
-                'columns': ['model', 'test_name', 'test_category', 'metric', 'value'],
+                'columns': TEST_RESULTS_COLUMNS,
                 'filename': 'test_results.csv'
+            },
+            'sensitivity_testing': {
+                'chunks': self._sensitivity_chunks,
+                'columns': SENSITIVITY_COLUMNS,
+                'filename': 'sensitivity_testing.csv'
             }
         }
         
@@ -236,62 +303,68 @@ class OLSExportStrategy(ExportStrategy):
         columns = config['columns']
         filepath = output_dir / config['filename']
         
-        # Skip if we've already written this file
-        if filepath in self._written_files:
-            chunks.clear()
-            self._current_chunk_size = 0
-            return
-        
         # Combine chunks and ensure column order
         df = pd.concat(chunks, copy=False)
         df = df[columns]
         
-        # Handle file overwrite
+        # Determine write mode based on file existence
         file_exists = filepath.exists()
-        should_write = True
+        write_mode = 'a' if file_exists else 'w'
+        write_header = not file_exists
         
-        if file_exists:
-            response = input(f"\nFile {filepath} already exists. Do you want to overwrite it? (y/n): ").lower()
-            should_write = response == 'y'
-        
-        if should_write:
-            try:
-                # Remove existing file for clean overwrite
-                if file_exists:
-                    filepath.unlink()
-                
-                # Write data
-                df.to_csv(filepath, index=False)
-                
-                # Print success message
-                action = "Updated" if file_exists else "Added"
-                print(f"\n✓ Successfully {action} {content_type} to {filepath}")
-                
-                # Mark this file as written
+        try:
+            # Write data (append if file exists, otherwise create new)
+            # Delegate to format handler for flexibility and control of mode/header
+            self.format_handler.save_dataframe(df, filepath, mode=write_mode, header=write_header)
+            
+            # Log appropriate success message only for new files or force_write
+            if force_write or not file_exists:
+                action = "updated" if file_exists else "wrote"
+                logger.info("Successfully %s %s file: %s", action, content_type, filepath)
                 self._written_files.add(filepath)
-                
-            except Exception as e:
-                print(f"\n✗ Failed to write {content_type} to {filepath}: {str(e)}")
+        except Exception as e:
+            logger.exception("Failed to write %s file to %s: %s", content_type, filepath, e)
         
-        # Clear the chunks
+        # Clear the chunks and reset per-content chunk size
         chunks.clear()
-        self._current_chunk_size = 0
+        self._chunk_sizes[content_type] = 0
     
-    def export_test_results(self, model: ExportableModel, output_dir: Path) -> None:
-        """Export comprehensive test results with chunking support."""
-        if not self.should_export('test_results'):
-            print("check0")
+    def export_sensitivity_results(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export sensitivity testing results with chunking support.
+        
+        Args:
+            model: ExportableModel instance
+            output_dir: Directory to save the results
+        """
+        if not self.should_export('sensitivity_testing'):
             return
         
-        print("check1")
+        # Get sensitivity results
+        df = model.get_sensitivity_results()
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            self._sensitivity_chunks.append(df)
+            self._chunk_sizes['sensitivity_testing'] += len(df)
+            if self._chunk_sizes['sensitivity_testing'] >= self.chunk_size:
+                self._write_chunk(output_dir, 'sensitivity_testing')
+    
+    def export_test_results(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export comprehensive test results with chunking support.
+        
+        Exports test results in long format with columns:
+        - model: Model identifier
+        - test: Descriptive test name (e.g., 'Residual Autocorrelation')
+        - index: Variable name or specific test name (e.g., 'Durbin-Watson')
+        - metric: Test metric type (e.g., 'Statistic', 'P-value', 'Passed')
+        - value: Numerical value
+        """
+        if not self.should_export('test_results'):
+            return
+        
         df = model.get_test_results()
-        print("check2")
-        print(df)
         if isinstance(df, pd.DataFrame) and not df.empty:
             self._test_results_chunks.append(df)
-            self._current_chunk_size += len(df)
-            
-            if self._current_chunk_size >= self.chunk_size:
+            self._chunk_sizes['test_results'] += len(df)
+            if self._chunk_sizes['test_results'] >= self.chunk_size:
                 self._write_chunk(output_dir, 'test_results')
     
     def export_timeseries_data(self, model: ExportableModel, output_dir: Path) -> None:
@@ -301,9 +374,8 @@ class OLSExportStrategy(ExportStrategy):
         df = model.get_timeseries_data()
         if isinstance(df, pd.DataFrame) and not df.empty:
             self._timeseries_chunks.append(df)
-            self._current_chunk_size += len(df)
-            
-            if self._current_chunk_size >= self.chunk_size:
+            self._chunk_sizes['timeseries_data'] += len(df)
+            if self._chunk_sizes['timeseries_data'] >= self.chunk_size:
                 self._write_chunk(output_dir, 'timeseries_data')
     
     def export_statistics(self, model: ExportableModel, output_dir: Path) -> None:
@@ -314,113 +386,77 @@ class OLSExportStrategy(ExportStrategy):
         df = model.get_model_statistics()
         if isinstance(df, pd.DataFrame) and not df.empty:
             self._statistics_chunks.append(df)
-            self._current_chunk_size += len(df)
-            
-            if self._current_chunk_size >= self.chunk_size:
+            self._chunk_sizes['staticStats'] += len(df)
+            if self._chunk_sizes['staticStats'] >= self.chunk_size:
                 self._write_chunk(output_dir, 'staticStats')
     
     def export_scenarios(self, model: ExportableModel, output_dir: Path) -> None:
-        """Export scenario results with chunking support and enhanced formatting.
+        """Export scenario results with chunking support.
         
         The output will include:
-        - Historical data (Actual values)
-        - Scenario forecasts with severity levels
+        - Target variable forecasts (monthly frequency only)
+        - Base variable forecasts (monthly and quarterly frequencies, if available)
+        - All data in datetime format
         
         Output format:
-        - date: End of period date (Monthly: YYYY-MM-DD, Quarterly: YYYYQN)
         - model: Model identifier
-        - scenario: Scenario name or 'Actual (Historical)'
-        - severity: Severity level or 'Actual (Historical)'
-        - value: The actual/forecasted value
+        - scenario_name: Scenario set name (e.g., 'EWST_2024')
+        - severity: Severity level (e.g., 'base', 'adv', 'sev')
+        - date: End of period date in datetime format
+        - frequency: 'monthly' or 'quarterly'
+        - value_type: 'Target' or 'Base'
+        - value: The forecasted value
         """
         if not self.should_export('scenario_testing'):
             return
         
         # Get scenario results
         df = model.get_scenario_results()
-        if not isinstance(df, pd.DataFrame) or df.empty:
-            return
-            
-        # Get historical data
-        historical_data = model.get_timeseries_data()
-        if isinstance(historical_data, pd.DataFrame) and not historical_data.empty:
-            # Filter for actual values only
-            historical = historical_data[
-                (historical_data['value_type'] == 'Actual')
-            ].copy()
-            
-            # Format dates
-            dates = pd.to_datetime(historical['date'])
-            freq = pd.infer_freq(dates)
-            
-            if freq and 'Q' in freq:
-                # Quarterly data: format as YYYYQN
-                formatted_dates = dates.map(lambda x: f"{x.year}Q{x.quarter}")
-            else:
-                # Monthly or other: keep as period end date
-                formatted_dates = dates.map(lambda x: x.strftime('%Y-%m-%d'))
-            
-            # Prepare historical data in scenario format
-            historical = pd.DataFrame({
-                'date': formatted_dates,
-                'model': historical['model'],
-                'scenario': 'Actual (Historical)',
-                'severity': 'Actual (Historical)',
-                'value': historical['value']
-            })
-            
-            # Add to scenario chunks
-            self._scenario_chunks.append(historical)
-        
-        # Process scenario data
-        if not df.empty:
-            # Extract severity from scenario name (assuming format: scenarioset_severity)
-            df[['scenario', 'severity']] = df['scenario_name'].str.split('_', n=1, expand=True)
-            
-            # Format dates
-            dates = pd.to_datetime(df['date'])
-            freq = pd.infer_freq(dates)
-            
-            if freq and 'Q' in freq:
-                # Quarterly data: format as YYYYQN
-                formatted_dates = dates.map(lambda x: f"{x.year}Q{x.quarter}")
-            else:
-                # Monthly or other: keep as period end date
-                formatted_dates = dates.map(lambda x: x.strftime('%Y-%m-%d'))
-            
-            # Update date column with formatted dates
-            df['date'] = formatted_dates
-            
-            # Select and reorder columns
-            df = df[['date', 'model', 'scenario', 'severity', 'value']]
-            
+        if isinstance(df, pd.DataFrame) and not df.empty:
             self._scenario_chunks.append(df)
-            self._current_chunk_size += len(df)
-            
-            if self._current_chunk_size >= self.chunk_size:
+            self._chunk_sizes['scenario_testing'] += len(df)
+            if self._chunk_sizes['scenario_testing'] >= self.chunk_size:
                 self._write_chunk(output_dir, 'scenario_testing')
     
     def save_consolidated_results(self, output_dir: Path) -> None:
         """Save any remaining data chunks to files."""
-        # Write any remaining chunks
+        # Write any remaining chunks with force_write=True to ensure final consolidation
         if self.should_export('timeseries_data'):
-            self._write_chunk(output_dir, 'timeseries_data')
+            self._write_chunk(output_dir, 'timeseries_data', force_write=True)
         
         if self.should_export('staticStats'):
-            self._write_chunk(output_dir, 'staticStats')
+            self._write_chunk(output_dir, 'staticStats', force_write=True)
         
         if self.should_export('scenario_testing'):
-            self._write_chunk(output_dir, 'scenario_testing')
+            self._write_chunk(output_dir, 'scenario_testing', force_write=True)
         
         if self.should_export('test_results'):
-            self._write_chunk(output_dir, 'test_results')
+            self._write_chunk(output_dir, 'test_results', force_write=True)
         
+        if self.should_export('sensitivity_testing'):  # Add sensitivity testing export
+            self._write_chunk(output_dir, 'sensitivity_testing', force_write=True)
         
         # Reset containers
         self._initialize_containers()
 
 class OLSModelAdapter(ExportableModel):
-    """Adapter for OLS models with optimized performance."""
+    """Adapter for OLS models with optimized performance.
+    
+    This adapter follows the same test data access patterns as the report module
+    (specifically ModelReportBase.show_test_tbl()) but converts the raw test results
+    into structured export format compatible with OLSExportStrategy.
+    
+    Key Knowledge Transfer from Report Module:
+    - Test retrieval: Uses exact same pattern as ModelReportBase.show_test_tbl()
+    - Data access: Direct access to model.testset.all_test_results
+    - Iteration: Same for test_name, result in results.items() loop
+    - DataFrame handling: Processes same DataFrame structures from test classes
+    
+    Key Export Enhancement:
+    - Three-layer structure: Converts raw test DataFrames to normalized format
+    - CSV compatibility: Structured data suitable for export and analysis
+    - Automated extraction: Handles threshold/observed/pass extraction automatically
+    """
     
     def __init__(self, model, model_id: str):
         """Initialize adapter with an OLS model instance.
@@ -442,84 +478,81 @@ class OLSModelAdapter(ExportableModel):
         Returns a DataFrame with columns:
         - date: Time index
         - model: Model identifier
+        - series_type: One of ['Target','Base','Residual','Independent Variable']
         - value_type: Sample identifier or variable name
             - 'In-Sample': For in-sample predictions
             - 'Out-of-Sample': For out-of-sample predictions
             - 'Actual': For actual target values
             - 'Residual': For residuals
             - driver names: For feature/driver values
+            - For Base series_type, value_type mimics Target: 'Actual', 'In-Sample', 'Out-of-Sample' (if available)
         - value: The actual value
         """
-        # Pre-calculate common values
         model_id = self._model_id
-        data_list = []
-        
-        # Combine target data efficiently
-        target_data_full = pd.concat([self.model.y_in, self.model.y_out])
-        target_data_full = target_data_full.sort_index()
-        
-        # Prepare base dictionaries for efficiency
-        base_dict = {
-            'model': model_id,
-            'date': target_data_full.index,
-            'value': target_data_full.values,
-            'value_type': 'Actual'
-        }
-        
-        # Add actual values
-        data_list.append(pd.DataFrame(base_dict))
-        
-        # Add in-sample predictions
+        blocks: List[pd.DataFrame] = []
+ 
+        # Target - Actual
+        target_data_full = pd.concat([self.model.y_in, self.model.y_out]).sort_index()
+        blocks.append(self._build_ts_block(target_data_full.index, model_id, SERIES_TYPE_TARGET, 'Actual', target_data_full.values))
+ 
+        # Target - In-Sample / Out-of-Sample
         predicted_in = self.model.y_fitted_in
-        data_list.append(pd.DataFrame({
-            'date': predicted_in.index,
-            'model': model_id,
-            'value_type': 'In-Sample',
-            'value': predicted_in.values
-        }))
-        
-        # Process features (in-sample) efficiently
-        feature_data_in = self.model.X_in
-        for col in feature_data_in.columns:
-            data_list.append(pd.DataFrame({
-                'date': feature_data_in.index,
-                'model': model_id,
-                'value_type': col,
-                'value': feature_data_in[col].values
-            }))
-        
-        # Process out-of-sample data if available
+        blocks.append(self._build_ts_block(predicted_in.index, model_id, SERIES_TYPE_TARGET, 'In-Sample', predicted_in.values))
+ 
         if not self.model.X_out.empty:
             predicted_out = self.model.y_pred_out
+            blocks.append(self._build_ts_block(predicted_out.index, model_id, SERIES_TYPE_TARGET, 'Out-of-Sample', predicted_out.values))
+ 
+        # Features (Independent Variables) — vectorized for efficiency
+        feature_data_in = self.model.X_in
+        if not feature_data_in.empty:
+            stacked_in = feature_data_in.stack().reset_index()
+            stacked_in.columns = ['date', 'value_type', 'value']
+            stacked_in['model'] = model_id
+            stacked_in['series_type'] = SERIES_TYPE_IV
+            # Reorder columns to schema
+            stacked_in = stacked_in[['date', 'model', 'series_type', 'value_type', 'value']]
+            blocks.append(stacked_in)
+ 
+        if not self.model.X_out.empty:
             feature_data_out = self.model.X_out
-            
-            # Add out-of-sample predictions
-            data_list.append(pd.DataFrame({
-                'date': predicted_out.index,
-                'model': model_id,
-                'value_type': 'Out-of-Sample',
-                'value': predicted_out.values
-            }))
-            
-            # Process out-of-sample features
-            for col in feature_data_out.columns:
-                data_list.append(pd.DataFrame({
-                    'date': feature_data_out.index,
-                    'model': model_id,
-                    'value_type': col,
-                    'value': feature_data_out[col].values
-                }))
-        
-        # Add residuals
-        data_list.append(pd.DataFrame({
-            'date': self.model.resid.index,
-            'model': model_id,
-            'value_type': 'Residual',
-            'value': self.model.resid.values
-        }))
-        
-        # Combine all data efficiently
-        return pd.concat(data_list, ignore_index=True, copy=False)
+            stacked_out = feature_data_out.stack().reset_index()
+            stacked_out.columns = ['date', 'value_type', 'value']
+            stacked_out['model'] = model_id
+            stacked_out['series_type'] = SERIES_TYPE_IV
+            stacked_out = stacked_out[['date', 'model', 'series_type', 'value_type', 'value']]
+            blocks.append(stacked_out)
+ 
+        # Residuals
+        blocks.append(self._build_ts_block(self.model.resid.index, model_id, SERIES_TYPE_RESIDUAL, 'Residual', self.model.resid.values))
+ 
+        # Base variable series if available
+        y_base_full = getattr(self.model, 'y_base_full', None)
+        if y_base_full is not None and not y_base_full.empty:
+            blocks.append(self._build_ts_block(y_base_full.index, model_id, SERIES_TYPE_BASE, 'Actual', y_base_full.values))
+        y_base_fitted_in = getattr(self.model, 'y_base_fitted_in', None)
+        if y_base_fitted_in is not None and not y_base_fitted_in.empty:
+            blocks.append(self._build_ts_block(y_base_fitted_in.index, model_id, SERIES_TYPE_BASE, 'In-Sample', y_base_fitted_in.values))
+        y_base_pred_out = getattr(self.model, 'y_base_pred_out', None)
+        if y_base_pred_out is not None and not y_base_pred_out.empty:
+            blocks.append(self._build_ts_block(y_base_pred_out.index, model_id, SERIES_TYPE_BASE, 'Out-of-Sample', y_base_pred_out.values))
+
+        # Base residuals (computed if actuals exist)
+        if y_base_full is not None and not y_base_full.empty:
+            # In-sample residuals for Base: Actual - Fitted_IS
+            if y_base_fitted_in is not None and not y_base_fitted_in.empty:
+                aligned_actual_in = y_base_full.reindex(y_base_fitted_in.index)
+                base_resid_in = (aligned_actual_in - y_base_fitted_in).dropna()
+                if not base_resid_in.empty:
+                    blocks.append(self._build_ts_block(base_resid_in.index, model_id, SERIES_TYPE_BASE, 'Residual', base_resid_in.values))
+            # Out-of-sample residuals for Base: Actual - Pred_OOS (if overlapping actuals exist)
+            if y_base_pred_out is not None and not y_base_pred_out.empty:
+                aligned_actual_out = y_base_full.reindex(y_base_pred_out.index)
+                base_resid_out = (aligned_actual_out - y_base_pred_out).dropna()
+                if not base_resid_out.empty:
+                    blocks.append(self._build_ts_block(base_resid_out.index, model_id, SERIES_TYPE_BASE, 'Residual', base_resid_out.values))
+ 
+        return pd.concat(blocks, ignore_index=True, copy=False)
     
     def get_model_statistics(self) -> pd.DataFrame:
         """Return model statistics and metrics with optimized performance.
@@ -538,7 +571,7 @@ class OLSModelAdapter(ExportableModel):
         base_dict = {
             'model': model_id,
             'category': 'Goodness of Fit',
-            'type': 'Model Overall'  # Changed from 'Overall' to 'Model Overall' for clarity
+            'type': 'Model Overall'
         }
         
         # Add overall statistics efficiently
@@ -556,17 +589,6 @@ class OLSModelAdapter(ExportableModel):
         if hasattr(self.model, 'dw_stat'):
             overall_stats['DW statistic'] = self.model.dw_stat
         
-        # Add covariance type
-        cov_type = getattr(self.model, 'cov_type', 'non-robust')
-        # Map internal cov_type names to more descriptive ones
-        cov_type_mapping = {
-            'nonrobust': 'non-robust',
-            'HC1': 'HC1',
-            'HAC': 'HAC'
-        }
-        cov_type = cov_type_mapping.get(cov_type, cov_type)
-        overall_stats['Covariance Type'] = cov_type
-        
         # Extend stats_list efficiently
         stats_list.extend([
             {**base_dict, 'value_type': name, 'value': value}
@@ -578,35 +600,67 @@ class OLSModelAdapter(ExportableModel):
         if hasattr(self.model, 'testset') and self.model.testset is not None:
             test_dict = {t.name: t for t in self.model.testset.tests}
             
-            # Process in-sample error measures
+            def append_error_measures(df_like: Any, sample_label: str):
+                if isinstance(df_like, pd.DataFrame):
+                    # Expect index='Metric' and a single 'Value' column
+                    value_col = 'Value' if 'Value' in df_like.columns else None
+                    if value_col is not None:
+                        for metric_name, row in df_like.iterrows():
+                            metric_value = row.get(value_col)
+                            if pd.notnull(metric_value):
+                                stats_list.append({
+                        'category': 'Goodness of Fit',
+                        'model': model_id,
+                                    'type': sample_label,
+                                    'value_type': str(metric_name),
+                                    'value': float(metric_value)
+                                })
+                elif isinstance(df_like, pd.Series):
+                    # Series keyed by metric name
+                    for metric_name, metric_value in df_like.items():
+                        if pd.notnull(metric_value):
+                            stats_list.append({
+                        'category': 'Goodness of Fit',
+                        'model': model_id,
+                                'type': sample_label,
+                                'value_type': str(metric_name),
+                                'value': float(metric_value)
+                            })
+                elif isinstance(df_like, dict):
+                    for metric_name, metric_value in df_like.items():
+                        if pd.notnull(metric_value):
+                            stats_list.append({
+                                'category': 'Goodness of Fit',
+                                'model': model_id,
+                                'type': sample_label,
+                                'value_type': str(metric_name),
+                                'value': float(metric_value)
+                            })
+            
+            # Prefer explicit IS/OOS error measure tests if available
             if 'IS Error Measures' in test_dict:
                 is_errors = test_dict['IS Error Measures'].test_result
-                stats_list.extend([
-                    {
-                        'category': 'Goodness of Fit',
-                        'model': model_id,
-                        'type': 'In-Sample',
-                        'value_type': metric,
-                        'value': value
-                    }
-                    for metric, value in is_errors.items()
-                    if value is not None
-                ])
-            
-            # Process out-of-sample error measures
-            if not self.model.X_out.empty and 'OOS Error Measures' in test_dict:
+                append_error_measures(is_errors, 'In-Sample')
+             
+            if not getattr(self.model, 'X_out', pd.DataFrame()).empty and 'OOS Error Measures' in test_dict:
                 oos_errors = test_dict['OOS Error Measures'].test_result
-                stats_list.extend([
-                    {
-                        'category': 'Goodness of Fit',
-                        'model': model_id,
-                        'type': 'Out-of-Sample',
-                        'value_type': metric,
-                        'value': value
-                    }
-                    for metric, value in oos_errors.items()
-                    if value is not None
-                ])
+                append_error_measures(oos_errors, 'Out-of-Sample')
+             
+            # Fallback: scan all tests for error-measure-shaped tables if explicit names are absent
+            # This handles cases where aliases differ but structure matches
+            if 'IS Error Measures' not in test_dict or ('OOS Error Measures' not in test_dict and not getattr(self.model, 'X_out', pd.DataFrame()).empty):
+                for test in self.model.testset.tests:
+                    name_lower = str(test.name).lower()
+                    try:
+                        tr = test.test_result
+                    except Exception:
+                        continue
+                    if isinstance(tr, pd.DataFrame) and 'Value' in tr.columns and tr.index.name == 'Metric':
+                        # Heuristic: treat as error measures table
+                        sample_label = 'In-Sample'
+                        if 'oos' in name_lower or 'out' in name_lower:
+                            sample_label = 'Out-of-Sample'
+                        append_error_measures(tr, sample_label)
             
             # Process group F-test results if available
             if 'GroupTest' in test_dict:
@@ -681,119 +735,881 @@ class OLSModelAdapter(ExportableModel):
         return pd.DataFrame(stats_list)
     
     def get_scenario_results(self) -> Optional[pd.DataFrame]:
-        """Return scenario testing results with optimized performance.
+        """Return scenario testing results in long format.
         
         Returns a DataFrame with columns:
-        - model: Model identifier
-        - date: Timestamp of the forecast
-        - scenario_name: Name of the scenario
-        - value: The forecasted value
+        - model: string, model_id
+        - scenario_name: string (e.g., 'EWST_2024')
+        - severity: string (e.g., 'base', 'adv', 'sev', 'p0')
+        - date: timestamp
+        - frequency: string ['monthly'/'quarterly']
+        - value_type: string ['Target'/'Base']
+        - value: numerical
         
-        The method accesses scenario results through the model's scen_manager.y_scens property,
-        which contains nested forecast results for all scenarios.
+        The method processes both target and base variable forecasts if available:
+        - Target variable: Monthly frequency only (quarterly target forecasts deprecated)
+        - Base variable: Both monthly and quarterly frequencies
+        - Includes scen_p0 baseline data for both target and base variables
         """
         if self.model.scen_manager is None:
             return None
         
         model_id = self._model_id
-        data = {
-            'model': [],
-            'date': [],
-            'scenario_name': [],
-            'value': []
-        }
+        data_list = []
         
-        # Access scenario results through y_scens property
+        # Get target variable forecasts (monthly)
         scen_results = self.model.scen_manager.y_scens
         
-        # Process all scenario sets and their scenarios
+        # Add scen_p0 data to scenario results if available
+        if hasattr(self.model.scen_manager, 'scen_p0') and self.model.scen_manager.scen_p0 is not None:
+            scen_p0_data = self.model.scen_manager.scen_p0
+            for scen_set in scen_results.keys():
+                # Create scen_p0 entry for target variable
+                df_data = {
+                    'model': model_id,
+                    'scenario_name': scen_set,
+                    'severity': 'p0',
+                    'date': scen_p0_data.index,
+                    'value_type': 'Target',
+                    'value': scen_p0_data.values,
+                    'frequency': 'monthly'
+                }
+                data_list.append(pd.DataFrame(df_data))
+        
+        # Process target variable forecasts (monthly)
         for scen_set, scenarios in scen_results.items():
             for scen_name, forecast in scenarios.items():
                 if forecast is not None and not forecast.empty:
-                    n_points = len(forecast)
-                    data['model'].extend([model_id] * n_points)
-                    data['date'].extend(forecast.index)
-                    data['scenario_name'].extend([f"{scen_set}_{scen_name}"] * n_points)
-                    data['value'].extend(forecast.values)
+                    # Create DataFrame for target forecasts (monthly)
+                    df_data = {
+                        'model': model_id,
+                        'scenario_name': scen_set,
+                        'severity': scen_name,
+                        'date': forecast.index,
+                        'value_type': 'Target',
+                        'value': forecast.values,
+                        'frequency': 'monthly'
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+ 
+        # Add historical actuals (Target) monthly and quarterly (if applicable)
+        target_actual = getattr(self.model, 'y_full', None)
+        if target_actual is not None and not target_actual.empty:
+            # Monthly actuals per scenario set
+            for scen_set in scen_results.keys():
+                df_data = {
+                    'model': model_id,
+                    'scenario_name': scen_set,
+                    'severity': 'actual',
+                    'date': target_actual.index,
+                    'value_type': 'Target',
+                    'value': target_actual.values,
+                    'frequency': 'monthly'
+                }
+                data_list.append(pd.DataFrame(df_data))
+            # Quarterly actuals aggregated to quarter-end
+            actual_q = target_actual.copy()
+            actual_q.index = pd.to_datetime(actual_q.index)
+            actual_q = actual_q.groupby(pd.Grouper(freq='Q')).mean()
+            actual_q.index = actual_q.index.to_period('Q').to_timestamp(how='end').normalize()
+            if not actual_q.empty:
+                for scen_set in scen_results.keys():
+                    df_data = {
+                        'model': model_id,
+                        'scenario_name': scen_set,
+                        'severity': 'actual',
+                        'date': actual_q.index,
+                        'value_type': 'Target',
+                        'value': actual_q.values,
+                        'frequency': 'quarterly'
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
+        # Process target variable quarterly forecasts
+        # Target variable quarterly forecasts are no longer available (forecast_y_qtr_df deprecated)
+ 
+        # Process base variable forecasts (monthly) if available
+        if hasattr(self.model.scen_manager, 'y_base_scens'):
+            base_results = self.model.scen_manager.y_base_scens
+            
+            # Add scen_p0 base data if available
+            if hasattr(self.model, 'base_predictor') and self.model.base_predictor is not None:
+                if hasattr(self.model.scen_manager, 'scen_p0') and self.model.scen_manager.scen_p0 is not None:
+                    scen_p0_data = self.model.scen_manager.scen_p0
+                    base_p0_values = self.model.base_predictor.predict_base(scen_p0_data, scen_p0_data)
+                    
+                    for scen_set in base_results.keys():
+                        # Create scen_p0 entry for base variable
+                        df_data = {
+                            'model': model_id,
+                            'scenario_name': scen_set,
+                            'severity': 'p0',
+                            'date': base_p0_values.index,
+                            'value_type': 'Base',
+                            'value': base_p0_values.values,
+                            'frequency': 'monthly'
+                        }
+                        data_list.append(pd.DataFrame(df_data))
+            
+            for scen_set, scenarios in base_results.items():
+                for scen_name, forecast in scenarios.items():
+                    if forecast is not None and not forecast.empty:
+                        # Create DataFrame for base forecasts (monthly)
+                        df_data = {
+                            'model': model_id,
+                            'scenario_name': scen_set,
+                            'severity': scen_name,
+                            'date': forecast.index,
+                            'value_type': 'Base',
+                            'value': forecast.values,
+                            'frequency': 'monthly'
+                        }
+                        data_list.append(pd.DataFrame(df_data))
+ 
+        # Add historical actuals (Base) monthly and quarterly if base actuals exist on model
+        base_actual = getattr(self.model, 'y_base_full', None)
+        if base_actual is not None and not base_actual.empty:
+            for scen_set in scen_results.keys():
+                df_data = {
+                    'model': model_id,
+                    'scenario_name': scen_set,
+                    'severity': 'actual',
+                    'date': base_actual.index,
+                    'value_type': 'Base',
+                    'value': base_actual.values,
+                    'frequency': 'monthly'
+                }
+                data_list.append(pd.DataFrame(df_data))
+            # Quarterly aggregation
+            base_actual_q = base_actual.copy()
+            base_actual_q.index = pd.to_datetime(base_actual_q.index)
+            base_actual_q = base_actual_q.groupby(pd.Grouper(freq='Q')).mean()
+            base_actual_q.index = base_actual_q.index.to_period('Q').to_timestamp(how='end').normalize()
+            if not base_actual_q.empty:
+                for scen_set in scen_results.keys():
+                    df_data = {
+                        'model': model_id,
+                        'scenario_name': scen_set,
+                        'severity': 'actual',
+                        'date': base_actual_q.index,
+                        'value_type': 'Base',
+                        'value': base_actual_q.values,
+                        'frequency': 'quarterly'
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
+        # Process base variable quarterly forecasts
+        if hasattr(self.model.scen_manager, 'forecast_y_base_qtr_df'):
+            base_qtr_forecasts = self.model.scen_manager.forecast_y_base_qtr_df
+            for scen_set, qtr_df in base_qtr_forecasts.items():
+                if qtr_df is not None and not qtr_df.empty:
+                    # Get scenarios for this scenario set
+                    if hasattr(self.model.scen_manager, 'y_base_scens'):
+                        base_scenarios = self.model.scen_manager.y_base_scens.get(scen_set, {})
+                        for scen_name in base_scenarios.keys():
+                            # Check if this scenario has quarterly data
+                            if scen_name in qtr_df.columns or f"{scen_set}_{scen_name}" in qtr_df.columns:
+                                col_name = scen_name if scen_name in qtr_df.columns else f"{scen_set}_{scen_name}"
+                                qtr_forecast = qtr_df[col_name].dropna()
+                                
+                                if not qtr_forecast.empty:
+                                    # Create quarterly base data
+                                    df_data = {
+                                        'model': model_id,
+                                        'scenario_name': scen_set,
+                                        'severity': scen_name,
+                                        'date': qtr_forecast.index,
+                                        'value_type': 'Base',
+                                        'value': qtr_forecast.values,
+                                        'frequency': 'quarterly'
+                                    }
+                                    data_list.append(pd.DataFrame(df_data))
         
-        if not data['model']:
+        if not data_list:
             return None
             
-        return pd.DataFrame(data)
+        # Combine all data and ensure column order
+        result = pd.concat(data_list, ignore_index=True)
+        return result[['model', 'scenario_name', 'severity', 'date', 'frequency', 'value_type', 'value']]
 
     def get_test_results(self) -> Optional[pd.DataFrame]:
-        """Return test results focusing on key model diagnostics.
+        """Return test results in long format.
         
         Returns a DataFrame with columns:
-        - model: Model identifier
-        - test_name: Name of the test
-        - test_category: Category of the test
-        - metric: Name of the specific metric or result
-        - value: The actual value
+        - model: string, model_id
+        - test: string (e.g., 'Residual Autocorrelation', 'Coefficient Significance')
+        - index: string (variable name or specific test name like 'Durbin-Watson')
+        - metric: string ('Statistic', 'P-value', 'Threshold', 'Passed', etc.)
+        - value: numerical
+        
+        Excludes error measures (RMSE, MAE) and fit measures (R², etc.) from export.
+        
+        Example output:
+        - model='cm1', test='Residual Autocorrelation', index='Durbin-Watson', metric='Statistic', value=2.01
+        - model='cm1', test='Residual Autocorrelation', index='Durbin-Watson', metric='Threshold', value=1.5
+        - model='cm1', test='Residual Autocorrelation', index='Durbin-Watson', metric='Passed', value=1
         """
-        if not hasattr(self.model, 'testset') or self.model.testset is None:
-            print(f"No test results available for model {self._model_id}")
+        try:
+            # Follow the exact same pattern as ModelReportBase.show_test_tbl()
+            results = self.model.testset.all_test_results
+        except Exception:
+            return None
+        
+        if not results or len(results) == 0:
             return None
         
         model_id = self._model_id
-        results_list = []
-        
-        # Get all test results (both active and inactive) from TestSet
-        test_results = self.model.testset.all_test_results
+        all_results = []
         
         # Process each test result
-        for test_name, result in test_results.items():
-            # Handle DataFrame results
-            if isinstance(result, pd.DataFrame):
-                for col in result.columns:
-                    for idx in result.index:
-                        results_list.append({
-                            'model': model_id,
-                            'test_name': test_name,
-                            'test_category': 'Model Validation',
-                            'metric': f"{col}_{idx}",
-                            'value': result.loc[idx, col]
-                        })
+        for test_name, result_df in results.items():
+            # Skip measure category tests (FitMeasure, ErrorMeasure)
+            if any(keyword in test_name for keyword in ['Error Measures', 'Fit Measures']):
+                continue
+                
+            # Map test names to descriptive names
+            descriptive_test_name = self._map_test_name(test_name)
             
-            # Handle Series results
-            elif isinstance(result, pd.Series):
-                for idx, value in result.items():
-                    results_list.append({
-                        'model': model_id,
-                        'test_name': test_name,
-                        'test_category': 'Model Validation',
-                        'metric': str(idx),
-                        'value': value
-                    })
-            
-            # Handle dictionary results
-            elif isinstance(result, dict):
-                for metric, value in result.items():
-                    if pd.notnull(value):  # Only add non-null values
-                        results_list.append({
-                            'model': model_id,
-                            'test_name': test_name,
-                            'test_category': 'Model Validation',
-                            'metric': str(metric),
-                            'value': value
-                        })
-            
-            # Handle scalar results
-            elif pd.notnull(result):
-                results_list.append({
-                    'model': model_id,
-                    'test_name': test_name,
-                    'test_category': 'Model Validation',
-                    'metric': 'value',
-                    'value': result
-                })
+            # Transform the test result DataFrame to long format
+            transformed_results = self._transform_test_to_long_format(
+                result_df, model_id, descriptive_test_name
+            )
+            all_results.extend(transformed_results)
         
-        if not results_list:
-            print(f"No valid test results found for model {self._model_id}")
+        if not all_results:
             return None
             
-        print("\nTest Results List:")
-        for result in results_list:
-            print(f"- {result['test_category']} | {result['test_name']} | {result['metric']}: {result['value']}")
+        return pd.DataFrame(all_results)
+    
+    def _map_test_name(self, test_name: str) -> str:
+        """Map internal test names to descriptive names."""
+        test_name_lower = test_name.lower()
+        
+        # Residual-based tests
+        if 'autocorr' in test_name_lower or 'durbin' in test_name_lower:
+            return 'Residual Autocorrelation'
+        elif 'heteroscedasticity' in test_name_lower or 'het' in test_name_lower:
+            return 'Residual Heteroscedasticity'
+        elif 'normality' in test_name_lower or 'jarque' in test_name_lower:
+            return 'Residual Normality'
+        
+        # Stationarity tests - determine context
+        elif 'stationarity' in test_name_lower:
+            if 'resid' in test_name_lower:
+                return 'Residual Stationarity'
+            elif any(keyword in test_name_lower for keyword in ['x', 'independent', 'input']):
+                return 'Independent Variable Stationarity'
+            elif any(keyword in test_name_lower for keyword in ['y', 'dependent', 'target']):
+                return 'Dependent Variable Stationarity'
+            else:
+                return 'Stationarity Test'
+        
+        # Model estimation tests
+        elif 'significance' in test_name_lower or 'coef' in test_name_lower:
+            return 'Coefficient Significance'
+        elif 'sign' in test_name_lower:
+            return 'Coefficient Sign Check'
+        elif 'group' in test_name_lower or 'f-test' in test_name_lower:
+            return 'Group Driver F-test'
+        
+        # Multicollinearity
+        elif 'vif' in test_name_lower or 'collinearity' in test_name_lower:
+            return 'Multicollinearity'
+        
+        # Cointegration
+        elif 'coint' in test_name_lower:
+            return 'Cointegration'
+        
+        # Default fallback
+        else:
+            return test_name
+    
+    def _transform_test_to_long_format(
+        self, 
+        test_df: pd.DataFrame, 
+        model_id: str, 
+        test_name: str
+    ) -> List[Dict[str, Any]]:
+        """Transform test result DataFrame to long format."""
+        if not isinstance(test_df, pd.DataFrame) or test_df.empty:
+            return []
+        
+        results: List[Dict[str, Any]] = []
+        
+        for index_name, row in test_df.iterrows():
+            for column_name, value in row.items():
+                # Handle thresholds represented as (lower, upper)
+                if isinstance(value, (tuple, list)) and len(value) == 2:
+                    lower_val, upper_val = value
+                    results.append({
+                        'model': model_id,
+                        'test': test_name,
+                        'index': str(index_name),
+                        'metric': f'{column_name}_Lower',
+                        'value': float(lower_val) if pd.notnull(lower_val) else None
+                    })
+                    results.append({
+                        'model': model_id,
+                        'test': test_name,
+                        'index': str(index_name),
+                        'metric': f'{column_name}_Upper',
+                        'value': float(upper_val) if pd.notnull(upper_val) else None
+                    })
+                    continue
+                
+                # Special-case: expected sign mapping
+                if test_name == 'Coefficient Sign Check' and column_name == 'Expected':
+                    expected_str = str(value).strip().lower()
+                    if expected_str in ['+', 'positive']:
+                        numeric_value = 1.0
+                    elif expected_str in ['-', 'negative']:
+                        numeric_value = -1.0
+                    else:
+                        numeric_value = 0.0
+                elif isinstance(value, bool):
+                    numeric_value = 1.0 if value else 0.0
+                elif pd.isnull(value):
+                    numeric_value = None
+                else:
+                    try:
+                        numeric_value = float(value)
+                    except (ValueError, TypeError):
+                        # Skip non-numeric values to ensure 'value' stays numeric
+                        numeric_value = None
+                
+                if numeric_value is not None:
+                    results.append({
+                        'model': model_id,
+                        'test': test_name,
+                        'index': str(index_name),
+                        'metric': column_name,
+                        'value': numeric_value
+                    })
+        
+        return results
+
+    def get_sensitivity_results(self) -> Optional[pd.DataFrame]:
+        """Return sensitivity testing results in long format.
+        
+        Returns a DataFrame with columns:
+        - model: string, model_id
+        - test: string ["Input Sensitivity Test", "Parameter Sensitivity Test"]
+        - scenario_name: string (e.g., 'EWST_2024')
+        - severity: string (e.g., 'base', 'adv', 'sev', 'p0')
+        - variable/parameter: string, variable or parameter name being tested (or 'baseline_p0' for scen_p0 data)
+        - shock: string, shock level ("-3std", "+1se", "baseline", etc)
+        - date: timestamp
+        - frequency: string ['monthly'/'quarterly']
+        - value_type: string ['Target'/'Base']
+        - value: numerical
+        """
+        if not hasattr(self.model, 'scen_manager') or self.model.scen_manager is None:
+            return None
+
+        # Get sensitivity test instance
+        sens_test = self.model.scen_manager.sens_test
+        if sens_test is None:
+            return None
+
+        model_id = self._model_id
+        data_list = []
+
+        # Add scen_p0 baseline data for sensitivity tests if available
+        if hasattr(self.model.scen_manager, 'scen_p0') and self.model.scen_manager.scen_p0 is not None:
+            scen_p0_data = self.model.scen_manager.scen_p0
             
-        return pd.DataFrame(results_list) 
+            # Get scenario sets from parameter sensitivity results
+            param_shock_df = sens_test.param_shock_df
+            for scen_set in param_shock_df.keys():
+                for scen_name in param_shock_df[scen_set].keys():
+                    # Add scen_p0 for parameter sensitivity baseline
+                    df_data = {
+                        'model': model_id,
+                        'test': 'Parameter Sensitivity Test',
+                        'scenario_name': scen_set,
+                        'severity': scen_name,
+                        'variable/parameter': 'baseline_p0',
+                        'shock': 'baseline',
+                        'date': scen_p0_data.index,
+                        'value_type': 'Target',
+                        'value': scen_p0_data.values,
+                        'frequency': 'monthly'
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+            
+            # Get scenario sets from input sensitivity results
+            input_shock_df = sens_test.input_shock_df
+            for scen_set in input_shock_df.keys():
+                for scen_name in input_shock_df[scen_set].keys():
+                    # Add scen_p0 for input sensitivity baseline
+                    df_data = {
+                        'model': model_id,
+                        'test': 'Input Sensitivity Test',
+                        'scenario_name': scen_set,
+                        'severity': scen_name,
+                        'variable/parameter': 'baseline_p0',
+                        'shock': 'baseline',
+                        'date': scen_p0_data.index,
+                        'value_type': 'Target',
+                        'value': scen_p0_data.values,
+                        'frequency': 'monthly'
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+            
+            # Add base variable scen_p0 data if base predictor is available
+            if hasattr(self.model, 'base_predictor') and self.model.base_predictor is not None:
+                base_p0_values = self.model.base_predictor.predict_base(scen_p0_data, scen_p0_data)
+                
+                # Add base p0 for parameter sensitivity
+                for scen_set in param_shock_df.keys():
+                    for scen_name in param_shock_df[scen_set].keys():
+                        df_data = {
+                            'model': model_id,
+                            'test': 'Parameter Sensitivity Test',
+                            'scenario_name': scen_set,
+                            'severity': scen_name,
+                            'variable/parameter': 'baseline_p0',
+                            'shock': 'baseline',
+                            'date': base_p0_values.index,
+                            'value_type': 'Base',
+                            'value': base_p0_values.values,
+                            'frequency': 'monthly'
+                        }
+                        data_list.append(pd.DataFrame(df_data))
+                
+                # Add base p0 for input sensitivity
+                for scen_set in input_shock_df.keys():
+                    for scen_name in input_shock_df[scen_set].keys():
+                        df_data = {
+                            'model': model_id,
+                            'test': 'Input Sensitivity Test',
+                            'scenario_name': scen_set,
+                            'severity': scen_name,
+                            'variable/parameter': 'baseline_p0',
+                            'shock': 'baseline',
+                            'date': base_p0_values.index,
+                            'value_type': 'Base',
+                            'value': base_p0_values.values,
+                            'frequency': 'monthly'
+                        }
+                        data_list.append(pd.DataFrame(df_data))
+
+        # Process parameter sensitivity results (monthly)
+        param_shock_df = sens_test.param_shock_df
+        for scen_set, scen_dict in param_shock_df.items():
+            for scen_name, df in scen_dict.items():
+                # Get baseline column name
+                baseline_col = f"{scen_set}_{scen_name}"
+                
+                # Include baseline (no shock) target series
+                if baseline_col in df.columns:
+                    df_data = {
+                        'model': model_id,
+                        'test': 'Parameter Sensitivity Test',
+                        'scenario_name': scen_set,
+                        'severity': scen_name,
+                        'variable/parameter': 'no_shock',
+                        'shock': 'baseline',
+                        'date': df.index,
+                        'value_type': 'Target',
+                        'value': df[baseline_col].values,
+                        'frequency': 'monthly'
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
+                # Process each parameter's shocks (monthly)
+                for col in df.columns:
+                    if col == baseline_col:
+                        continue
+                    
+                    # Extract parameter name and shock level
+                    param_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
+                    shock = ('+' if '+' in col else '-') + shock
+                    
+                    # Create DataFrame for target variable results (monthly)
+                    df_data = {
+                        'model': model_id,
+                        'test': 'Parameter Sensitivity Test',
+                        'scenario_name': scen_set,
+                        'severity': scen_name,
+                        'variable/parameter': param_name,
+                        'shock': shock,
+                        'date': df.index,
+                        'value_type': 'Target',
+                        'value': df[col].values,
+                        'frequency': 'monthly'
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
+        # Process parameter sensitivity quarterly results
+        if hasattr(sens_test, 'param_shock_qtr_df'):
+            param_shock_qtr_df = sens_test.param_shock_qtr_df
+            for scen_set, scen_dict in param_shock_qtr_df.items():
+                for scen_name, qtr_df in scen_dict.items():
+                    if qtr_df is not None and not qtr_df.empty:
+                        baseline_col = f"{scen_set}_{scen_name}"
+                        
+                        # Include baseline (no shock) quarterly target series
+                        if baseline_col in qtr_df.columns:
+                            qtr_forecast = qtr_df[baseline_col].dropna()
+                            if not qtr_forecast.empty:
+                                df_data = {
+                                    'model': model_id,
+                                    'test': 'Parameter Sensitivity Test',
+                                    'scenario_name': scen_set,
+                                    'severity': scen_name,
+                                    'variable/parameter': 'no_shock',
+                                    'shock': 'baseline',
+                                    'date': qtr_forecast.index,
+                                    'value_type': 'Target',
+                                    'value': qtr_forecast.values,
+                                    'frequency': 'quarterly'
+                                }
+                                data_list.append(pd.DataFrame(df_data))
+
+                        # Process each parameter's shocks (quarterly)
+                        for col in qtr_df.columns:
+                            if col == baseline_col:
+                                continue
+                            
+                            # Extract parameter name and shock level
+                            param_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
+                            shock = ('+' if '+' in col else '-') + shock
+                            
+                            qtr_forecast = qtr_df[col].dropna()
+                            if not qtr_forecast.empty:
+                                # Create DataFrame for quarterly target results
+                                df_data = {
+                                    'model': model_id,
+                                    'test': 'Parameter Sensitivity Test',
+                                    'scenario_name': scen_set,
+                                    'severity': scen_name,
+                                    'variable/parameter': param_name,
+                                    'shock': shock,
+                                    'date': qtr_forecast.index,
+                                    'value_type': 'Target',
+                                    'value': qtr_forecast.values,
+                                    'frequency': 'quarterly'
+                                }
+                                data_list.append(pd.DataFrame(df_data))
+
+        # Process input sensitivity results (monthly)
+        input_shock_df = sens_test.input_shock_df
+        for scen_set, scen_dict in input_shock_df.items():
+            for scen_name, df in scen_dict.items():
+                # Get baseline column name
+                baseline_col = f"{scen_set}_{scen_name}"
+                
+                # Include baseline (no shock) input series target
+                if baseline_col in df.columns:
+                    df_data = {
+                        'model': model_id,
+                        'test': 'Input Sensitivity Test',
+                        'scenario_name': scen_set,
+                        'severity': scen_name,
+                        'variable/parameter': 'no_shock',
+                        'shock': 'baseline',
+                        'date': df.index,
+                        'value_type': 'Target',
+                        'value': df[baseline_col].values,
+                        'frequency': 'monthly'
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
+                # Process each variable's shocks (monthly)
+                for col in df.columns:
+                    if col == baseline_col:
+                        continue
+                    
+                    # Extract variable name and shock level
+                    var_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
+                    shock = ('+' if '+' in col else '-') + shock
+                    
+                    # Create DataFrame for target variable results (monthly)
+                    df_data = {
+                        'model': model_id,
+                        'test': 'Input Sensitivity Test',
+                        'scenario_name': scen_set,
+                        'severity': scen_name,
+                        'variable/parameter': var_name,
+                        'shock': shock,
+                        'date': df.index,
+                        'value_type': 'Target',
+                        'value': df[col].values,
+                        'frequency': 'monthly'
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
+        # Process input sensitivity quarterly results
+        if hasattr(sens_test, 'input_shock_qtr_df'):
+            input_shock_qtr_df = sens_test.input_shock_qtr_df
+            for scen_set, scen_dict in input_shock_qtr_df.items():
+                for scen_name, qtr_df in scen_dict.items():
+                    if qtr_df is not None and not qtr_df.empty:
+                        baseline_col = f"{scen_set}_{scen_name}"
+                        
+                        # Include baseline (no shock) quarterly target series
+                        if baseline_col in qtr_df.columns:
+                            qtr_forecast = qtr_df[baseline_col].dropna()
+                            if not qtr_forecast.empty:
+                                df_data = {
+                                    'model': model_id,
+                                    'test': 'Input Sensitivity Test',
+                                    'scenario_name': scen_set,
+                                    'severity': scen_name,
+                                    'variable/parameter': 'no_shock',
+                                    'shock': 'baseline',
+                                    'date': qtr_forecast.index,
+                                    'value_type': 'Target',
+                                    'value': qtr_forecast.values,
+                                    'frequency': 'quarterly'
+                                }
+                                data_list.append(pd.DataFrame(df_data))
+
+                        # Process each variable's shocks (quarterly)
+                        for col in qtr_df.columns:
+                            if col == baseline_col:
+                                continue
+                            
+                            # Extract variable name and shock level
+                            var_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
+                            shock = ('+' if '+' in col else '-') + shock
+                            
+                            qtr_forecast = qtr_df[col].dropna()
+                            if not qtr_forecast.empty:
+                                # Create DataFrame for quarterly target results
+                                df_data = {
+                                    'model': model_id,
+                                    'test': 'Input Sensitivity Test',
+                                    'scenario_name': scen_set,
+                                    'severity': scen_name,
+                                    'variable/parameter': var_name,
+                                    'shock': shock,
+                                    'date': qtr_forecast.index,
+                                    'value_type': 'Target',
+                                    'value': qtr_forecast.values,
+                                    'frequency': 'quarterly'
+                                }
+                                data_list.append(pd.DataFrame(df_data))
+
+        # If model has base predictor, add base variable results
+        if hasattr(self.model, 'base_predictor') and self.model.base_predictor is not None:
+            # Process parameter sensitivity base results (monthly)
+            for scen_set, scen_dict in param_shock_df.items():
+                for scen_name, df in scen_dict.items():
+                    baseline_col = f"{scen_set}_{scen_name}"
+                    
+                    # Include baseline (no shock) base conversion for parameter sensitivity monthly
+                    if baseline_col in df.columns:
+                        base_values = self.model.base_predictor.predict_base(df[baseline_col], self.model.dm.scen_p0)
+                        df_data = {
+                            'model': model_id,
+                            'test': 'Parameter Sensitivity Test',
+                            'scenario_name': scen_set,
+                            'severity': scen_name,
+                            'variable/parameter': 'no_shock',
+                            'shock': 'baseline',
+                            'date': base_values.index,
+                            'value_type': 'Base',
+                            'value': base_values.values,
+                            'frequency': 'monthly'
+                        }
+                        data_list.append(pd.DataFrame(df_data))
+
+                    for col in df.columns:
+                        if col == baseline_col:
+                            continue
+                        
+                        param_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
+                        shock = ('+' if '+' in col else '-') + shock
+                        
+                        # Convert to base variable
+                        base_values = self.model.base_predictor.predict_base(df[col], self.model.dm.scen_p0)
+                        
+                        # Create DataFrame for base variable results (monthly)
+                        df_data = {
+                            'model': model_id,
+                            'test': 'Parameter Sensitivity Test',
+                            'scenario_name': scen_set,
+                            'severity': scen_name,
+                            'variable/parameter': param_name,
+                            'shock': shock,
+                            'date': base_values.index,
+                            'value_type': 'Base',
+                            'value': base_values.values,
+                            'frequency': 'monthly'
+                        }
+                        data_list.append(pd.DataFrame(df_data))
+ 
+            # Process parameter sensitivity base quarterly results
+            if hasattr(sens_test, 'param_shock_qtr_df'):
+                param_shock_qtr_df = sens_test.param_shock_qtr_df
+                for scen_set, scen_dict in param_shock_qtr_df.items():
+                    for scen_name, qtr_df in scen_dict.items():
+                        if qtr_df is not None and not qtr_df.empty:
+                            baseline_col = f"{scen_set}_{scen_name}"
+                            
+                            # Include baseline (no shock) base conversion for quarterly
+                            if baseline_col in qtr_df.columns:
+                                qtr_forecast = qtr_df[baseline_col].dropna()
+                                if not qtr_forecast.empty:
+                                    base_values = self.model.base_predictor.predict_base(qtr_forecast, self.model.dm.scen_p0)
+                                    df_data = {
+                                        'model': model_id,
+                                        'test': 'Parameter Sensitivity Test',
+                                        'scenario_name': scen_set,
+                                        'severity': scen_name,
+                                        'variable/parameter': 'no_shock',
+                                        'shock': 'baseline',
+                                        'date': base_values.index,
+                                        'value_type': 'Base',
+                                        'value': base_values.values,
+                                        'frequency': 'quarterly'
+                                    }
+                                    data_list.append(pd.DataFrame(df_data))
+
+                            for col in qtr_df.columns:
+                                if col == baseline_col:
+                                    continue
+                                
+                                param_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
+                                shock = ('+' if '+' in col else '-') + shock
+                                
+                                qtr_forecast = qtr_df[col].dropna()
+                                if not qtr_forecast.empty:
+                                    # Convert to base variable
+                                    base_values = self.model.base_predictor.predict_base(qtr_forecast, self.model.dm.scen_p0)
+                                    
+                                    # Create DataFrame for quarterly base results
+                                    df_data = {
+                                        'model': model_id,
+                                        'test': 'Parameter Sensitivity Test',
+                                        'scenario_name': scen_set,
+                                        'severity': scen_name,
+                                        'variable/parameter': param_name,
+                                        'shock': shock,
+                                        'date': base_values.index,
+                                        'value_type': 'Base',
+                                        'value': base_values.values,
+                                        'frequency': 'quarterly'
+                                    }
+                                    data_list.append(pd.DataFrame(df_data))
+ 
+            # Process input sensitivity base results (monthly)
+            for scen_set, scen_dict in input_shock_df.items():
+                for scen_name, df in scen_dict.items():
+                    baseline_col = f"{scen_set}_{scen_name}"
+                    
+                    # Include baseline (no shock) base conversion for input monthly
+                    if baseline_col in df.columns:
+                        base_values = self.model.base_predictor.predict_base(df[baseline_col], self.model.dm.scen_p0)
+                        df_data = {
+                            'model': model_id,
+                            'test': 'Input Sensitivity Test',
+                            'scenario_name': scen_set,
+                            'severity': scen_name,
+                            'variable/parameter': 'no_shock',
+                            'shock': 'baseline',
+                            'date': base_values.index,
+                            'value_type': 'Base',
+                            'value': base_values.values,
+                            'frequency': 'monthly'
+                        }
+                        data_list.append(pd.DataFrame(df_data))
+
+                    for col in df.columns:
+                        if col == baseline_col:
+                            continue
+                        
+                        var_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
+                        shock = ('+' if '+' in col else '-') + shock
+                        
+                        # Convert to base variable
+                        base_values = self.model.base_predictor.predict_base(df[col], self.model.dm.scen_p0)
+                        
+                        # Create DataFrame for base variable results (monthly)
+                        df_data = {
+                            'model': model_id,
+                            'test': 'Input Sensitivity Test',
+                            'scenario_name': scen_set,
+                            'severity': scen_name,
+                            'variable/parameter': var_name,
+                            'shock': shock,
+                            'date': base_values.index,
+                            'value_type': 'Base',
+                            'value': base_values.values,
+                            'frequency': 'monthly'
+                        }
+                        data_list.append(pd.DataFrame(df_data))
+ 
+            # Process input sensitivity base quarterly results
+            if hasattr(sens_test, 'input_shock_qtr_df'):
+                input_shock_qtr_df = sens_test.input_shock_qtr_df
+                for scen_set, scen_dict in input_shock_qtr_df.items():
+                    for scen_name, qtr_df in scen_dict.items():
+                        if qtr_df is not None and not qtr_df.empty:
+                            baseline_col = f"{scen_set}_{scen_name}"
+                            
+                            # Include baseline (no shock) base conversion for input quarterly
+                            if baseline_col in qtr_df.columns:
+                                qtr_forecast = qtr_df[baseline_col].dropna()
+                                if not qtr_forecast.empty:
+                                    base_values = self.model.base_predictor.predict_base(qtr_forecast, self.model.dm.scen_p0)
+                                    df_data = {
+                                        'model': model_id,
+                                        'test': 'Input Sensitivity Test',
+                                        'scenario_name': scen_set,
+                                        'severity': scen_name,
+                                        'variable/parameter': 'no_shock',
+                                        'shock': 'baseline',
+                                        'date': base_values.index,
+                                        'value_type': 'Base',
+                                        'value': base_values.values,
+                                        'frequency': 'quarterly'
+                                    }
+                                    data_list.append(pd.DataFrame(df_data))
+
+                            for col in qtr_df.columns:
+                                if col == baseline_col:
+                                    continue
+                                
+                                var_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
+                                shock = ('+' if '+' in col else '-') + shock
+                                
+                                qtr_forecast = qtr_df[col].dropna()
+                                if not qtr_forecast.empty:
+                                    # Convert to base variable
+                                    base_values = self.model.base_predictor.predict_base(qtr_forecast, self.model.dm.scen_p0)
+                                    
+                                    # Create DataFrame for quarterly base results
+                                    df_data = {
+                                        'model': model_id,
+                                        'test': 'Input Sensitivity Test',
+                                        'scenario_name': scen_set,
+                                        'severity': scen_name,
+                                        'variable/parameter': var_name,
+                                        'shock': shock,
+                                        'date': base_values.index,
+                                        'value_type': 'Base',
+                                        'value': base_values.values,
+                                        'frequency': 'quarterly'
+                                    }
+                                    data_list.append(pd.DataFrame(df_data))
+
+        if not data_list:
+            return None
+
+        # Combine all data and ensure column order
+        result = pd.concat(data_list, ignore_index=True)
+        return result[['model', 'test', 'scenario_name', 'severity', 'variable/parameter', 
+                      'shock', 'date', 'frequency', 'value_type', 'value']] 
+
+    # Helper to build a standardized time series DataFrame row block
+    def _build_ts_block(self, index, model_id: str, series_type: str, value_type: str, values) -> pd.DataFrame:
+        return pd.DataFrame({
+            'date': index,
+            'model': model_id,
+            'series_type': series_type,
+            'value_type': value_type,
+            'value': values
+        }) 
