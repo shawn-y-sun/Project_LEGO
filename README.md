@@ -4,7 +4,7 @@
 
 ![Project LEGO](https://img.shields.io/badge/Project-LEGO-blue)
 ![Python](https://img.shields.io/badge/Python-3.7%2B-blue)
-![License](https://img.shields.io/badge/License-MIT-green)
+![License](https://img.shields.io/badge/License-Proprietary-black)
 ![Version](https://img.shields.io/badge/Version-Beta%20v2.0-orange)
 
 **A comprehensive Python framework for financial model development with advanced scenario analysis**
@@ -27,6 +27,17 @@
 While OLS is the primary model today, the framework is designed to be model‑agnostic. Upcoming releases will add additional model families (e.g., Error‑Correction, AR/ARIMA) behind the same `Segment` and reporting interfaces.
 
 ## 🔄 The LEGO Six‑Step Workflow
+
+-
+```mermaid
+graph LR
+  A[Data Loading & Preprocessing] --> B[Exploratory Analysis & Driver Selection]
+  B -.-> C[Exhaustive Search & Selection]
+  C -.-> D[Model Evaluation & Validation]
+  D -.-> E[Fine-Tuning & Enhancement]
+  E -.-> B
+  D --> F[Presentation & Documentation]
+```
 
 - **1) Data Preprocessing**: Clean/construct internal data, then load with `PPNRInternalLoader` (or panel `PanelLoader`). Load historical MEVs and scenario MEVs with `MEVLoader`.
 - **2) EDA & Driver Selection**: Create exploratory plots and correlation tables with `Segment.explore_vars()`. Engineer features via `DataManager.apply_to_all()` and update variable mapping with `DataManager.update_var_map()`.
@@ -179,4 +190,8 @@ seg.export(output_dir='outputs/EDB_TERM')
 
 ## 📄 License
 
-MIT License © Shawn Y. Sun, Kexin Zhu
+Proprietary software. All rights reserved.
+
+Copyright © Shawn Y. Sun, Kexin Zhu. 
+
+This software and its source code are licensed for internal use only under the terms in the accompanying `LICENSE` file. No redistribution, sublicensing, or commercial offering is permitted without prior written permission.
