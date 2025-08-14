@@ -30,13 +30,25 @@ While OLS is the primary model today, the framework is designed to be model‑ag
 
 -
 ```mermaid
-graph LR
-  A[Data Loading & Preprocessing] --> B[Exploratory Analysis & Driver Selection]
-  B -.-> C[Exhaustive Search & Selection]
-  C -.-> D[Model Evaluation & Validation]
-  D -.-> E[Fine-Tuning & Enhancement]
-  E -.-> B
-  D --> F[Presentation & Documentation]
+flowchart LR
+    DL["Data Loading &\nPreprocessing"]:::step --> EDA["Exploratory Analysis &\nDriver Selection"]:::step
+
+    %% Iterative loop (dashed)
+    EDA -.-> SRCH["Exhaustive Search &\nSelection"]:::step
+    SRCH -.-> EVAL["Model Evaluation &\nValidation"]:::step
+    EVAL -.-> FT["Fine‑Tuning &\nEnhancement"]:::step
+    FT -.-> EDA
+
+    %% Deliverable path
+    EVAL --> DOC["Presentation &\nDocumentation"]:::step
+
+    %% Subtle styling closer to the reference image
+    linkStyle 1 stroke:#9aa0a6,stroke-width:1.2px,stroke-dasharray:6 4
+    linkStyle 2 stroke:#9aa0a6,stroke-width:1.2px,stroke-dasharray:6 4
+    linkStyle 3 stroke:#9aa0a6,stroke-width:1.2px,stroke-dasharray:6 4
+    linkStyle 4 stroke:#9aa0a6,stroke-width:1.2px,stroke-dasharray:6 4
+
+    classDef step fill:#f6f7ff,stroke:#b3b7ff,color:#1f2937,rx:8,ry:8
 ```
 
 - **1) Data Preprocessing**: Clean/construct internal data, then load with `PPNRInternalLoader` (or panel `PanelLoader`). Load historical MEVs and scenario MEVs with `MEVLoader`.
@@ -103,14 +115,11 @@ pip install -r requirements.txt
 The notebook `LEGO_Demo.ipynb` demonstrates the full pipeline. Below is a concise version following the six‑step flow above.
 
 ```python
-from Technic import (
-    PPNRInternalLoader, MEVLoader, DataManager,
-    Segment, OLS, TSFM, CondVar, DumVar
-)
+import Technic as tc
 
 # 1) Data Preprocessing ---------------------------------------------
 # Build internal loader and load historical + scenario internal data
-int_ldr = PPNRInternalLoader(
+int_ldr = tc.PPNRInternalLoader(
     in_sample_start='2020-06-30',
     in_sample_end='2023-12-31',
     full_sample_end='2023-12-31',
@@ -124,7 +133,7 @@ int_ldr.load_scens(
 )
 
 # Load model and scenario MEVs
-mev_ldr = MEVLoader()
+mev_ldr = tc.MEVLoader()
 mev_ldr.load(source='path/to/model_mevs_qtr.xlsx', sheet='Historical Data > Enterprise')
 mev_ldr.load(source=df_mev_mth)  # monthly historical from a DataFrame
 mev_ldr.load_scens(
@@ -133,7 +142,7 @@ mev_ldr.load_scens(
 )
 
 # 2) EDA & Driver Selection -----------------------------------------
-dm = DataManager(int_ldr, mev_ldr, poos_periods=[4, 8, 12])
+dm = tc.DataManager(int_ldr, mev_ldr, poos_periods=[4, 8, 12])
 
 # Optional feature engineering broadcast to model/scenario data
 def new_features(df_mev, df_in):
@@ -144,18 +153,18 @@ def new_features(df_mev, df_in):
 dm.apply_to_all(new_features)
 
 # Visual exploration and correlations
-seg = Segment(
+seg = tc.Segment(
     segment_id='EDB_TERM',
     target='EDB_Flow_rt',
     target_base='EDB_Outflow',
     target_exposure='Eligible_EDB_Bal',
     data_manager=dm,
-    model_cls=OLS
+    model_cls=tc.OLS
 )
 df_corr = seg.explore_vars(['T_1Y1M', 'CAGOV12M', 'CAONR'])
 
 # 3) Exhaustive Search of Model Options ------------------------------
-desired_pool = [DumVar('*'), TSFM('CAGOV12M', transform_fn='LV'), 'Price_Inc']
+desired_pool = [tc.DumVar('*'), tc.TSFM('CAGOV12M', transform_fn='LV'), 'Price_Inc']
 exp_sign_map = {'CAGOV12M': 1, 'CAONR': -1}
 seg.search_cms(
     desired_pool=desired_pool,
