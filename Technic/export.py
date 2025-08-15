@@ -260,12 +260,6 @@ class ExportManager:
         
         # Save consolidated results
         self.strategy.save_consolidated_results(output_dir)
-        
-        # Print completion message only if files were written
-        written_files = self.strategy.get_written_files()
-        if written_files:
-            files_str = ", ".join(f"'{p.name}'" for p in written_files)
-            print(f"\nExport completed. Files written: {files_str}")
 
 class OLSExportStrategy(ExportStrategy):
     """Export strategy for OLS models with optimized performance."""
@@ -372,11 +366,13 @@ class OLSExportStrategy(ExportStrategy):
             # Delegate to format handler for flexibility and control of mode/header
             self.format_handler.save_dataframe(df, filepath, mode=write_mode, header=write_header)
             
+            # Always track written files, regardless of mode
+            self._written_files.add(filepath)
+            
             # Log appropriate success message only for new files or force_write
             if force_write or not file_exists:
                 action = "updated" if file_exists else "wrote"
                 logger.info("Successfully %s %s file: %s", action, content_type, filepath)
-                self._written_files.add(filepath)
         except Exception as e:
             logger.exception("Failed to write %s file to %s: %s", content_type, filepath, e)
         
@@ -521,8 +517,10 @@ class OLSExportStrategy(ExportStrategy):
         if self.should_export('stability_testing_stats'):
             self._write_chunk(output_dir, 'stability_testing_stats', force_write=True)
         
-        # Reset containers
+        # Reset containers but preserve written files tracking
+        written_files_backup = self._written_files.copy()
         self._initialize_containers()
+        self._written_files = written_files_backup
 
 class OLSModelAdapter(ExportableModel):
     """Adapter for OLS models with optimized performance.
@@ -608,8 +606,8 @@ class OLSModelAdapter(ExportableModel):
             stacked_out = stacked_out[['date', 'model', 'series_type', 'value_type', 'value']]
             blocks.append(stacked_out)
  
-        # Residuals
-        blocks.append(self._build_ts_block(self.model.resid.index, model_id, SERIES_TYPE_RESIDUAL, 'Residual', self.model.resid.values))
+        # Residuals (negate statsmodels convention to get fitted - actual)
+        blocks.append(self._build_ts_block(self.model.resid.index, model_id, SERIES_TYPE_RESIDUAL, 'Residual', -self.model.resid.values))
  
         # Base variable series if available
         y_base_full = getattr(self.model, 'y_base_full', None)
@@ -624,16 +622,16 @@ class OLSModelAdapter(ExportableModel):
 
         # Base residuals (computed if actuals exist)
         if y_base_full is not None and not y_base_full.empty:
-            # In-sample residuals for Base: Actual - Fitted_IS
+            # In-sample residuals for Base: Fitted_IS - Actual
             if y_base_fitted_in is not None and not y_base_fitted_in.empty:
                 aligned_actual_in = y_base_full.reindex(y_base_fitted_in.index)
-                base_resid_in = (aligned_actual_in - y_base_fitted_in).dropna()
+                base_resid_in = (y_base_fitted_in - aligned_actual_in).dropna()
                 if not base_resid_in.empty:
                     blocks.append(self._build_ts_block(base_resid_in.index, model_id, SERIES_TYPE_BASE, 'Residual', base_resid_in.values))
-            # Out-of-sample residuals for Base: Actual - Pred_OOS (if overlapping actuals exist)
+            # Out-of-sample residuals for Base: Pred_OOS - Actual (if overlapping actuals exist)
             if y_base_pred_out is not None and not y_base_pred_out.empty:
                 aligned_actual_out = y_base_full.reindex(y_base_pred_out.index)
-                base_resid_out = (aligned_actual_out - y_base_pred_out).dropna()
+                base_resid_out = (y_base_pred_out - aligned_actual_out).dropna()
                 if not base_resid_out.empty:
                     blocks.append(self._build_ts_block(base_resid_out.index, model_id, SERIES_TYPE_BASE, 'Residual', base_resid_out.values))
  
@@ -1058,32 +1056,53 @@ class OLSModelAdapter(ExportableModel):
         - model='cm1', test='Residual Autocorrelation', index='Durbin-Watson', metric='Threshold', value=1.5
         - model='cm1', test='Residual Autocorrelation', index='Durbin-Watson', metric='Passed', value=1
         """
+        # Try to get test results from testset
         try:
-            # Follow the exact same pattern as ModelReportBase.show_test_tbl()
-            results = self.model.testset.all_test_results
+            if not hasattr(self.model, 'testset') or self.model.testset is None:
+                return None
+            
+            # Access individual test objects directly from testset.tests
+            test_objects = getattr(self.model.testset, 'tests', [])
+            if not test_objects:
+                return None
+                
         except Exception:
-            return None
-        
-        if not results or len(results) == 0:
             return None
         
         model_id = self._model_id
         all_results = []
         
-        # Process each test result
-        for test_name, result_df in results.items():
-            # Skip measure category tests (FitMeasure, ErrorMeasure)
-            if any(keyword in test_name for keyword in ['Error Measures', 'Fit Measures']):
-                continue
+        # Process each test object
+        for test_obj in test_objects:
+            try:
+                # Skip measure category tests (FitMeasure, ErrorMeasure)
+                if hasattr(test_obj, 'category') and test_obj.category == 'measure':
+                    continue
+                    
+                # Get test name and map to descriptive name
+                test_name = test_obj.name if hasattr(test_obj, 'name') else type(test_obj).__name__
+                descriptive_test_name = self._map_test_name(test_name)
                 
-            # Map test names to descriptive names
-            descriptive_test_name = self._map_test_name(test_name)
-            
-            # Transform the test result DataFrame to long format
-            transformed_results = self._transform_test_to_long_format(
-                result_df, model_id, descriptive_test_name
-            )
-            all_results.extend(transformed_results)
+                # Get test result DataFrame
+                if hasattr(test_obj, 'test_result'):
+                    result_df = test_obj.test_result
+                    
+                    if isinstance(result_df, pd.DataFrame) and not result_df.empty:
+                        # Transform DataFrame: index becomes "index", columns become "metric"
+                        transformed_results = self._transform_test_to_long_format(
+                            result_df, model_id, descriptive_test_name
+                        )
+                        all_results.extend(transformed_results)
+                    elif isinstance(result_df, pd.Series) and not result_df.empty:
+                        # Convert Series to DataFrame format
+                        temp_df = pd.DataFrame([result_df.values], columns=result_df.index, index=['Result'])
+                        transformed_results = self._transform_test_to_long_format(
+                            temp_df, model_id, descriptive_test_name
+                        )
+                        all_results.extend(transformed_results)
+                        
+            except Exception:
+                continue
         
         if not all_results:
             return None
@@ -1097,16 +1116,16 @@ class OLSModelAdapter(ExportableModel):
         # Residual-based tests
         if 'autocorr' in test_name_lower or 'durbin' in test_name_lower:
             return 'Residual Autocorrelation'
-        elif 'heteroscedasticity' in test_name_lower or 'het' in test_name_lower:
+        elif 'heteroscedasticity' in test_name_lower or 'het' in test_name_lower or 'white' in test_name_lower or 'breusch' in test_name_lower:
             return 'Residual Heteroscedasticity'
-        elif 'normality' in test_name_lower or 'jarque' in test_name_lower:
+        elif 'normality' in test_name_lower or 'jarque' in test_name_lower or 'bera' in test_name_lower:
             return 'Residual Normality'
         
         # Stationarity tests - determine context
-        elif 'stationarity' in test_name_lower:
-            if 'resid' in test_name_lower:
+        elif 'stationarity' in test_name_lower or 'adf' in test_name_lower or 'unit' in test_name_lower:
+            if 'resid' in test_name_lower or 'residual' in test_name_lower:
                 return 'Residual Stationarity'
-            elif any(keyword in test_name_lower for keyword in ['x', 'independent', 'input']):
+            elif any(keyword in test_name_lower for keyword in ['x', 'independent', 'input', 'feature']):
                 return 'Independent Variable Stationarity'
             elif any(keyword in test_name_lower for keyword in ['y', 'dependent', 'target']):
                 return 'Dependent Variable Stationarity'
@@ -1114,24 +1133,46 @@ class OLSModelAdapter(ExportableModel):
                 return 'Stationarity Test'
         
         # Model estimation tests
-        elif 'significance' in test_name_lower or 'coef' in test_name_lower:
+        elif 'significance' in test_name_lower or ('coef' in test_name_lower and 'sign' not in test_name_lower):
             return 'Coefficient Significance'
-        elif 'sign' in test_name_lower:
+        elif 'sign' in test_name_lower and 'coef' in test_name_lower:
             return 'Coefficient Sign Check'
-        elif 'group' in test_name_lower or 'f-test' in test_name_lower:
+        elif 'group' in test_name_lower or 'f-test' in test_name_lower or 'ftest' in test_name_lower:
             return 'Group Driver F-test'
         
         # Multicollinearity
-        elif 'vif' in test_name_lower or 'collinearity' in test_name_lower:
+        elif 'vif' in test_name_lower or 'collinearity' in test_name_lower or 'multicollinear' in test_name_lower:
             return 'Multicollinearity'
         
-        # Cointegration
-        elif 'coint' in test_name_lower:
-            return 'Cointegration'
+        # Cointegration tests - be more specific
+        elif 'coint' in test_name_lower or 'cointegration' in test_name_lower:
+            if 'engle' in test_name_lower and 'granger' in test_name_lower:
+                return 'Engle-Granger Cointegration'
+            elif 'johansen' in test_name_lower:
+                return 'Johansen Cointegration'
+            elif 'phillips' in test_name_lower and 'ouliaris' in test_name_lower:
+                return 'Phillips-Ouliaris Cointegration'
+            else:
+                return 'Cointegration'
         
-        # Default fallback
+        # Additional specific tests
+        elif 'ljung' in test_name_lower and 'box' in test_name_lower:
+            return 'Ljung-Box Test'
+        elif 'arch' in test_name_lower:
+            return 'ARCH Test'
+        elif 'reset' in test_name_lower or 'ramsey' in test_name_lower:
+            return 'RESET Test'
+        elif 'chow' in test_name_lower:
+            return 'Chow Test'
+        elif 'cusum' in test_name_lower:
+            return 'CUSUM Test'
+        
+        # Default fallback - clean up the name
         else:
-            return test_name
+            # Remove common prefixes/suffixes and clean up
+            cleaned_name = test_name.replace('_', ' ').replace('-', ' ')
+            # Capitalize first letter of each word
+            return ' '.join(word.capitalize() for word in cleaned_name.split())
     
     def _transform_test_to_long_format(
         self, 
@@ -1139,60 +1180,106 @@ class OLSModelAdapter(ExportableModel):
         model_id: str, 
         test_name: str
     ) -> List[Dict[str, Any]]:
-        """Transform test result DataFrame to long format."""
+        """Transform test result DataFrame to long format.
+        
+        Converts DataFrame rows (index) and columns (metric) to long format where:
+        - Each row index becomes an 'index' value  
+        - Each column becomes a 'metric' value
+        - All values are converted to numeric format
+        """
         if not isinstance(test_df, pd.DataFrame) or test_df.empty:
             return []
         
         results: List[Dict[str, Any]] = []
         
-        for index_name, row in test_df.iterrows():
+        # Handle case where DataFrame has no explicit index names
+        if test_df.index.name is None and len(test_df.index) == 1:
+            # Single-row DataFrame - use a generic index name
+            index_names = ['Test_Result']
+        else:
+            index_names = test_df.index.tolist()
+        
+        for i, (index_name, row) in enumerate(test_df.iterrows()):
+            # Use the actual index name or fallback to position-based name
+            if isinstance(index_name, (int, float)) and test_df.index.name is None:
+                display_index = index_names[i] if i < len(index_names) else f"Row_{i}"
+            else:
+                display_index = str(index_name)
+            
             for column_name, value in row.items():
-                # Handle thresholds represented as (lower, upper)
+                # Handle thresholds represented as (lower, upper) tuples
                 if isinstance(value, (tuple, list)) and len(value) == 2:
                     lower_val, upper_val = value
-                    results.append({
-                        'model': model_id,
-                        'test': test_name,
-                        'index': str(index_name),
-                        'metric': f'{column_name}_Lower',
-                        'value': float(lower_val) if pd.notnull(lower_val) else None
-                    })
-                    results.append({
-                        'model': model_id,
-                        'test': test_name,
-                        'index': str(index_name),
-                        'metric': f'{column_name}_Upper',
-                        'value': float(upper_val) if pd.notnull(upper_val) else None
-                    })
+                    # Create separate entries for lower and upper bounds
+                    if pd.notnull(lower_val):
+                        try:
+                            results.append({
+                                'model': model_id,
+                                'test': test_name,
+                                'index': display_index,
+                                'metric': f'{column_name}_Lower',
+                                'value': float(lower_val)
+                            })
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    if pd.notnull(upper_val):
+                        try:
+                            results.append({
+                                'model': model_id,
+                                'test': test_name,
+                                'index': display_index,
+                                'metric': f'{column_name}_Upper',
+                                'value': float(upper_val)
+                            })
+                        except (ValueError, TypeError):
+                            pass
                     continue
                 
-                # Special-case: expected sign mapping
-                if test_name == 'Coefficient Sign Check' and column_name == 'Expected':
-                    expected_str = str(value).strip().lower()
-                    if expected_str in ['+', 'positive']:
-                        numeric_value = 1.0
-                    elif expected_str in ['-', 'negative']:
-                        numeric_value = -1.0
-                    else:
-                        numeric_value = 0.0
-                elif isinstance(value, bool):
-                    numeric_value = 1.0 if value else 0.0
-                elif pd.isnull(value):
-                    numeric_value = None
-                else:
-                    try:
-                        numeric_value = float(value)
-                    except (ValueError, TypeError):
-                        # Skip non-numeric values to ensure 'value' stays numeric
-                        numeric_value = None
+                # Handle nested data structures
+                if isinstance(value, (list, tuple)) and len(value) > 2:
+                    # Multiple values - create separate entries
+                    for j, sub_value in enumerate(value):
+                        if pd.notnull(sub_value):
+                            try:
+                                numeric_value = float(sub_value)
+                                results.append({
+                                    'model': model_id,
+                                    'test': test_name,
+                                    'index': display_index,
+                                    'metric': f'{column_name}_{j}',
+                                    'value': numeric_value
+                                })
+                            except (ValueError, TypeError):
+                                pass
+                    continue
                 
-                if numeric_value is not None:
+                # Convert value to appropriate format (preserve strings and numbers)
+                final_value = None
+                
+                if isinstance(value, bool):
+                    # Convert boolean to string for clarity
+                    final_value = 'True' if value else 'False'
+                elif pd.isnull(value):
+                    final_value = None
+                elif isinstance(value, (int, float)):
+                    # Keep numeric values as-is
+                    final_value = float(value)
+                elif isinstance(value, str):
+                    # Keep string values as-is (no forced conversion)
+                    final_value = str(value).strip()
+                else:
+                    # Convert other types to string representation
+                    final_value = str(value)
+                
+                # Add result if we have a valid value (string or numeric)
+                if final_value is not None:
                     results.append({
                         'model': model_id,
                         'test': test_name,
-                        'index': str(index_name),
-                        'metric': column_name,
-                        'value': numeric_value
+                        'index': display_index,
+                        'metric': str(column_name),
+                        'value': final_value
                     })
         
         return results
