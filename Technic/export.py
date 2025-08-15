@@ -29,6 +29,8 @@ STATICSTATS_COLUMNS = ['category', 'model', 'type', 'value_type', 'value']
 SCENARIO_COLUMNS = ['model', 'scenario_name', 'severity', 'date', 'frequency', 'value_type', 'value']
 TEST_RESULTS_COLUMNS = ['model', 'test', 'index', 'metric', 'value']
 SENSITIVITY_COLUMNS = ['model', 'test', 'scenario_name', 'severity', 'variable/parameter', 'shock', 'date', 'frequency', 'value_type', 'value']
+STABILITY_COLUMNS = ['date', 'model', 'test_period', 'value_type', 'value']
+STABILITY_STATS_COLUMNS = ['model', 'trial', 'category', 'value_type', 'value']
 
 # Series type constants
 SERIES_TYPE_TARGET = 'Target'
@@ -42,7 +44,9 @@ EXPORT_CONTENT_TYPES = {
     'staticStats': 'Model statistics and metrics',
     'scenario_testing': 'Scenario testing results',
     'test_results': 'Comprehensive test results from all tests',
-    'sensitivity_testing': 'Sensitivity testing results for parameters and inputs'
+    'sensitivity_testing': 'Sensitivity testing results for parameters and inputs',
+    'stability_testing': 'Walk-forward stability testing results',
+    'stability_testing_stats': 'Walk-forward stability testing statistical metrics'
 }
 
 class ExportableModel(ABC):
@@ -76,6 +80,16 @@ class ExportableModel(ABC):
     @abstractmethod
     def get_sensitivity_results(self) -> Optional[pd.DataFrame]:
         """Return sensitivity testing results if available."""
+        pass
+
+    @abstractmethod
+    def get_stability_results(self) -> Optional[pd.DataFrame]:
+        """Return walk-forward stability testing time series in long format."""
+        pass
+
+    @abstractmethod
+    def get_stability_stats_results(self) -> Optional[pd.DataFrame]:
+        """Return walk-forward stability testing statistical metrics."""
         pass
 
 class ModelExportAdapter:
@@ -139,6 +153,21 @@ class ExportStrategy(ABC):
     @abstractmethod
     def save_consolidated_results(self, output_dir: Path) -> None:
         """Save consolidated results from all models to files."""
+        pass
+
+    @abstractmethod
+    def export_sensitivity_results(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export sensitivity testing results to CSV if available."""
+        pass
+
+    @abstractmethod
+    def export_stability_results(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export walk-forward stability testing results to CSV if available."""
+        pass
+
+    @abstractmethod
+    def export_stability_stats(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export walk-forward stability testing statistical metrics to CSV if available."""
         pass
 
 class ExportFormatHandler(ABC):
@@ -212,6 +241,18 @@ class ExportManager:
                         self.strategy.export_sensitivity_results(model, output_dir)
                     except Exception as e:
                         print(f"Warning: Failed to export sensitivity_testing for {model.get_model_id()}: {e}")
+                
+                if self.strategy.should_export('stability_testing'):
+                    try:
+                        self.strategy.export_stability_results(model, output_dir)
+                    except Exception as e:
+                        print(f"Warning: Failed to export stability_testing for {model.get_model_id()}: {e}")
+                
+                if self.strategy.should_export('stability_testing_stats'):
+                    try:
+                        self.strategy.export_stability_stats(model, output_dir)
+                    except Exception as e:
+                        print(f"Warning: Failed to export stability_testing_stats for {model.get_model_id()}: {e}")
                         
             except Exception as e:
                 print(f"Error: Failed to process model {model.get_model_id()}: {e}")
@@ -248,6 +289,8 @@ class OLSExportStrategy(ExportStrategy):
         self._scenario_chunks = []
         self._test_results_chunks = []
         self._sensitivity_chunks = []  # New container for sensitivity results
+        self._stability_chunks = []  # New container for stability results
+        self._stability_stats_chunks = [] # New container for stability stats
         # Per-content chunk counters
         self._chunk_sizes = {
             'timeseries_data': 0,
@@ -255,6 +298,8 @@ class OLSExportStrategy(ExportStrategy):
             'scenario_testing': 0,
             'test_results': 0,
             'sensitivity_testing': 0,
+            'stability_testing': 0,
+            'stability_testing_stats': 0
         }
         self._written_files = set()  # Track which files have been written
     
@@ -292,6 +337,16 @@ class OLSExportStrategy(ExportStrategy):
                 'chunks': self._sensitivity_chunks,
                 'columns': SENSITIVITY_COLUMNS,
                 'filename': 'sensitivity_testing.csv'
+            },
+            'stability_testing': {
+                'chunks': self._stability_chunks,
+                'columns': STABILITY_COLUMNS,
+                'filename': 'stability_testing.csv'
+            },
+            'stability_testing_stats': {
+                'chunks': self._stability_stats_chunks,
+                'columns': STABILITY_STATS_COLUMNS,
+                'filename': 'stability_testing_stats.csv'
             }
         }
         
@@ -418,6 +473,30 @@ class OLSExportStrategy(ExportStrategy):
             if self._chunk_sizes['scenario_testing'] >= self.chunk_size:
                 self._write_chunk(output_dir, 'scenario_testing')
     
+    def export_stability_results(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export walk-forward stability results with chunking support."""
+        if not self.should_export('stability_testing'):
+            return
+        
+        df = model.get_stability_results()
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            self._stability_chunks.append(df)
+            self._chunk_sizes['stability_testing'] += len(df)
+            if self._chunk_sizes['stability_testing'] >= self.chunk_size:
+                self._write_chunk(output_dir, 'stability_testing')
+    
+    def export_stability_stats(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export walk-forward stability testing statistical metrics with chunking support."""
+        if not self.should_export('stability_testing_stats'):
+            return
+        
+        df = model.get_stability_stats_results()
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            self._stability_stats_chunks.append(df)
+            self._chunk_sizes['stability_testing_stats'] += len(df)
+            if self._chunk_sizes['stability_testing_stats'] >= self.chunk_size:
+                self._write_chunk(output_dir, 'stability_testing_stats')
+    
     def save_consolidated_results(self, output_dir: Path) -> None:
         """Save any remaining data chunks to files."""
         # Write any remaining chunks with force_write=True to ensure final consolidation
@@ -433,8 +512,14 @@ class OLSExportStrategy(ExportStrategy):
         if self.should_export('test_results'):
             self._write_chunk(output_dir, 'test_results', force_write=True)
         
-        if self.should_export('sensitivity_testing'):  # Add sensitivity testing export
+        if self.should_export('sensitivity_testing'):
             self._write_chunk(output_dir, 'sensitivity_testing', force_write=True)
+        
+        if self.should_export('stability_testing'):
+            self._write_chunk(output_dir, 'stability_testing', force_write=True)
+        
+        if self.should_export('stability_testing_stats'):
+            self._write_chunk(output_dir, 'stability_testing_stats', force_write=True)
         
         # Reset containers
         self._initialize_containers()
@@ -730,6 +815,30 @@ class OLSModelAdapter(ExportableModel):
                     'value': conf_int.loc[var, 1]
                 }
             ])
+        
+        # Add VIF values if available
+        if hasattr(self.model, 'vif') and self.model.vif is not None:
+            vif_values = self.model.vif
+            if isinstance(vif_values, pd.Series):
+                for var_name, vif_value in vif_values.items():
+                    if pd.notnull(vif_value):
+                        stats_list.append({
+                            'category': 'Model Estimation',
+                            'model': model_id,
+                            'type': 'VIF',
+                            'value_type': var_name,
+                            'value': float(vif_value)
+                        })
+            elif isinstance(vif_values, dict):
+                for var_name, vif_value in vif_values.items():
+                    if pd.notnull(vif_value):
+                        stats_list.append({
+                            'category': 'Model Estimation',
+                            'model': model_id,
+                            'type': 'VIF',
+                            'value_type': var_name,
+                            'value': float(vif_value)
+                        })
         
         # Create DataFrame efficiently
         return pd.DataFrame(stats_list)
@@ -1613,3 +1722,215 @@ class OLSModelAdapter(ExportableModel):
             'value_type': value_type,
             'value': values
         }) 
+
+    def get_stability_results(self) -> Optional[pd.DataFrame]:
+        """Return walk-forward stability testing results in long format.
+        
+        Columns:
+        - date: timestamp index
+        - model: model id
+        - test_period: WF label with period (e.g., 'WF1: Mar2003-Mar2024')
+        - value_type: 'Actual' | 'In-Sample' | 'Out-of-Sample'
+        - value: numeric value
+        """
+        # Try to build Walk Forward Test via model API
+        try:
+            wft = self.model.stability_test
+        except Exception:
+            return None
+        
+        wf_models = getattr(wft, 'wf_models', None)
+        if not isinstance(wf_models, dict) or len(wf_models) == 0:
+            return None
+        
+        def _format_month(dt: pd.Timestamp) -> str:
+            return dt.strftime('%b%Y')
+        
+        def _format_period_label(wf_idx: int, wf_model) -> str:
+            # Use each WF model's own in-sample start/end when available
+            is_start = getattr(wf_model.dm._internal_loader, 'in_sample_start', None)
+            is_end = getattr(wf_model.dm, 'in_sample_end', None)
+            if is_start is None or is_end is None:
+                return f"WF{wf_idx}"
+            # Convert to pandas Timestamp
+            is_start = pd.to_datetime(is_start)
+            is_end = pd.to_datetime(is_end)
+            if getattr(wf_model.dm, 'freq', 'M') == 'M':
+                return f"WF{wf_idx}: {_format_month(is_start)}-{_format_month(is_end)}"
+            elif getattr(wf_model.dm, 'freq', 'M') == 'Q':
+                q_start = f"{is_start.year}-Q{(is_start.month - 1)//3 + 1}"
+                q_end = f"{is_end.year}-Q{(is_end.month - 1)//3 + 1}"
+                return f"WF{wf_idx}: {q_start}-{q_end}"
+            else:
+                return f"WF{wf_idx}: {is_start.date()}-{is_end.date()}"
+        
+        blocks: List[pd.DataFrame] = []
+        model_id = self._model_id
+        
+        # Iterate in the WF order (wf_models preserves insertion order)
+        for i, (wf_name, wf_model) in enumerate(wf_models.items(), start=1):
+            try:
+                label = _format_period_label(i, wf_model)
+                # Actual values: from in-sample start to end of OOS if available
+                actual_series = wf_model.dm.internal_data[wf_model.target]
+                oos_end = wf_model.dm.out_sample_idx.max() if len(getattr(wf_model.dm, 'out_sample_idx', [])) > 0 else wf_model.dm.in_sample_end
+                is_start = getattr(wf_model.dm._internal_loader, 'in_sample_start', None)
+                if is_start is None:
+                    is_start = actual_series.index.min()
+                # Build mask and slice
+                is_start = pd.to_datetime(is_start)
+                oos_end = pd.to_datetime(oos_end)
+                actual_slice = actual_series[(actual_series.index >= is_start) & (actual_series.index <= oos_end)]
+                if not actual_slice.empty:
+                    blocks.append(pd.DataFrame({
+                        'date': actual_slice.index,
+                        'model': model_id,
+                        'test_period': label,
+                        'value_type': 'Actual',
+                        'value': actual_slice.values
+                    }))
+                
+                # In-Sample fitted
+                y_fitted_in = getattr(wf_model, 'y_fitted_in', pd.Series(dtype=float))
+                if isinstance(y_fitted_in, pd.Series) and not y_fitted_in.empty:
+                    blocks.append(pd.DataFrame({
+                        'date': y_fitted_in.index,
+                        'model': model_id,
+                        'test_period': label,
+                        'value_type': 'In-Sample',
+                        'value': y_fitted_in.values
+                    }))
+                
+                # Out-of-Sample predicted
+                X_out = getattr(wf_model, 'X_out', pd.DataFrame())
+                if isinstance(X_out, pd.DataFrame) and not X_out.empty:
+                    y_pred_out = getattr(wf_model, 'y_pred_out', pd.Series(dtype=float))
+                    if isinstance(y_pred_out, pd.Series) and not y_pred_out.empty:
+                        blocks.append(pd.DataFrame({
+                            'date': y_pred_out.index,
+                            'model': model_id,
+                            'test_period': label,
+                            'value_type': 'Out-of-Sample',
+                            'value': y_pred_out.values
+                        }))
+            except Exception:
+                continue
+        
+        if not blocks:
+            return None
+        
+        df = pd.concat(blocks, ignore_index=True)
+        return df[STABILITY_COLUMNS] 
+
+    def get_stability_stats_results(self) -> Optional[pd.DataFrame]:
+        """Return walk-forward stability testing statistical metrics.
+        
+        Returns a DataFrame with columns:
+        - model: model id
+        - trial: WF trial identifier (e.g., 'WF1', 'WF2')
+        - category: metric category ('P-value', 'Coefficient', 'Coefficient %Change', 'adj R-squared', 'RMSE')
+        - value_type: specific metric identifier (variable names for coefficients/p-values, 'In-Sample'/'Out-of-Sample' for performance)
+        - value: numerical value
+        """
+        # Try to build Walk Forward Test via model API
+        try:
+            wft = self.model.stability_test
+        except Exception:
+            return None
+        
+        wf_models = getattr(wft, 'wf_models', None)
+        final_model = getattr(wft, 'final_model', None)
+        if not isinstance(wf_models, dict) or len(wf_models) == 0 or final_model is None:
+            return None
+        
+        model_id = self._model_id
+        stats_list = []
+
+        # Get final model parameters for percentage change calculation
+        final_params = final_model.params
+        
+        for i, (wf_name, wf_model) in enumerate(wf_models.items(), start=1):
+            try:
+                trial_name = wf_name  # Use 'WF1', 'WF2', etc.
+                
+                # 1. Coefficients
+                if hasattr(wf_model, 'params') and wf_model.params is not None:
+                    for var_name, coef_value in wf_model.params.items():
+                        if pd.notnull(coef_value):
+                            stats_list.append({
+                                'model': model_id,
+                                'trial': trial_name,
+                                'category': 'Coefficient',
+                                'value_type': var_name,
+                                'value': float(coef_value)
+                            })
+                
+                # 2. P-values
+                if hasattr(wf_model, 'pvalues') and wf_model.pvalues is not None:
+                    for var_name, p_value in wf_model.pvalues.items():
+                        if pd.notnull(p_value):
+                            stats_list.append({
+                                'model': model_id,
+                                'trial': trial_name,
+                                'category': 'P-value',
+                                'value_type': var_name,
+                                'value': float(p_value)
+                            })
+                
+                # 3. Coefficient % Change (vs final model)
+                if hasattr(wf_model, 'params') and wf_model.params is not None:
+                    for var_name, wf_coef in wf_model.params.items():
+                        if var_name in final_params and pd.notnull(wf_coef) and pd.notnull(final_params[var_name]):
+                            final_coef = final_params[var_name]
+                            if final_coef != 0:
+                                pct_change = (wf_coef - final_coef) / final_coef
+                                stats_list.append({
+                                    'model': model_id,
+                                    'trial': trial_name,
+                                    'category': 'Coefficient %Change',
+                                    'value_type': var_name,
+                                    'value': float(pct_change)
+                                })
+                
+                # 4. Adj R-squared (In-Sample)
+                if hasattr(wf_model, 'rsquared_adj') and pd.notnull(wf_model.rsquared_adj):
+                    stats_list.append({
+                        'model': model_id,
+                        'trial': trial_name,
+                        'category': 'adj R-squared',
+                        'value_type': 'In-Sample',
+                        'value': float(wf_model.rsquared_adj)
+                    })
+                
+                # 5. RMSE - In-Sample and Out-of-Sample
+                # In-Sample RMSE
+                if hasattr(wf_model, 'in_perf_measures'):
+                    in_measures = wf_model.in_perf_measures
+                    if isinstance(in_measures, pd.Series) and 'RMSE' in in_measures:
+                        stats_list.append({
+                            'model': model_id,
+                            'trial': trial_name,
+                            'category': 'RMSE',
+                            'value_type': 'In-Sample',
+                            'value': float(in_measures['RMSE'])
+                        })
+                
+                # Out-of-Sample RMSE
+                if hasattr(wf_model, 'out_perf_measures'):
+                    out_measures = wf_model.out_perf_measures
+                    if isinstance(out_measures, pd.Series) and 'RMSE' in out_measures:
+                        stats_list.append({
+                            'model': model_id,
+                            'trial': trial_name,
+                            'category': 'RMSE',
+                            'value_type': 'Out-of-Sample',
+                            'value': float(out_measures['RMSE'])
+                        })
+                
+            except Exception:
+                continue
+        
+        if not stats_list:
+            return None
+
+        return pd.DataFrame(stats_list) 
