@@ -700,6 +700,7 @@ class Segment:
             - 'test_results': Comprehensive test results from all tests
             - 'stability_testing': Walk-forward stability testing results
             - 'stability_testing_stats': Walk-forward stability testing statistical metrics
+            - 'scenario_testing_stats': Scenario testing statistical metrics for base variables
         overwrite : bool, default True
             Whether to overwrite existing files. If False and files exist, the operation
             will be cancelled with a warning message.
@@ -752,6 +753,8 @@ class Segment:
                 expected_files.append(output_dir / 'stability_testing.csv')
             elif content_type == 'stability_testing_stats':
                 expected_files.append(output_dir / 'stability_testing_stats.csv')
+            elif content_type == 'scenario_testing_stats':
+                expected_files.append(output_dir / 'scenario_testing_stats.csv')
         
         # Check if any expected files exist
         existing_files = [f for f in expected_files if f.exists()]

@@ -31,6 +31,7 @@ TEST_RESULTS_COLUMNS = ['model', 'test', 'index', 'metric', 'value']
 SENSITIVITY_COLUMNS = ['model', 'test', 'scenario_name', 'severity', 'variable/parameter', 'shock', 'date', 'frequency', 'value_type', 'value']
 STABILITY_COLUMNS = ['date', 'model', 'test_period', 'value_type', 'value']
 STABILITY_STATS_COLUMNS = ['model', 'trial', 'category', 'value_type', 'value']
+SCENARIO_STATS_COLUMNS = ['model', 'scenario_name', 'metric', 'period', 'severity', 'value']
 
 # Series type constants
 SERIES_TYPE_TARGET = 'Target'
@@ -46,7 +47,8 @@ EXPORT_CONTENT_TYPES = {
     'test_results': 'Comprehensive test results from all tests',
     'sensitivity_testing': 'Sensitivity testing results for parameters and inputs',
     'stability_testing': 'Walk-forward stability testing results',
-    'stability_testing_stats': 'Walk-forward stability testing statistical metrics'
+    'stability_testing_stats': 'Walk-forward stability testing statistical metrics',
+    'scenario_testing_stats': 'Scenario testing statistical metrics for base variables'
 }
 
 class ExportableModel(ABC):
@@ -90,6 +92,11 @@ class ExportableModel(ABC):
     @abstractmethod
     def get_stability_stats_results(self) -> Optional[pd.DataFrame]:
         """Return walk-forward stability testing statistical metrics."""
+        pass
+
+    @abstractmethod
+    def get_scenario_stats_results(self) -> Optional[pd.DataFrame]:
+        """Return scenario testing statistical metrics for base variables."""
         pass
 
 class ModelExportAdapter:
@@ -168,6 +175,11 @@ class ExportStrategy(ABC):
     @abstractmethod
     def export_stability_stats(self, model: ExportableModel, output_dir: Path) -> None:
         """Export walk-forward stability testing statistical metrics to CSV if available."""
+        pass
+
+    @abstractmethod
+    def export_scenario_stats(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export scenario testing statistical metrics to CSV if available."""
         pass
 
 class ExportFormatHandler(ABC):
@@ -253,6 +265,12 @@ class ExportManager:
                         self.strategy.export_stability_stats(model, output_dir)
                     except Exception as e:
                         print(f"Warning: Failed to export stability_testing_stats for {model.get_model_id()}: {e}")
+                
+                if self.strategy.should_export('scenario_testing_stats'):
+                    try:
+                        self.strategy.export_scenario_stats(model, output_dir)
+                    except Exception as e:
+                        print(f"Warning: Failed to export scenario_testing_stats for {model.get_model_id()}: {e}")
                         
             except Exception as e:
                 print(f"Error: Failed to process model {model.get_model_id()}: {e}")
@@ -285,6 +303,7 @@ class OLSExportStrategy(ExportStrategy):
         self._sensitivity_chunks = []  # New container for sensitivity results
         self._stability_chunks = []  # New container for stability results
         self._stability_stats_chunks = [] # New container for stability stats
+        self._scenario_stats_chunks = [] # New container for scenario stats
         # Per-content chunk counters
         self._chunk_sizes = {
             'timeseries_data': 0,
@@ -293,7 +312,8 @@ class OLSExportStrategy(ExportStrategy):
             'test_results': 0,
             'sensitivity_testing': 0,
             'stability_testing': 0,
-            'stability_testing_stats': 0
+            'stability_testing_stats': 0,
+            'scenario_testing_stats': 0
         }
         self._written_files = set()  # Track which files have been written
     
@@ -341,6 +361,11 @@ class OLSExportStrategy(ExportStrategy):
                 'chunks': self._stability_stats_chunks,
                 'columns': STABILITY_STATS_COLUMNS,
                 'filename': 'stability_testing_stats.csv'
+            },
+            'scenario_testing_stats': {
+                'chunks': self._scenario_stats_chunks,
+                'columns': SCENARIO_STATS_COLUMNS,
+                'filename': 'scenario_testing_stats.csv'
             }
         }
         
@@ -493,6 +518,18 @@ class OLSExportStrategy(ExportStrategy):
             if self._chunk_sizes['stability_testing_stats'] >= self.chunk_size:
                 self._write_chunk(output_dir, 'stability_testing_stats')
     
+    def export_scenario_stats(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export scenario testing statistical metrics with chunking support."""
+        if not self.should_export('scenario_testing_stats'):
+            return
+        
+        df = model.get_scenario_stats_results()
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            self._scenario_stats_chunks.append(df)
+            self._chunk_sizes['scenario_testing_stats'] += len(df)
+            if self._chunk_sizes['scenario_testing_stats'] >= self.chunk_size:
+                self._write_chunk(output_dir, 'scenario_testing_stats')
+    
     def save_consolidated_results(self, output_dir: Path) -> None:
         """Save any remaining data chunks to files."""
         # Write any remaining chunks with force_write=True to ensure final consolidation
@@ -516,6 +553,9 @@ class OLSExportStrategy(ExportStrategy):
         
         if self.should_export('stability_testing_stats'):
             self._write_chunk(output_dir, 'stability_testing_stats', force_write=True)
+        
+        if self.should_export('scenario_testing_stats'):
+            self._write_chunk(output_dir, 'scenario_testing_stats', force_write=True)
         
         # Reset containers but preserve written files tracking
         written_files_backup = self._written_files.copy()
@@ -2020,4 +2060,144 @@ class OLSModelAdapter(ExportableModel):
         if not stats_list:
             return None
 
+        return pd.DataFrame(stats_list)
+
+    def get_scenario_stats_results(self) -> Optional[pd.DataFrame]:
+        """Return scenario testing statistical metrics for base variables.
+        
+        Returns a DataFrame with columns:
+        - model: model id
+        - scenario_name: scenario set name (e.g., 'EWST_2024')
+        - metric: metric type ('4Q_CAGR', '9Q_CAGR', '12Q_CAGR', '9Q_Min', '9Q_Max', '9Q_Change')
+        - period: time period identifier or comparison base (e.g., 'Q1_2024-Q4_2024', 'base_vs_adv')
+        - severity: severity level for the metric (e.g., 'base', 'adv', 'sev', 'comparison')
+        - value: numerical value
+        
+        Calculates quarterly statistics for base variables only:
+        1. 4, 9, 12 Quarter CAGR for each severity
+        2. Min, max of the 9 Quarter change for each severity
+        3. 9 Quarter change comparing base vs other stressed cases
+        """
+        if not hasattr(self.model, 'scen_manager') or self.model.scen_manager is None:
+            return None
+        
+        # Only process base variable quarterly forecasts
+        if not hasattr(self.model.scen_manager, 'forecast_y_base_qtr_df'):
+            return None
+            
+        base_qtr_forecasts = self.model.scen_manager.forecast_y_base_qtr_df
+        if not base_qtr_forecasts:
+            return None
+        
+        model_id = self._model_id
+        stats_list = []
+        
+        for scen_set, qtr_df in base_qtr_forecasts.items():
+            if qtr_df is None or qtr_df.empty:
+                continue
+                
+            # Get scenarios for this scenario set
+            if hasattr(self.model.scen_manager, 'y_base_scens'):
+                base_scenarios = self.model.scen_manager.y_base_scens.get(scen_set, {})
+                
+                # Collect data for each severity level
+                severity_data = {}
+                
+                for scen_name in base_scenarios.keys():
+                    # Check if this scenario has quarterly data
+                    col_name = scen_name if scen_name in qtr_df.columns else f"{scen_set}_{scen_name}"
+                    if col_name in qtr_df.columns:
+                        qtr_forecast = qtr_df[col_name].dropna()
+                        if not qtr_forecast.empty and len(qtr_forecast) >= 4:  # Need at least 4 quarters
+                            severity_data[scen_name] = qtr_forecast
+                
+                # Calculate statistics for each severity
+                for severity, data in severity_data.items():
+                    data_values = data.values
+                    data_index = data.index
+                    
+                    # Calculate CAGR for different periods
+                    for quarters in [4, 9, 12]:
+                        if len(data_values) >= quarters:
+                            start_val = data_values[0]
+                            end_val = data_values[quarters-1]
+                            
+                            if start_val > 0 and end_val > 0:
+                                cagr = (end_val / start_val) ** (4.0 / quarters) - 1  # Annualized
+                                
+                                start_q = f"{data_index[0].year}-Q{data_index[0].quarter}"
+                                end_q = f"{data_index[quarters-1].year}-Q{data_index[quarters-1].quarter}"
+                                period_label = f"{start_q}-{end_q}"
+                                
+                                stats_list.append({
+                                    'model': model_id,
+                                    'scenario_name': scen_set,
+                                    'metric': f'{quarters}Q_CAGR',
+                                    'period': period_label,
+                                    'severity': severity,
+                                    'value': float(cagr)
+                                })
+                    
+                    # Calculate 9-quarter min/max if we have enough data
+                    if len(data_values) >= 9:
+                        # Calculate quarter-over-quarter changes for first 9 quarters
+                        qoq_changes = []
+                        for i in range(1, 9):
+                            if data_values[i-1] != 0:
+                                qoq_change = (data_values[i] / data_values[i-1]) - 1
+                                qoq_changes.append(qoq_change)
+                        
+                        if qoq_changes:
+                            min_change = min(qoq_changes)
+                            max_change = max(qoq_changes)
+                            
+                            start_q = f"{data_index[0].year}-Q{data_index[0].quarter}"
+                            end_q = f"{data_index[8].year}-Q{data_index[8].quarter}"
+                            period_label = f"{start_q}-{end_q}"
+                            
+                            stats_list.append({
+                                'model': model_id,
+                                'scenario_name': scen_set,
+                                'metric': '9Q_Min',
+                                'period': period_label,
+                                'severity': severity,
+                                'value': float(min_change)
+                            })
+                            
+                            stats_list.append({
+                                'model': model_id,
+                                'scenario_name': scen_set,
+                                'metric': '9Q_Max',
+                                'period': period_label,
+                                'severity': severity,
+                                'value': float(max_change)
+                            })
+                
+                # Calculate 9-quarter change comparisons between base and stress scenarios
+                if 'base' in severity_data and len(severity_data) > 1:
+                    base_data = severity_data['base']
+                    
+                    for stress_severity, stress_data in severity_data.items():
+                        if stress_severity != 'base' and len(base_data) >= 9 and len(stress_data) >= 9:
+                            # Calculate 9-quarter total change for both
+                            base_9q_change = (base_data.iloc[8] / base_data.iloc[0]) - 1 if base_data.iloc[0] != 0 else 0
+                            stress_9q_change = (stress_data.iloc[8] / stress_data.iloc[0]) - 1 if stress_data.iloc[0] != 0 else 0
+                            
+                            # Difference between stress and base
+                            change_diff = stress_9q_change - base_9q_change
+                            
+                            period_label = f"base_vs_{stress_severity}"
+                            
+                            stats_list.append({
+                                'model': model_id,
+                                'scenario_name': scen_set,
+                                'metric': '9Q_Change',
+                                'period': period_label,
+                                'severity': 'comparison',
+                                'value': float(change_diff)
+                            })
+        
+        if not stats_list:
+            return None
+            
         return pd.DataFrame(stats_list) 
