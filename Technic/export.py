@@ -2174,26 +2174,45 @@ class OLSModelAdapter(ExportableModel):
                             })
                 
                 # Calculate 9-quarter change comparisons between base and stress scenarios
-                if 'base' in severity_data and len(severity_data) > 1:
-                    base_data = severity_data['base']
-                    
+                # Find base scenario with flexible matching (case-insensitive and various naming conventions)
+                base_data = None
+                base_severity_name = None
+                
+                # Look for base scenario with flexible pattern matching (contains 'base' anywhere)
+                for severity_name in severity_data.keys():
+                    severity_lower = severity_name.lower()
+                    if 'base' in severity_lower:
+                        base_data = severity_data[severity_name]
+                        base_severity_name = severity_name
+                        break
+                
+                # If base scenario found and we have stress scenarios, calculate comparisons
+                if base_data is not None and len(severity_data) > 1:
                     for stress_severity, stress_data in severity_data.items():
-                        if stress_severity != 'base' and len(base_data) >= 9 and len(stress_data) >= 9:
-                            # Calculate 9-quarter total change for both
+                        # Only compare non-base scenarios that have sufficient data
+                        stress_lower = stress_severity.lower()
+                        if (stress_severity != base_severity_name and 
+                            'base' not in stress_lower and
+                            len(base_data) >= 9 and len(stress_data) >= 9):
+                            
+                            # Calculate 9-quarter total change for both scenarios
                             base_9q_change = (base_data.iloc[8] / base_data.iloc[0]) - 1 if base_data.iloc[0] != 0 else 0
                             stress_9q_change = (stress_data.iloc[8] / stress_data.iloc[0]) - 1 if stress_data.iloc[0] != 0 else 0
                             
-                            # Difference between stress and base
+                            # Difference: stress scenario change minus base scenario change
                             change_diff = stress_9q_change - base_9q_change
                             
-                            period_label = f"base_vs_{stress_severity}"
+                            # Period format consistent with other 9Q metrics (9 quarters from start)
+                            start_q = f"{stress_data.index[0].year}-Q{stress_data.index[0].quarter}"
+                            end_q = f"{stress_data.index[8].year}-Q{stress_data.index[8].quarter}"
+                            period_label = f"{start_q}-{end_q}"
                             
                             stats_list.append({
                                 'model': model_id,
                                 'scenario_name': scen_set,
-                                'metric': '9Q_Change',
+                                'metric': '9Q_Change from Base',
                                 'period': period_label,
-                                'severity': 'comparison',
+                                'severity': stress_severity,
                                 'value': float(change_diff)
                             })
         
