@@ -2068,15 +2068,17 @@ class OLSModelAdapter(ExportableModel):
         Returns a DataFrame with columns:
         - model: model id
         - scenario_name: scenario set name (e.g., 'EWST_2024')
-        - metric: metric type ('4Q_CAGR', '9Q_CAGR', '12Q_CAGR', '9Q_Min', '9Q_Max', '9Q_Change')
-        - period: time period identifier or comparison base (e.g., 'Q1_2024-Q4_2024', 'base_vs_adv')
-        - severity: severity level for the metric (e.g., 'base', 'adv', 'sev', 'comparison')
+        - metric: metric type ('P0', 'P1', 'P2', ..., '4Q_CAGR', '9Q_CAGR', '12Q_CAGR', '9Q_Change', '9Q_%Change', '%Change_from_Base')
+        - period: time period identifier (e.g., 'P0', 'P9', '2024-Q1-2026-Q1')
+        - severity: severity level for the metric (e.g., 'base', 'adv', 'sev')
         - value: numerical value
         
         Calculates quarterly statistics for base variables only:
-        1. 4, 9, 12 Quarter CAGR for each severity
-        2. Min, max of the 9 Quarter change for each severity
-        3. 9 Quarter change comparing base vs other stressed cases
+        1. Base variable forecast values at each quarter (P0, P1, P2, ...)
+        2. 4, 9, 12 Quarter CAGR using P0 as starting point
+        3. 9 Quarter Change = value at P9 - value at P0
+        4. 9 Quarter %Change = (value at P9 - value at P0) / value at P0
+        5. %Change from Base (at P9) = stress scenario value at P9 / baseline scenario value at P9
         """
         if not hasattr(self.model, 'scen_manager') or self.model.scen_manager is None:
             return None
@@ -2111,74 +2113,86 @@ class OLSModelAdapter(ExportableModel):
                         if not qtr_forecast.empty and len(qtr_forecast) >= 4:  # Need at least 4 quarters
                             severity_data[scen_name] = qtr_forecast
                 
-                # Calculate statistics for each severity
+                # 1. Base variable forecast values at each quarter (P0, P1, P2, ...)
                 for severity, data in severity_data.items():
                     data_values = data.values
-                    data_index = data.index
                     
-                    # Calculate CAGR for different periods
+                    # Add forecast values for each quarter (P0 = jumpoff, P1, P2, ...)
+                    for i, value in enumerate(data_values):
+                        stats_list.append({
+                            'model': model_id,
+                            'scenario_name': scen_set,
+                            'metric': f'P{i}',
+                            'period': f'P{i}',
+                            'severity': severity,
+                            'value': float(value)
+                        })
+                
+                # 2. CAGR calculations using P0 as starting point
+                for severity, data in severity_data.items():
+                    data_values = data.values
+                    p0_value = data_values[0]  # P0 is the jumpoff date
+                    
+                    # Calculate CAGR for different periods using P0 as base
                     for quarters in [4, 9, 12]:
-                        if len(data_values) >= quarters:
-                            start_val = data_values[0]
-                            end_val = data_values[quarters-1]
+                        if len(data_values) > quarters and p0_value > 0:  # Need quarters+1 data points (P0 to Pn)
+                            pn_value = data_values[quarters]  # P4, P9, or P12
                             
-                            if start_val > 0 and end_val > 0:
-                                cagr = (end_val / start_val) ** (4.0 / quarters) - 1  # Annualized
-                                
-                                start_q = f"{data_index[0].year}-Q{data_index[0].quarter}"
-                                end_q = f"{data_index[quarters-1].year}-Q{data_index[quarters-1].quarter}"
-                                period_label = f"{start_q}-{end_q}"
+                            if pn_value > 0:
+                                # CAGR = (Pn/P0)^(1/(quarters/4)) - 1 (annualized)
+                                cagr = (pn_value / p0_value) ** (4.0 / quarters) - 1
                                 
                                 stats_list.append({
                                     'model': model_id,
                                     'scenario_name': scen_set,
                                     'metric': f'{quarters}Q_CAGR',
-                                    'period': period_label,
+                                    'period': f'P0_to_P{quarters}',
                                     'severity': severity,
                                     'value': float(cagr)
                                 })
-                    
-                    # Calculate 9-quarter min/max if we have enough data
-                    if len(data_values) >= 9:
-                        # Calculate quarter-over-quarter changes for first 9 quarters
-                        qoq_changes = []
-                        for i in range(1, 9):
-                            if data_values[i-1] != 0:
-                                qoq_change = (data_values[i] / data_values[i-1]) - 1
-                                qoq_changes.append(qoq_change)
+                
+                # 3. 9 Quarter Change = value at P9 - value at P0
+                for severity, data in severity_data.items():
+                    data_values = data.values
+                    if len(data_values) > 9:  # Need at least P0 to P9
+                        p0_value = data_values[0]
+                        p9_value = data_values[9]
                         
-                        if qoq_changes:
-                            min_change = min(qoq_changes)
-                            max_change = max(qoq_changes)
-                            
-                            start_q = f"{data_index[0].year}-Q{data_index[0].quarter}"
-                            end_q = f"{data_index[8].year}-Q{data_index[8].quarter}"
-                            period_label = f"{start_q}-{end_q}"
+                        nine_q_change = p9_value - p0_value
+                        
+                        stats_list.append({
+                            'model': model_id,
+                            'scenario_name': scen_set,
+                            'metric': '9Q_Change',
+                            'period': 'P0_to_P9',
+                            'severity': severity,
+                            'value': float(nine_q_change)
+                        })
+                
+                # 4. 9 Quarter %Change = (value at P9 - value at P0) / value at P0
+                for severity, data in severity_data.items():
+                    data_values = data.values
+                    if len(data_values) > 9:  # Need at least P0 to P9
+                        p0_value = data_values[0]
+                        p9_value = data_values[9]
+                        
+                        if p0_value != 0:
+                            nine_q_pct_change = (p9_value - p0_value) / p0_value
                             
                             stats_list.append({
                                 'model': model_id,
                                 'scenario_name': scen_set,
-                                'metric': '9Q_Min',
-                                'period': period_label,
+                                'metric': '9Q_%Change',
+                                'period': 'P0_to_P9',
                                 'severity': severity,
-                                'value': float(min_change)
-                            })
-                            
-                            stats_list.append({
-                                'model': model_id,
-                                'scenario_name': scen_set,
-                                'metric': '9Q_Max',
-                                'period': period_label,
-                                'severity': severity,
-                                'value': float(max_change)
+                                'value': float(nine_q_pct_change)
                             })
                 
-                # Calculate 9-quarter change comparisons between base and stress scenarios
-                # Find base scenario with flexible matching (case-insensitive and various naming conventions)
+                # 5. %Change from Base (at P9) = stress scenario value at P9 / baseline scenario value at P9
+                # Find base scenario with flexible pattern matching
                 base_data = None
                 base_severity_name = None
                 
-                # Look for base scenario with flexible pattern matching (contains 'base' anywhere)
                 for severity_name in severity_data.keys():
                     severity_lower = severity_name.lower()
                     if 'base' in severity_lower:
@@ -2186,35 +2200,29 @@ class OLSModelAdapter(ExportableModel):
                         base_severity_name = severity_name
                         break
                 
-                # If base scenario found and we have stress scenarios, calculate comparisons
-                if base_data is not None and len(severity_data) > 1:
-                    for stress_severity, stress_data in severity_data.items():
-                        # Only compare non-base scenarios that have sufficient data
-                        stress_lower = stress_severity.lower()
-                        if (stress_severity != base_severity_name and 
-                            'base' not in stress_lower and
-                            len(base_data) >= 9 and len(stress_data) >= 9):
-                            
-                            # Calculate 9-quarter total change for both scenarios
-                            base_9q_change = (base_data.iloc[8] / base_data.iloc[0]) - 1 if base_data.iloc[0] != 0 else 0
-                            stress_9q_change = (stress_data.iloc[8] / stress_data.iloc[0]) - 1 if stress_data.iloc[0] != 0 else 0
-                            
-                            # Difference: stress scenario change minus base scenario change
-                            change_diff = stress_9q_change - base_9q_change
-                            
-                            # Period format consistent with other 9Q metrics (9 quarters from start)
-                            start_q = f"{stress_data.index[0].year}-Q{stress_data.index[0].quarter}"
-                            end_q = f"{stress_data.index[8].year}-Q{stress_data.index[8].quarter}"
-                            period_label = f"{start_q}-{end_q}"
-                            
-                            stats_list.append({
-                                'model': model_id,
-                                'scenario_name': scen_set,
-                                'metric': '9Q_Change from Base',
-                                'period': period_label,
-                                'severity': stress_severity,
-                                'value': float(change_diff)
-                            })
+                # Calculate %Change from Base for each stress scenario
+                if base_data is not None and len(base_data) > 9:
+                    base_p9_value = base_data.values[9]  # Base scenario value at P9
+                    
+                    if base_p9_value != 0:
+                        for stress_severity, stress_data in severity_data.items():
+                            # Only compare non-base scenarios
+                            stress_lower = stress_severity.lower()
+                            if (stress_severity != base_severity_name and 
+                                'base' not in stress_lower and
+                                len(stress_data) > 9):
+                                
+                                stress_p9_value = stress_data.values[9]  # Stress scenario value at P9
+                                pct_change_from_base = stress_p9_value / base_p9_value
+                                
+                                stats_list.append({
+                                    'model': model_id,
+                                    'scenario_name': scen_set,
+                                    'metric': '%Change_from_Base',
+                                    'period': 'P9',
+                                    'severity': stress_severity,
+                                    'value': float(pct_change_from_base)
+                                })
         
         if not stats_list:
             return None
