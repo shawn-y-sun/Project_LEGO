@@ -2073,28 +2073,21 @@ class OLSModelAdapter(ExportableModel):
         - value: numerical value
         
         Calculates quarterly statistics for base variables only:
-        1. 13-quarter forecast values (P0 to P12): P0 from historical actual, P1-P12 from scenario forecasts
+        1. 12-quarter forecast values (P0 to P12)
         2. 4, 9, 12 Quarter CAGR using P0 as starting point
         3. 9 Quarter Change = value at P9 - value at P0
-        4. 9 Quarter %Change = 9 Quarter Change / value at P0
-        5. %Change from Base(at P9) = stress scenario P9 / baseline scenario P9
+        4. 9 Quarter %Change = 9 Quarter Change / value at P0 - 1
+        5. %Change from Base(at P9) = stress scenario P9 / baseline scenario P9 - 1
         """
-        try:
-            if not hasattr(self.model, 'scen_manager') or self.model.scen_manager is None:
-                logger.debug(f"Model {self._model_id}: No scen_manager")
-                return None
+        if not hasattr(self.model, 'scen_manager') or self.model.scen_manager is None:
+            return None
+        
+        # Only process base variable quarterly forecasts
+        if not hasattr(self.model.scen_manager, 'forecast_y_base_qtr_df'):
+            return None
             
-            # Only process base variable quarterly forecasts
-            if not hasattr(self.model.scen_manager, 'forecast_y_base_qtr_df'):
-                logger.debug(f"Model {self._model_id}: No forecast_y_base_qtr_df")
-                return None
-                
-            base_qtr_forecasts = self.model.scen_manager.forecast_y_base_qtr_df
-            if not base_qtr_forecasts:
-                logger.debug(f"Model {self._model_id}: Empty forecast_y_base_qtr_df")
-                return None
-        except Exception as e:
-            logger.debug(f"Model {self._model_id}: Error in initial checks: {e}")
+        base_qtr_forecasts = self.model.scen_manager.forecast_y_base_qtr_df
+        if not base_qtr_forecasts:
             return None
         
         model_id = self._model_id
@@ -2102,30 +2095,39 @@ class OLSModelAdapter(ExportableModel):
         
         for scen_set, qtr_df in base_qtr_forecasts.items():
             if qtr_df is None or qtr_df.empty:
-                logger.debug(f"Model {self._model_id}: No data for scenario set {scen_set}")
                 continue
                 
             # Get scenarios for this scenario set
             if hasattr(self.model.scen_manager, 'y_base_scens'):
                 base_scenarios = self.model.scen_manager.y_base_scens.get(scen_set, {})
-                logger.debug(f"Model {self._model_id}: Found {len(base_scenarios)} scenarios in {scen_set}: {list(base_scenarios.keys())}")
-            else:
-                logger.debug(f"Model {self._model_id}: No y_base_scens")
-                continue
                 
                 # Collect data for each severity level 
-                # P0 comes from historical actual, P1-P12 from scenario forecasts (12 quarters)
+                # P0 from historical actual at jump-off date, P1-P12 from scenario forecasts
                 severity_data = {}
                 
-                # Get historical quarterly base actual for P0 (jump-off date)
-                historical_base_actual = None
-                if hasattr(self.model, 'y_base_full') and self.model.y_base_full is not None:
-                    # Convert to quarterly and get the last actual value as P0
-                    base_actual = self.model.y_base_full.copy()
-                    base_actual.index = pd.to_datetime(base_actual.index)
-                    base_actual_q = base_actual.groupby(pd.Grouper(freq='Q')).mean()
-                    if not base_actual_q.empty:
-                        historical_base_actual = base_actual_q.iloc[-1]  # Last actual quarter as P0
+                # Get P0 base variable value (same approach as get_scenario_results)
+                p0_base_value = None
+                p0_quarter_date = None
+                
+                # Get base actual quarterly data at jump-off date
+                base_actual = getattr(self.model, 'y_base_full', None)
+                if base_actual is not None and not base_actual.empty:
+                    # Convert to quarterly (same pattern as get_scenario_results)
+                    base_actual_q = base_actual.copy()
+                    base_actual_q.index = pd.to_datetime(base_actual_q.index)
+                    base_actual_q = base_actual_q.groupby(pd.Grouper(freq='Q')).mean()
+                    base_actual_q.index = base_actual_q.index.to_period('Q').to_timestamp(how='end').normalize()
+                    
+                    # Get the jump-off date from scenario manager
+                    if hasattr(self.model.scen_manager, 'P0') and self.model.scen_manager.P0 is not None:
+                        jump_off_date = self.model.scen_manager.P0
+                        # Convert to quarter-end to match base_actual_q index
+                        jump_off_q_end = pd.Timestamp(jump_off_date.year, jump_off_date.month, 1) + pd.offsets.QuarterEnd(0)
+                        
+                        # Get the base actual value at jump-off quarter
+                        if jump_off_q_end in base_actual_q.index:
+                            p0_base_value = base_actual_q.loc[jump_off_q_end]
+                            p0_quarter_date = jump_off_q_end
                 
                 for scen_name in base_scenarios.keys():
                     # Check if this scenario has quarterly forecast data (P1-P12)
@@ -2133,30 +2135,22 @@ class OLSModelAdapter(ExportableModel):
                     if col_name in qtr_df.columns:
                         qtr_forecast = qtr_df[col_name].dropna()
                         if not qtr_forecast.empty and len(qtr_forecast) >= 12:  # Need P1-P12 (12 quarters)
-                            # Combine P0 (historical) with P1-P12 (forecasts)
-                            if historical_base_actual is not None:
+                            # Combine P0 (historical actual) with P1-P12 (forecasts)
+                            if p0_base_value is not None and p0_quarter_date is not None:
                                 # Create combined series: P0 (historical) + P1-P12 (forecasts)
-                                p0_value = historical_base_actual
-                                combined_values = np.concatenate([[p0_value], qtr_forecast.values])
-                                
-                                # Create combined index (P0 date + forecast dates)
-                                p0_date = base_actual_q.index[-1]  # Last historical quarter
-                                combined_index = [p0_date] + list(qtr_forecast.index)
-                                
+                                combined_values = np.concatenate([[p0_base_value], qtr_forecast.values])
+                                combined_index = [p0_quarter_date] + list(qtr_forecast.index)
                                 combined_series = pd.Series(combined_values, index=combined_index)
                                 severity_data[scen_name] = combined_series
                             else:
-                                # Fallback: use forecast data as-is if no historical data
+                                # Fallback: use forecast data as-is if no P0 data available
                                 severity_data[scen_name] = qtr_forecast
                 
                 if not severity_data:
-                    logger.debug(f"Model {self._model_id}: No severity data found for {scen_set} - insufficient quarters or missing base scenarios")
                     continue
                 
-                logger.debug(f"Model {self._model_id}: Processing {len(severity_data)} severities for {scen_set}: {list(severity_data.keys())}")
-                
                 # SECTION 1: 13-Quarter Forecast Values (P0 to P12)
-                # P0 = historical actual (jump-off), P1-P12 = scenario forecasts
+                # P0 = historical actual at jump-off, P1-P12 = scenario forecasts
                 # Order: P0, P1, P2, ..., P9, P10, P11, P12 (not P1, P10, P11, P12, P2, ...)
                 for period_idx in range(13):  # P0 to P12
                     period_name = f"P{period_idx}"
@@ -2177,7 +2171,7 @@ class OLSModelAdapter(ExportableModel):
                     p0_value = data_values[0]  # P0 as starting point
                     
                     # Calculate CAGR for different periods using P0 as base
-                    for quarters in [4, 9, 12]:  # P0 (historical) + P1-P12 (forecasts) = 13 total quarters
+                    for quarters in [4, 9, 12]:
                         if len(data_values) > quarters and p0_value > 0:  # P0 to P{quarters}
                             end_val = data_values[quarters]  # P{quarters} value
                             
@@ -2211,9 +2205,9 @@ class OLSModelAdapter(ExportableModel):
                             'value': float(q9_change)
                         })
                         
-                        # 9 Quarter %Change = (P9 - P0) / P0
+                        # 9 Quarter %Change = P9/P0 - 1
                         if p0_value != 0:
-                            q9_pct_change = q9_change / p0_value
+                            q9_pct_change = (p9_value / p0_value) - 1
                             stats_list.append({
                                 'model': model_id,
                                 'scenario_name': scen_set,
@@ -2249,7 +2243,7 @@ class OLSModelAdapter(ExportableModel):
                                 stress_p9_value = stress_data.iloc[9]  # Stress scenario P9 value
                                 
                                 # %Change from Base = stress_P9 / baseline_P9
-                                pct_change_from_base = stress_p9_value / base_p9_value
+                                pct_change_from_base = stress_p9_value / base_p9_value - 1
                                 
                                 stats_list.append({
                                     'model': model_id,
