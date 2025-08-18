@@ -31,7 +31,7 @@ TEST_RESULTS_COLUMNS = ['model', 'test', 'index', 'metric', 'value']
 SENSITIVITY_COLUMNS = ['model', 'test', 'scenario_name', 'severity', 'variable/parameter', 'shock', 'date', 'frequency', 'value_type', 'value']
 STABILITY_COLUMNS = ['date', 'model', 'test_period', 'value_type', 'value']
 STABILITY_STATS_COLUMNS = ['model', 'trial', 'category', 'value_type', 'value']
-SCENARIO_STATS_COLUMNS = ['model', 'scenario_name', 'metric', 'period', 'severity', 'value']
+SCENARIO_STATS_COLUMNS = ['model', 'scenario_name', 'metric', 'severity', 'value']
 
 # Series type constants
 SERIES_TYPE_TARGET = 'Target'
@@ -2069,7 +2069,6 @@ class OLSModelAdapter(ExportableModel):
         - model: model id
         - scenario_name: scenario set name (e.g., 'EWST_2024')
         - metric: metric type (P0, P1, P2, ..., P12, 4Q_CAGR, 9Q_CAGR, 12Q_CAGR, 9Q_Change, 9Q_%Change, %Change_from_Base(at_P9))
-        - period: time period identifier (e.g., '2024-Q1', 'P0_to_P4', 'P0_to_P9', 'P0_to_P12')
         - severity: severity level for the metric (e.g., 'base', 'adv', 'sev')
         - value: numerical value
         
@@ -2123,15 +2122,10 @@ class OLSModelAdapter(ExportableModel):
                     
                     for severity, data in severity_data.items():
                         if len(data) > period_idx:
-                            # Period shows the actual quarter date
-                            quarter_date = data.index[period_idx]
-                            period_label = f"{quarter_date.year}-Q{quarter_date.quarter}"
-                            
                             stats_list.append({
                                 'model': model_id,
                                 'scenario_name': scen_set,
                                 'metric': period_name,
-                                'period': period_label,
                                 'severity': severity,
                                 'value': float(data.iloc[period_idx])
                             })
@@ -2154,7 +2148,6 @@ class OLSModelAdapter(ExportableModel):
                                     'model': model_id,
                                     'scenario_name': scen_set,
                                     'metric': f'{quarters}Q_CAGR',
-                                    'period': f'P0_to_P{quarters}',
                                     'severity': severity,
                                     'value': float(cagr)
                                 })
@@ -2173,7 +2166,6 @@ class OLSModelAdapter(ExportableModel):
                             'model': model_id,
                             'scenario_name': scen_set,
                             'metric': '9Q_Change',
-                            'period': 'P0_to_P9',
                             'severity': severity,
                             'value': float(q9_change)
                         })
@@ -2185,7 +2177,6 @@ class OLSModelAdapter(ExportableModel):
                                 'model': model_id,
                                 'scenario_name': scen_set,
                                 'metric': '9Q_%Change',
-                                'period': 'P0_to_P9',
                                 'severity': severity,
                                 'value': float(q9_pct_change)
                             })
@@ -2223,7 +2214,6 @@ class OLSModelAdapter(ExportableModel):
                                     'model': model_id,
                                     'scenario_name': scen_set,
                                     'metric': '%Change_from_Base(at_P9)',
-                                    'period': 'P9',
                                     'severity': stress_severity,
                                     'value': float(pct_change_from_base)
                                 })
