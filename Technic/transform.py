@@ -195,12 +195,12 @@ def ABSGR(series: pd.Series, periods: int = 1) -> pd.Series:
 
 # Rolling window transforms
 
-def ROLLAVG(series: pd.Series, periods: int = 4) -> pd.Series:
+def ROLLAVG4(series: pd.Series, periods: int = 4) -> pd.Series:
     """Rolling average over specified periods."""
     return series.rolling(periods).mean()
 
 
-def DIV_ROLLAVG(series: pd.Series, periods: int = 4) -> pd.Series:
+def DIV_ROLLAVG4(series: pd.Series, periods: int = 4) -> pd.Series:
     """Difference from rolling average: series - rolling average."""
     return series - ROLLAVG(series, periods)
 

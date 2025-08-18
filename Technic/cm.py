@@ -113,7 +113,8 @@ class CM:
         self,
         specs: List[Union[str, Dict[str, Any]]],
         sample: str = 'in',
-        outlier_idx: Optional[List[Any]] = None
+        outlier_idx: Optional[List[Any]] = None,
+        model_kwargs: Optional[Dict[str, Any]] = None
     ) -> None:
         """
         Build model instance(s) using the specified sample type.
@@ -139,6 +140,7 @@ class CM:
         # Cache input specs and outlier indices
         self.specs = specs
         self.outlier_idx = outlier_idx or []
+        model_kwargs = model_kwargs or {}
 
         if self.dm is None:
             raise ValueError("No DataManager available for CM.build().")
@@ -160,7 +162,8 @@ class CM:
                 target_base=self.target_base,
                 target_exposure=self.target_exposure,
                 scen_cls=self.scen_cls,
-                qtr_method=self.qtr_method
+                qtr_method=self.qtr_method,
+                **model_kwargs
             ).fit()
 
         # Create full-sample model if requested
@@ -175,7 +178,8 @@ class CM:
                 target_base=self.target_base,
                 target_exposure=self.target_exposure,
                 scen_cls=self.scen_cls,
-                qtr_method=self.qtr_method
+                qtr_method=self.qtr_method,
+                **model_kwargs
             ).fit()
 
     @property
