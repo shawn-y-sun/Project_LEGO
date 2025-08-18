@@ -681,11 +681,16 @@ class OLSModelAdapter(ExportableModel):
         """Return model statistics and metrics with optimized performance.
         
         Returns a DataFrame with columns:
-        - category: 'Goodness of Fit' or 'Model Estimation'
+        - category: 'Goodness of Fit', 'Model Estimation', or 'Summary Statistics'
         - model: Model identifier
         - type: Metric type or estimation type
-        - value_type: Specific metric or driver name
+        - value_type: Specific metric or variable name
         - value: The actual value
+        
+        Summary Statistics includes descriptive statistics for:
+        - Target variable (combined in-sample and out-of-sample data)
+        - Base variable (if available)
+        - All independent variables (combined in-sample and out-of-sample data)
         """
         model_id = self._model_id
         stats_list = []
@@ -877,6 +882,63 @@ class OLSModelAdapter(ExportableModel):
                             'value_type': var_name,
                             'value': float(vif_value)
                         })
+        
+        # Add Summary Statistics for all variables
+        def _add_summary_stats(data_series: pd.Series, var_name: str):
+            """Helper function to calculate and add summary statistics for a variable."""
+            if data_series is None or data_series.empty:
+                return
+            
+            # Calculate summary statistics
+            summary_stats = {
+                'Mean': data_series.mean(),
+                'Std': data_series.std(),
+                'Min': data_series.min(),
+                'Max': data_series.max(),
+                'Median': data_series.median(),
+                '25th Percentile': data_series.quantile(0.25),
+                '90th Percentile': data_series.quantile(0.90),
+                '95th Percentile': data_series.quantile(0.95)
+            }
+            
+            # Add each statistic to stats_list
+            for stat_name, stat_value in summary_stats.items():
+                if pd.notnull(stat_value):
+                    stats_list.append({
+                        'category': 'Summary Statistics',
+                        'model': model_id,
+                        'type': stat_name,
+                        'value_type': var_name,
+                        'value': float(stat_value)
+                    })
+        
+        # Target variable summary statistics
+        target_data = pd.concat([self.model.y_in, self.model.y_out]).sort_index()
+        _add_summary_stats(target_data, 'Target')
+        
+        # Base variable summary statistics (if available)
+        base_data = getattr(self.model, 'y_base_full', None)
+        if base_data is not None and not base_data.empty:
+            _add_summary_stats(base_data, 'Base')
+        
+        # Independent variables summary statistics
+        # Combine in-sample and out-of-sample data for each feature
+        feature_data_in = self.model.X_in
+        feature_data_out = getattr(self.model, 'X_out', pd.DataFrame())
+        
+        if not feature_data_in.empty:
+            for var_name in feature_data_in.columns:
+                # Combine in-sample and out-of-sample data for this variable
+                var_series_in = feature_data_in[var_name]
+                var_series_out = feature_data_out.get(var_name, pd.Series(dtype=float))
+                
+                # Combine series if out-of-sample data exists
+                if not var_series_out.empty:
+                    combined_var_series = pd.concat([var_series_in, var_series_out]).sort_index()
+                else:
+                    combined_var_series = var_series_in
+                
+                _add_summary_stats(combined_var_series, var_name)
         
         # Create DataFrame efficiently
         return pd.DataFrame(stats_list)
