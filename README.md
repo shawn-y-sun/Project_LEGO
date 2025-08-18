@@ -7,7 +7,7 @@
 ![License](https://img.shields.io/badge/License-Proprietary-black)
 ![Version](https://img.shields.io/badge/Version-Beta%20v2.0-orange)
 
-**A comprehensive Python framework for financial model development with advanced scenario analysis**
+**A comprehensive Python framework for financial model development: automated search, rigorous evaluation/testing, and scenario forecasting**
 
 </div>
 
@@ -22,7 +22,7 @@
 
 ## 📖 Overview
 
-**Project LEGO** is a production-grade Python framework for assembling econometric models through a guided six-step workflow. Built for financial modeling (PPNR focus), it provides first‑class scenario analysis, exhaustive model search, robust validation, and export-ready reporting — all with a small set of consistent APIs.
+**Project LEGO** is a production-grade Python framework for assembling econometric models through a guided six-step workflow. Built for financial modeling (PPNR focus), it provides automated exhaustive search, comprehensive evaluation and diagnostics (fit, significance, residual tests, cointegration, stability), and scenario forecasting — all with a small set of consistent APIs.
 
 While OLS is the primary model today, the framework is designed to be model‑agnostic. Upcoming releases will add additional model families (e.g., Error‑Correction, AR/ARIMA) behind the same `Segment` and reporting interfaces.
 
@@ -47,12 +47,12 @@ While OLS is the primary model today, the framework is designed to be model‑ag
   - Broadcast feature engineering with `DataManager.apply_to_all()`; maintain metadata via `update_var_map()`
 
 - **Step 3 — Exhaustive Search**:
-  - `Segment.search_cms()` with driver pools from raw names, `TSFM`, `CondVar`, `DumVar('*')`
-  - Expected‑sign rules, lag/period generation, max‑var and constraint controls, Top‑N ranking
+  - Automated search via `Segment.search_cms()` across driver pools (`TSFM`, `CondVar`, `DumVar('*')`, raw vars)
+  - Constraints (expected‑signs, lags/periods, max‑vars), scoring and Top‑N selection
 
 - **Step 4 — Evaluation & Validation**:
-  - `Segment.show_report()` with performance tables, parameter stats, residual tests, cointegration
-  - Walk‑forward/POOS stability via DataManager integration; integrated scenario plots
+  - `Segment.show_report()` with performance summaries, parameter significance, residual diagnostics (normality, stationarity, autocorrelation, heteroscedasticity), and cointegration
+  - Walk‑forward/POOS stability; integrated scenario plots and comparisons
 
 - **Step 5 — Fine‑tune & Enhancement**:
   - Rapid iteration using `Segment.build_cm()` and refined search criteria; quick spec comparisons
