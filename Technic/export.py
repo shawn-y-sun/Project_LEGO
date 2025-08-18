@@ -29,6 +29,9 @@ STATICSTATS_COLUMNS = ['category', 'model', 'type', 'value_type', 'value']
 SCENARIO_COLUMNS = ['model', 'scenario_name', 'severity', 'date', 'frequency', 'value_type', 'value']
 TEST_RESULTS_COLUMNS = ['model', 'test', 'index', 'metric', 'value']
 SENSITIVITY_COLUMNS = ['model', 'test', 'scenario_name', 'severity', 'variable/parameter', 'shock', 'date', 'frequency', 'value_type', 'value']
+STABILITY_COLUMNS = ['date', 'model', 'test_period', 'value_type', 'value']
+STABILITY_STATS_COLUMNS = ['model', 'trial', 'category', 'value_type', 'value']
+SCENARIO_STATS_COLUMNS = ['model', 'scenario_name', 'metric', 'severity', 'value']
 
 # Series type constants
 SERIES_TYPE_TARGET = 'Target'
@@ -42,7 +45,10 @@ EXPORT_CONTENT_TYPES = {
     'staticStats': 'Model statistics and metrics',
     'scenario_testing': 'Scenario testing results',
     'test_results': 'Comprehensive test results from all tests',
-    'sensitivity_testing': 'Sensitivity testing results for parameters and inputs'
+    'sensitivity_testing': 'Sensitivity testing results for parameters and inputs',
+    'stability_testing': 'Walk-forward stability testing results',
+    'stability_testing_stats': 'Walk-forward stability testing statistical metrics',
+    'scenario_testing_stats': 'Scenario testing statistical metrics for base variables'
 }
 
 class ExportableModel(ABC):
@@ -76,6 +82,21 @@ class ExportableModel(ABC):
     @abstractmethod
     def get_sensitivity_results(self) -> Optional[pd.DataFrame]:
         """Return sensitivity testing results if available."""
+        pass
+
+    @abstractmethod
+    def get_stability_results(self) -> Optional[pd.DataFrame]:
+        """Return walk-forward stability testing time series in long format."""
+        pass
+
+    @abstractmethod
+    def get_stability_stats_results(self) -> Optional[pd.DataFrame]:
+        """Return walk-forward stability testing statistical metrics."""
+        pass
+
+    @abstractmethod
+    def get_scenario_stats_results(self) -> Optional[pd.DataFrame]:
+        """Return scenario testing statistical metrics for base variables."""
         pass
 
 class ModelExportAdapter:
@@ -139,6 +160,26 @@ class ExportStrategy(ABC):
     @abstractmethod
     def save_consolidated_results(self, output_dir: Path) -> None:
         """Save consolidated results from all models to files."""
+        pass
+
+    @abstractmethod
+    def export_sensitivity_results(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export sensitivity testing results to CSV if available."""
+        pass
+
+    @abstractmethod
+    def export_stability_results(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export walk-forward stability testing results to CSV if available."""
+        pass
+
+    @abstractmethod
+    def export_stability_stats(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export walk-forward stability testing statistical metrics to CSV if available."""
+        pass
+
+    @abstractmethod
+    def export_scenario_stats(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export scenario testing statistical metrics to CSV if available."""
         pass
 
 class ExportFormatHandler(ABC):
@@ -212,6 +253,24 @@ class ExportManager:
                         self.strategy.export_sensitivity_results(model, output_dir)
                     except Exception as e:
                         print(f"Warning: Failed to export sensitivity_testing for {model.get_model_id()}: {e}")
+                
+                if self.strategy.should_export('stability_testing'):
+                    try:
+                        self.strategy.export_stability_results(model, output_dir)
+                    except Exception as e:
+                        print(f"Warning: Failed to export stability_testing for {model.get_model_id()}: {e}")
+                
+                if self.strategy.should_export('stability_testing_stats'):
+                    try:
+                        self.strategy.export_stability_stats(model, output_dir)
+                    except Exception as e:
+                        print(f"Warning: Failed to export stability_testing_stats for {model.get_model_id()}: {e}")
+                
+                if self.strategy.should_export('scenario_testing_stats'):
+                    try:
+                        self.strategy.export_scenario_stats(model, output_dir)
+                    except Exception as e:
+                        print(f"Warning: Failed to export scenario_testing_stats for {model.get_model_id()}: {e}")
                         
             except Exception as e:
                 print(f"Error: Failed to process model {model.get_model_id()}: {e}")
@@ -219,12 +278,6 @@ class ExportManager:
         
         # Save consolidated results
         self.strategy.save_consolidated_results(output_dir)
-        
-        # Print completion message only if files were written
-        written_files = self.strategy.get_written_files()
-        if written_files:
-            files_str = ", ".join(f"'{p.name}'" for p in written_files)
-            print(f"\nExport completed. Files written: {files_str}")
 
 class OLSExportStrategy(ExportStrategy):
     """Export strategy for OLS models with optimized performance."""
@@ -248,6 +301,9 @@ class OLSExportStrategy(ExportStrategy):
         self._scenario_chunks = []
         self._test_results_chunks = []
         self._sensitivity_chunks = []  # New container for sensitivity results
+        self._stability_chunks = []  # New container for stability results
+        self._stability_stats_chunks = [] # New container for stability stats
+        self._scenario_stats_chunks = [] # New container for scenario stats
         # Per-content chunk counters
         self._chunk_sizes = {
             'timeseries_data': 0,
@@ -255,6 +311,9 @@ class OLSExportStrategy(ExportStrategy):
             'scenario_testing': 0,
             'test_results': 0,
             'sensitivity_testing': 0,
+            'stability_testing': 0,
+            'stability_testing_stats': 0,
+            'scenario_testing_stats': 0
         }
         self._written_files = set()  # Track which files have been written
     
@@ -292,6 +351,21 @@ class OLSExportStrategy(ExportStrategy):
                 'chunks': self._sensitivity_chunks,
                 'columns': SENSITIVITY_COLUMNS,
                 'filename': 'sensitivity_testing.csv'
+            },
+            'stability_testing': {
+                'chunks': self._stability_chunks,
+                'columns': STABILITY_COLUMNS,
+                'filename': 'stability_testing.csv'
+            },
+            'stability_testing_stats': {
+                'chunks': self._stability_stats_chunks,
+                'columns': STABILITY_STATS_COLUMNS,
+                'filename': 'stability_testing_stats.csv'
+            },
+            'scenario_testing_stats': {
+                'chunks': self._scenario_stats_chunks,
+                'columns': SCENARIO_STATS_COLUMNS,
+                'filename': 'scenario_testing_stats.csv'
             }
         }
         
@@ -317,11 +391,13 @@ class OLSExportStrategy(ExportStrategy):
             # Delegate to format handler for flexibility and control of mode/header
             self.format_handler.save_dataframe(df, filepath, mode=write_mode, header=write_header)
             
+            # Always track written files, regardless of mode
+            self._written_files.add(filepath)
+            
             # Log appropriate success message only for new files or force_write
             if force_write or not file_exists:
                 action = "updated" if file_exists else "wrote"
                 logger.info("Successfully %s %s file: %s", action, content_type, filepath)
-                self._written_files.add(filepath)
         except Exception as e:
             logger.exception("Failed to write %s file to %s: %s", content_type, filepath, e)
         
@@ -418,6 +494,42 @@ class OLSExportStrategy(ExportStrategy):
             if self._chunk_sizes['scenario_testing'] >= self.chunk_size:
                 self._write_chunk(output_dir, 'scenario_testing')
     
+    def export_stability_results(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export walk-forward stability results with chunking support."""
+        if not self.should_export('stability_testing'):
+            return
+        
+        df = model.get_stability_results()
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            self._stability_chunks.append(df)
+            self._chunk_sizes['stability_testing'] += len(df)
+            if self._chunk_sizes['stability_testing'] >= self.chunk_size:
+                self._write_chunk(output_dir, 'stability_testing')
+    
+    def export_stability_stats(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export walk-forward stability testing statistical metrics with chunking support."""
+        if not self.should_export('stability_testing_stats'):
+            return
+        
+        df = model.get_stability_stats_results()
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            self._stability_stats_chunks.append(df)
+            self._chunk_sizes['stability_testing_stats'] += len(df)
+            if self._chunk_sizes['stability_testing_stats'] >= self.chunk_size:
+                self._write_chunk(output_dir, 'stability_testing_stats')
+    
+    def export_scenario_stats(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export scenario testing statistical metrics with chunking support."""
+        if not self.should_export('scenario_testing_stats'):
+            return
+        
+        df = model.get_scenario_stats_results()
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            self._scenario_stats_chunks.append(df)
+            self._chunk_sizes['scenario_testing_stats'] += len(df)
+            if self._chunk_sizes['scenario_testing_stats'] >= self.chunk_size:
+                self._write_chunk(output_dir, 'scenario_testing_stats')
+    
     def save_consolidated_results(self, output_dir: Path) -> None:
         """Save any remaining data chunks to files."""
         # Write any remaining chunks with force_write=True to ensure final consolidation
@@ -433,11 +545,22 @@ class OLSExportStrategy(ExportStrategy):
         if self.should_export('test_results'):
             self._write_chunk(output_dir, 'test_results', force_write=True)
         
-        if self.should_export('sensitivity_testing'):  # Add sensitivity testing export
+        if self.should_export('sensitivity_testing'):
             self._write_chunk(output_dir, 'sensitivity_testing', force_write=True)
         
-        # Reset containers
+        if self.should_export('stability_testing'):
+            self._write_chunk(output_dir, 'stability_testing', force_write=True)
+        
+        if self.should_export('stability_testing_stats'):
+            self._write_chunk(output_dir, 'stability_testing_stats', force_write=True)
+        
+        if self.should_export('scenario_testing_stats'):
+            self._write_chunk(output_dir, 'scenario_testing_stats', force_write=True)
+        
+        # Reset containers but preserve written files tracking
+        written_files_backup = self._written_files.copy()
         self._initialize_containers()
+        self._written_files = written_files_backup
 
 class OLSModelAdapter(ExportableModel):
     """Adapter for OLS models with optimized performance.
@@ -523,8 +646,8 @@ class OLSModelAdapter(ExportableModel):
             stacked_out = stacked_out[['date', 'model', 'series_type', 'value_type', 'value']]
             blocks.append(stacked_out)
  
-        # Residuals
-        blocks.append(self._build_ts_block(self.model.resid.index, model_id, SERIES_TYPE_RESIDUAL, 'Residual', self.model.resid.values))
+        # Residuals (negate statsmodels convention to get fitted - actual)
+        blocks.append(self._build_ts_block(self.model.resid.index, model_id, SERIES_TYPE_RESIDUAL, 'Residual', -self.model.resid.values))
  
         # Base variable series if available
         y_base_full = getattr(self.model, 'y_base_full', None)
@@ -539,16 +662,16 @@ class OLSModelAdapter(ExportableModel):
 
         # Base residuals (computed if actuals exist)
         if y_base_full is not None and not y_base_full.empty:
-            # In-sample residuals for Base: Actual - Fitted_IS
+            # In-sample residuals for Base: Fitted_IS - Actual
             if y_base_fitted_in is not None and not y_base_fitted_in.empty:
                 aligned_actual_in = y_base_full.reindex(y_base_fitted_in.index)
-                base_resid_in = (aligned_actual_in - y_base_fitted_in).dropna()
+                base_resid_in = (y_base_fitted_in - aligned_actual_in).dropna()
                 if not base_resid_in.empty:
                     blocks.append(self._build_ts_block(base_resid_in.index, model_id, SERIES_TYPE_BASE, 'Residual', base_resid_in.values))
-            # Out-of-sample residuals for Base: Actual - Pred_OOS (if overlapping actuals exist)
+            # Out-of-sample residuals for Base: Pred_OOS - Actual (if overlapping actuals exist)
             if y_base_pred_out is not None and not y_base_pred_out.empty:
                 aligned_actual_out = y_base_full.reindex(y_base_pred_out.index)
-                base_resid_out = (aligned_actual_out - y_base_pred_out).dropna()
+                base_resid_out = (y_base_pred_out - aligned_actual_out).dropna()
                 if not base_resid_out.empty:
                     blocks.append(self._build_ts_block(base_resid_out.index, model_id, SERIES_TYPE_BASE, 'Residual', base_resid_out.values))
  
@@ -558,11 +681,16 @@ class OLSModelAdapter(ExportableModel):
         """Return model statistics and metrics with optimized performance.
         
         Returns a DataFrame with columns:
-        - category: 'Goodness of Fit' or 'Model Estimation'
+        - category: 'Goodness of Fit', 'Model Estimation', or 'Summary Statistics'
         - model: Model identifier
         - type: Metric type or estimation type
-        - value_type: Specific metric or driver name
+        - value_type: Specific metric or variable name
         - value: The actual value
+        
+        Summary Statistics includes descriptive statistics for:
+        - Target variable (combined in-sample and out-of-sample data)
+        - Base variable (if available)
+        - All independent variables (combined in-sample and out-of-sample data)
         """
         model_id = self._model_id
         stats_list = []
@@ -730,6 +858,87 @@ class OLSModelAdapter(ExportableModel):
                     'value': conf_int.loc[var, 1]
                 }
             ])
+        
+        # Add VIF values if available
+        if hasattr(self.model, 'vif') and self.model.vif is not None:
+            vif_values = self.model.vif
+            if isinstance(vif_values, pd.Series):
+                for var_name, vif_value in vif_values.items():
+                    if pd.notnull(vif_value):
+                        stats_list.append({
+                            'category': 'Model Estimation',
+                            'model': model_id,
+                            'type': 'VIF',
+                            'value_type': var_name,
+                            'value': float(vif_value)
+                        })
+            elif isinstance(vif_values, dict):
+                for var_name, vif_value in vif_values.items():
+                    if pd.notnull(vif_value):
+                        stats_list.append({
+                            'category': 'Model Estimation',
+                            'model': model_id,
+                            'type': 'VIF',
+                            'value_type': var_name,
+                            'value': float(vif_value)
+                        })
+        
+        # Add Summary Statistics for all variables
+        def _add_summary_stats(data_series: pd.Series, var_name: str):
+            """Helper function to calculate and add summary statistics for a variable."""
+            if data_series is None or data_series.empty:
+                return
+            
+            # Calculate summary statistics
+            summary_stats = {
+                'Mean': data_series.mean(),
+                'Std': data_series.std(),
+                'Min': data_series.min(),
+                'Max': data_series.max(),
+                'Median': data_series.median(),
+                '25th Percentile': data_series.quantile(0.25),
+                '90th Percentile': data_series.quantile(0.90),
+                '95th Percentile': data_series.quantile(0.95)
+            }
+            
+            # Add each statistic to stats_list
+            for stat_name, stat_value in summary_stats.items():
+                if pd.notnull(stat_value):
+                    stats_list.append({
+                        'category': 'Summary Statistics',
+                        'model': model_id,
+                        'type': stat_name,
+                        'value_type': var_name,
+                        'value': float(stat_value)
+                    })
+        
+        # Target variable summary statistics
+        target_data = pd.concat([self.model.y_in, self.model.y_out]).sort_index()
+        _add_summary_stats(target_data, 'Target')
+        
+        # Base variable summary statistics (if available)
+        base_data = getattr(self.model, 'y_base_full', None)
+        if base_data is not None and not base_data.empty:
+            _add_summary_stats(base_data, 'Base')
+        
+        # Independent variables summary statistics
+        # Combine in-sample and out-of-sample data for each feature
+        feature_data_in = self.model.X_in
+        feature_data_out = getattr(self.model, 'X_out', pd.DataFrame())
+        
+        if not feature_data_in.empty:
+            for var_name in feature_data_in.columns:
+                # Combine in-sample and out-of-sample data for this variable
+                var_series_in = feature_data_in[var_name]
+                var_series_out = feature_data_out.get(var_name, pd.Series(dtype=float))
+                
+                # Combine series if out-of-sample data exists
+                if not var_series_out.empty:
+                    combined_var_series = pd.concat([var_series_in, var_series_out]).sort_index()
+                else:
+                    combined_var_series = var_series_in
+                
+                _add_summary_stats(combined_var_series, var_name)
         
         # Create DataFrame efficiently
         return pd.DataFrame(stats_list)
@@ -949,32 +1158,53 @@ class OLSModelAdapter(ExportableModel):
         - model='cm1', test='Residual Autocorrelation', index='Durbin-Watson', metric='Threshold', value=1.5
         - model='cm1', test='Residual Autocorrelation', index='Durbin-Watson', metric='Passed', value=1
         """
+        # Try to get test results from testset
         try:
-            # Follow the exact same pattern as ModelReportBase.show_test_tbl()
-            results = self.model.testset.all_test_results
+            if not hasattr(self.model, 'testset') or self.model.testset is None:
+                return None
+            
+            # Access individual test objects directly from testset.tests
+            test_objects = getattr(self.model.testset, 'tests', [])
+            if not test_objects:
+                return None
+                
         except Exception:
-            return None
-        
-        if not results or len(results) == 0:
             return None
         
         model_id = self._model_id
         all_results = []
         
-        # Process each test result
-        for test_name, result_df in results.items():
-            # Skip measure category tests (FitMeasure, ErrorMeasure)
-            if any(keyword in test_name for keyword in ['Error Measures', 'Fit Measures']):
-                continue
+        # Process each test object
+        for test_obj in test_objects:
+            try:
+                # Skip measure category tests (FitMeasure, ErrorMeasure)
+                if hasattr(test_obj, 'category') and test_obj.category == 'measure':
+                    continue
+                    
+                # Get test name and map to descriptive name
+                test_name = test_obj.name if hasattr(test_obj, 'name') else type(test_obj).__name__
+                descriptive_test_name = self._map_test_name(test_name)
                 
-            # Map test names to descriptive names
-            descriptive_test_name = self._map_test_name(test_name)
-            
-            # Transform the test result DataFrame to long format
-            transformed_results = self._transform_test_to_long_format(
-                result_df, model_id, descriptive_test_name
-            )
-            all_results.extend(transformed_results)
+                # Get test result DataFrame
+                if hasattr(test_obj, 'test_result'):
+                    result_df = test_obj.test_result
+                    
+                    if isinstance(result_df, pd.DataFrame) and not result_df.empty:
+                        # Transform DataFrame: index becomes "index", columns become "metric"
+                        transformed_results = self._transform_test_to_long_format(
+                            result_df, model_id, descriptive_test_name
+                        )
+                        all_results.extend(transformed_results)
+                    elif isinstance(result_df, pd.Series) and not result_df.empty:
+                        # Convert Series to DataFrame format
+                        temp_df = pd.DataFrame([result_df.values], columns=result_df.index, index=['Result'])
+                        transformed_results = self._transform_test_to_long_format(
+                            temp_df, model_id, descriptive_test_name
+                        )
+                        all_results.extend(transformed_results)
+                        
+            except Exception:
+                continue
         
         if not all_results:
             return None
@@ -988,16 +1218,16 @@ class OLSModelAdapter(ExportableModel):
         # Residual-based tests
         if 'autocorr' in test_name_lower or 'durbin' in test_name_lower:
             return 'Residual Autocorrelation'
-        elif 'heteroscedasticity' in test_name_lower or 'het' in test_name_lower:
+        elif 'heteroscedasticity' in test_name_lower or 'het' in test_name_lower or 'white' in test_name_lower or 'breusch' in test_name_lower:
             return 'Residual Heteroscedasticity'
-        elif 'normality' in test_name_lower or 'jarque' in test_name_lower:
+        elif 'normality' in test_name_lower or 'jarque' in test_name_lower or 'bera' in test_name_lower:
             return 'Residual Normality'
         
         # Stationarity tests - determine context
-        elif 'stationarity' in test_name_lower:
-            if 'resid' in test_name_lower:
+        elif 'stationarity' in test_name_lower or 'adf' in test_name_lower or 'unit' in test_name_lower:
+            if 'resid' in test_name_lower or 'residual' in test_name_lower:
                 return 'Residual Stationarity'
-            elif any(keyword in test_name_lower for keyword in ['x', 'independent', 'input']):
+            elif any(keyword in test_name_lower for keyword in ['x', 'independent', 'input', 'feature']):
                 return 'Independent Variable Stationarity'
             elif any(keyword in test_name_lower for keyword in ['y', 'dependent', 'target']):
                 return 'Dependent Variable Stationarity'
@@ -1005,24 +1235,46 @@ class OLSModelAdapter(ExportableModel):
                 return 'Stationarity Test'
         
         # Model estimation tests
-        elif 'significance' in test_name_lower or 'coef' in test_name_lower:
+        elif 'significance' in test_name_lower or ('coef' in test_name_lower and 'sign' not in test_name_lower):
             return 'Coefficient Significance'
-        elif 'sign' in test_name_lower:
+        elif 'sign' in test_name_lower and 'coef' in test_name_lower:
             return 'Coefficient Sign Check'
-        elif 'group' in test_name_lower or 'f-test' in test_name_lower:
+        elif 'group' in test_name_lower or 'f-test' in test_name_lower or 'ftest' in test_name_lower:
             return 'Group Driver F-test'
         
         # Multicollinearity
-        elif 'vif' in test_name_lower or 'collinearity' in test_name_lower:
+        elif 'vif' in test_name_lower or 'collinearity' in test_name_lower or 'multicollinear' in test_name_lower:
             return 'Multicollinearity'
         
-        # Cointegration
-        elif 'coint' in test_name_lower:
-            return 'Cointegration'
+        # Cointegration tests - be more specific
+        elif 'coint' in test_name_lower or 'cointegration' in test_name_lower:
+            if 'engle' in test_name_lower and 'granger' in test_name_lower:
+                return 'Engle-Granger Cointegration'
+            elif 'johansen' in test_name_lower:
+                return 'Johansen Cointegration'
+            elif 'phillips' in test_name_lower and 'ouliaris' in test_name_lower:
+                return 'Phillips-Ouliaris Cointegration'
+            else:
+                return 'Cointegration'
         
-        # Default fallback
+        # Additional specific tests
+        elif 'ljung' in test_name_lower and 'box' in test_name_lower:
+            return 'Ljung-Box Test'
+        elif 'arch' in test_name_lower:
+            return 'ARCH Test'
+        elif 'reset' in test_name_lower or 'ramsey' in test_name_lower:
+            return 'RESET Test'
+        elif 'chow' in test_name_lower:
+            return 'Chow Test'
+        elif 'cusum' in test_name_lower:
+            return 'CUSUM Test'
+        
+        # Default fallback - clean up the name
         else:
-            return test_name
+            # Remove common prefixes/suffixes and clean up
+            cleaned_name = test_name.replace('_', ' ').replace('-', ' ')
+            # Capitalize first letter of each word
+            return ' '.join(word.capitalize() for word in cleaned_name.split())
     
     def _transform_test_to_long_format(
         self, 
@@ -1030,60 +1282,106 @@ class OLSModelAdapter(ExportableModel):
         model_id: str, 
         test_name: str
     ) -> List[Dict[str, Any]]:
-        """Transform test result DataFrame to long format."""
+        """Transform test result DataFrame to long format.
+        
+        Converts DataFrame rows (index) and columns (metric) to long format where:
+        - Each row index becomes an 'index' value  
+        - Each column becomes a 'metric' value
+        - All values are converted to numeric format
+        """
         if not isinstance(test_df, pd.DataFrame) or test_df.empty:
             return []
         
         results: List[Dict[str, Any]] = []
         
-        for index_name, row in test_df.iterrows():
+        # Handle case where DataFrame has no explicit index names
+        if test_df.index.name is None and len(test_df.index) == 1:
+            # Single-row DataFrame - use a generic index name
+            index_names = ['Test_Result']
+        else:
+            index_names = test_df.index.tolist()
+        
+        for i, (index_name, row) in enumerate(test_df.iterrows()):
+            # Use the actual index name or fallback to position-based name
+            if isinstance(index_name, (int, float)) and test_df.index.name is None:
+                display_index = index_names[i] if i < len(index_names) else f"Row_{i}"
+            else:
+                display_index = str(index_name)
+            
             for column_name, value in row.items():
-                # Handle thresholds represented as (lower, upper)
+                # Handle thresholds represented as (lower, upper) tuples
                 if isinstance(value, (tuple, list)) and len(value) == 2:
                     lower_val, upper_val = value
-                    results.append({
-                        'model': model_id,
-                        'test': test_name,
-                        'index': str(index_name),
-                        'metric': f'{column_name}_Lower',
-                        'value': float(lower_val) if pd.notnull(lower_val) else None
-                    })
-                    results.append({
-                        'model': model_id,
-                        'test': test_name,
-                        'index': str(index_name),
-                        'metric': f'{column_name}_Upper',
-                        'value': float(upper_val) if pd.notnull(upper_val) else None
-                    })
+                    # Create separate entries for lower and upper bounds
+                    if pd.notnull(lower_val):
+                        try:
+                            results.append({
+                                'model': model_id,
+                                'test': test_name,
+                                'index': display_index,
+                                'metric': f'{column_name}_Lower',
+                                'value': float(lower_val)
+                            })
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    if pd.notnull(upper_val):
+                        try:
+                            results.append({
+                                'model': model_id,
+                                'test': test_name,
+                                'index': display_index,
+                                'metric': f'{column_name}_Upper',
+                                'value': float(upper_val)
+                            })
+                        except (ValueError, TypeError):
+                            pass
                     continue
                 
-                # Special-case: expected sign mapping
-                if test_name == 'Coefficient Sign Check' and column_name == 'Expected':
-                    expected_str = str(value).strip().lower()
-                    if expected_str in ['+', 'positive']:
-                        numeric_value = 1.0
-                    elif expected_str in ['-', 'negative']:
-                        numeric_value = -1.0
-                    else:
-                        numeric_value = 0.0
-                elif isinstance(value, bool):
-                    numeric_value = 1.0 if value else 0.0
-                elif pd.isnull(value):
-                    numeric_value = None
-                else:
-                    try:
-                        numeric_value = float(value)
-                    except (ValueError, TypeError):
-                        # Skip non-numeric values to ensure 'value' stays numeric
-                        numeric_value = None
+                # Handle nested data structures
+                if isinstance(value, (list, tuple)) and len(value) > 2:
+                    # Multiple values - create separate entries
+                    for j, sub_value in enumerate(value):
+                        if pd.notnull(sub_value):
+                            try:
+                                numeric_value = float(sub_value)
+                                results.append({
+                                    'model': model_id,
+                                    'test': test_name,
+                                    'index': display_index,
+                                    'metric': f'{column_name}_{j}',
+                                    'value': numeric_value
+                                })
+                            except (ValueError, TypeError):
+                                pass
+                    continue
                 
-                if numeric_value is not None:
+                # Convert value to appropriate format (preserve strings and numbers)
+                final_value = None
+                
+                if isinstance(value, bool):
+                    # Convert boolean to string for clarity
+                    final_value = 'True' if value else 'False'
+                elif pd.isnull(value):
+                    final_value = None
+                elif isinstance(value, (int, float)):
+                    # Keep numeric values as-is
+                    final_value = float(value)
+                elif isinstance(value, str):
+                    # Keep string values as-is (no forced conversion)
+                    final_value = str(value).strip()
+                else:
+                    # Convert other types to string representation
+                    final_value = str(value)
+                
+                # Add result if we have a valid value (string or numeric)
+                if final_value is not None:
                     results.append({
                         'model': model_id,
                         'test': test_name,
-                        'index': str(index_name),
-                        'metric': column_name,
-                        'value': numeric_value
+                        'index': display_index,
+                        'metric': str(column_name),
+                        'value': final_value
                     })
         
         return results
@@ -1613,3 +1911,436 @@ class OLSModelAdapter(ExportableModel):
             'value_type': value_type,
             'value': values
         }) 
+
+    def get_stability_results(self) -> Optional[pd.DataFrame]:
+        """Return walk-forward stability testing results in long format.
+        
+        Columns:
+        - date: timestamp index
+        - model: model id
+        - test_period: WF label with period (e.g., 'WF1: Mar2003-Mar2024')
+        - value_type: 'Actual' | 'In-Sample' | 'Out-of-Sample'
+        - value: numeric value
+        """
+        # Try to build Walk Forward Test via model API
+        try:
+            wft = self.model.stability_test
+        except Exception:
+            return None
+        
+        wf_models = getattr(wft, 'wf_models', None)
+        if not isinstance(wf_models, dict) or len(wf_models) == 0:
+            return None
+        
+        def _format_month(dt: pd.Timestamp) -> str:
+            return dt.strftime('%b%Y')
+        
+        def _format_period_label(wf_idx: int, wf_model) -> str:
+            # Use each WF model's own in-sample start/end when available
+            is_start = getattr(wf_model.dm._internal_loader, 'in_sample_start', None)
+            is_end = getattr(wf_model.dm, 'in_sample_end', None)
+            if is_start is None or is_end is None:
+                return f"WF{wf_idx}"
+            # Convert to pandas Timestamp
+            is_start = pd.to_datetime(is_start)
+            is_end = pd.to_datetime(is_end)
+            if getattr(wf_model.dm, 'freq', 'M') == 'M':
+                return f"WF{wf_idx}: {_format_month(is_start)}-{_format_month(is_end)}"
+            elif getattr(wf_model.dm, 'freq', 'M') == 'Q':
+                q_start = f"{is_start.year}-Q{(is_start.month - 1)//3 + 1}"
+                q_end = f"{is_end.year}-Q{(is_end.month - 1)//3 + 1}"
+                return f"WF{wf_idx}: {q_start}-{q_end}"
+            else:
+                return f"WF{wf_idx}: {is_start.date()}-{is_end.date()}"
+        
+        blocks: List[pd.DataFrame] = []
+        model_id = self._model_id
+        
+        # Iterate in the WF order (wf_models preserves insertion order)
+        for i, (wf_name, wf_model) in enumerate(wf_models.items(), start=1):
+            try:
+                label = _format_period_label(i, wf_model)
+                # Actual values: from in-sample start to end of OOS if available
+                actual_series = wf_model.dm.internal_data[wf_model.target]
+                oos_end = wf_model.dm.out_sample_idx.max() if len(getattr(wf_model.dm, 'out_sample_idx', [])) > 0 else wf_model.dm.in_sample_end
+                is_start = getattr(wf_model.dm._internal_loader, 'in_sample_start', None)
+                if is_start is None:
+                    is_start = actual_series.index.min()
+                # Build mask and slice
+                is_start = pd.to_datetime(is_start)
+                oos_end = pd.to_datetime(oos_end)
+                actual_slice = actual_series[(actual_series.index >= is_start) & (actual_series.index <= oos_end)]
+                if not actual_slice.empty:
+                    blocks.append(pd.DataFrame({
+                        'date': actual_slice.index,
+                        'model': model_id,
+                        'test_period': label,
+                        'value_type': 'Actual',
+                        'value': actual_slice.values
+                    }))
+                
+                # In-Sample fitted
+                y_fitted_in = getattr(wf_model, 'y_fitted_in', pd.Series(dtype=float))
+                if isinstance(y_fitted_in, pd.Series) and not y_fitted_in.empty:
+                    blocks.append(pd.DataFrame({
+                        'date': y_fitted_in.index,
+                        'model': model_id,
+                        'test_period': label,
+                        'value_type': 'In-Sample',
+                        'value': y_fitted_in.values
+                    }))
+                
+                # Out-of-Sample predicted
+                X_out = getattr(wf_model, 'X_out', pd.DataFrame())
+                if isinstance(X_out, pd.DataFrame) and not X_out.empty:
+                    y_pred_out = getattr(wf_model, 'y_pred_out', pd.Series(dtype=float))
+                    if isinstance(y_pred_out, pd.Series) and not y_pred_out.empty:
+                        blocks.append(pd.DataFrame({
+                            'date': y_pred_out.index,
+                            'model': model_id,
+                            'test_period': label,
+                            'value_type': 'Out-of-Sample',
+                            'value': y_pred_out.values
+                        }))
+            except Exception:
+                continue
+        
+        if not blocks:
+            return None
+        
+        df = pd.concat(blocks, ignore_index=True)
+        return df[STABILITY_COLUMNS] 
+
+    def get_stability_stats_results(self) -> Optional[pd.DataFrame]:
+        """Return walk-forward stability testing statistical metrics.
+        
+        Returns a DataFrame with columns:
+        - model: model id
+        - trial: WF trial identifier (e.g., 'WF1', 'WF2')
+        - category: metric category ('P-value', 'Coefficient', 'Coefficient %Change', 'adj R-squared', 'RMSE')
+        - value_type: specific metric identifier (variable names for coefficients/p-values, 'In-Sample'/'Out-of-Sample' for performance)
+        - value: numerical value
+        """
+        # Try to build Walk Forward Test via model API
+        try:
+            wft = self.model.stability_test
+        except Exception:
+            return None
+        
+        wf_models = getattr(wft, 'wf_models', None)
+        final_model = getattr(wft, 'final_model', None)
+        if not isinstance(wf_models, dict) or len(wf_models) == 0 or final_model is None:
+            return None
+        
+        model_id = self._model_id
+        stats_list = []
+
+        # Get final model parameters for percentage change calculation
+        final_params = final_model.params
+        
+        for i, (wf_name, wf_model) in enumerate(wf_models.items(), start=1):
+            try:
+                trial_name = wf_name  # Use 'WF1', 'WF2', etc.
+                
+                # 1. Coefficients
+                if hasattr(wf_model, 'params') and wf_model.params is not None:
+                    for var_name, coef_value in wf_model.params.items():
+                        if pd.notnull(coef_value):
+                            stats_list.append({
+                                'model': model_id,
+                                'trial': trial_name,
+                                'category': 'Coefficient',
+                                'value_type': var_name,
+                                'value': float(coef_value)
+                            })
+                
+                # 2. P-values
+                if hasattr(wf_model, 'pvalues') and wf_model.pvalues is not None:
+                    for var_name, p_value in wf_model.pvalues.items():
+                        if pd.notnull(p_value):
+                            stats_list.append({
+                                'model': model_id,
+                                'trial': trial_name,
+                                'category': 'P-value',
+                                'value_type': var_name,
+                                'value': float(p_value)
+                            })
+                
+                # 3. Coefficient % Change (vs final model)
+                if hasattr(wf_model, 'params') and wf_model.params is not None:
+                    for var_name, wf_coef in wf_model.params.items():
+                        if var_name in final_params and pd.notnull(wf_coef) and pd.notnull(final_params[var_name]):
+                            final_coef = final_params[var_name]
+                            if final_coef != 0:
+                                pct_change = (wf_coef - final_coef) / final_coef
+                                stats_list.append({
+                                    'model': model_id,
+                                    'trial': trial_name,
+                                    'category': 'Coefficient %Change',
+                                    'value_type': var_name,
+                                    'value': float(pct_change)
+                                })
+                
+                # 4. Adj R-squared (In-Sample)
+                if hasattr(wf_model, 'rsquared_adj') and pd.notnull(wf_model.rsquared_adj):
+                    stats_list.append({
+                        'model': model_id,
+                        'trial': trial_name,
+                        'category': 'adj R-squared',
+                        'value_type': 'In-Sample',
+                        'value': float(wf_model.rsquared_adj)
+                    })
+                
+                # 5. RMSE - In-Sample and Out-of-Sample
+                # In-Sample RMSE
+                if hasattr(wf_model, 'in_perf_measures'):
+                    in_measures = wf_model.in_perf_measures
+                    if isinstance(in_measures, pd.Series) and 'RMSE' in in_measures:
+                        stats_list.append({
+                            'model': model_id,
+                            'trial': trial_name,
+                            'category': 'RMSE',
+                            'value_type': 'In-Sample',
+                            'value': float(in_measures['RMSE'])
+                        })
+                
+                # Out-of-Sample RMSE
+                if hasattr(wf_model, 'out_perf_measures'):
+                    out_measures = wf_model.out_perf_measures
+                    if isinstance(out_measures, pd.Series) and 'RMSE' in out_measures:
+                        stats_list.append({
+                            'model': model_id,
+                            'trial': trial_name,
+                            'category': 'RMSE',
+                            'value_type': 'Out-of-Sample',
+                            'value': float(out_measures['RMSE'])
+                        })
+                
+            except Exception:
+                continue
+        
+        if not stats_list:
+            return None
+
+        return pd.DataFrame(stats_list)
+
+    def get_scenario_stats_results(self) -> Optional[pd.DataFrame]:
+        """Return scenario testing statistical metrics for base variables.
+        
+        Returns a DataFrame with columns:
+        - model: model id
+        - scenario_name: scenario set name (e.g., 'EWST_2024')
+        - metric: metric type (P0, P1, P2, ..., P12, 4Q_CAGR, 9Q_CAGR, 12Q_CAGR, 9Q_Change, 9Q_%Change, %Change_from_Base(at_P9))
+        - severity: severity level for the metric (e.g., 'base', 'adv', 'sev')
+        - value: numerical value
+        
+        Calculates quarterly statistics for base variables only:
+        1. 12-quarter forecast values (P0 to P12)
+        2. 4, 9, 12 Quarter CAGR using P0 as starting point
+        3. 9 Quarter Change = value at P9 - value at P0
+        4. 9 Quarter %Change = 9 Quarter Change / value at P0 - 1
+        5. %Change from Base(at P9) = stress scenario P9 / baseline scenario P9 - 1
+        """
+        if not hasattr(self.model, 'scen_manager') or self.model.scen_manager is None:
+            return None
+        
+        # Only process base variable quarterly forecasts
+        if not hasattr(self.model.scen_manager, 'forecast_y_base_qtr_df'):
+            return None
+            
+        base_qtr_forecasts = self.model.scen_manager.forecast_y_base_qtr_df
+        if not base_qtr_forecasts:
+            return None
+        
+        model_id = self._model_id
+        stats_list = []
+        
+        for scen_set, qtr_df in base_qtr_forecasts.items():
+            if qtr_df is None or qtr_df.empty:
+                continue
+                
+            # Get scenarios for this scenario set
+            if hasattr(self.model.scen_manager, 'y_base_scens'):
+                base_scenarios = self.model.scen_manager.y_base_scens.get(scen_set, {})
+                
+                # Collect data for each severity level 
+                # P0 from historical actual at jump-off date, P1-P12 from scenario forecasts
+                severity_data = {}
+                
+                # Get P0 base variable value (same approach as get_scenario_results)
+                p0_base_value = None
+                p0_quarter_date = None
+                
+                # Get base actual quarterly data at jump-off date
+                base_actual = getattr(self.model, 'y_base_full', None)
+                if base_actual is not None and not base_actual.empty:
+                    # Convert to quarterly (same pattern as get_scenario_results)
+                    base_actual_q = base_actual.copy()
+                    base_actual_q.index = pd.to_datetime(base_actual_q.index)
+                    base_actual_q = base_actual_q.groupby(pd.Grouper(freq='Q')).mean()
+                    base_actual_q.index = base_actual_q.index.to_period('Q').to_timestamp(how='end').normalize()
+                    
+                    # Get the jump-off date from scenario manager
+                    if hasattr(self.model.scen_manager, 'P0') and self.model.scen_manager.P0 is not None:
+                        jump_off_date = self.model.scen_manager.P0
+                        # Convert to quarter-end to match base_actual_q index
+                        jump_off_q_end = pd.Timestamp(jump_off_date.year, jump_off_date.month, 1) + pd.offsets.QuarterEnd(0)
+                        
+                        # Get the base actual value at jump-off quarter
+                        if jump_off_q_end in base_actual_q.index:
+                            p0_base_value = base_actual_q.loc[jump_off_q_end]
+                            p0_quarter_date = jump_off_q_end
+                
+                for scen_name in base_scenarios.keys():
+                    # Check if this scenario has quarterly forecast data (P1-P12)
+                    col_name = scen_name if scen_name in qtr_df.columns else f"{scen_set}_{scen_name}"
+                    if col_name in qtr_df.columns:
+                        qtr_forecast = qtr_df[col_name].dropna()
+                        if not qtr_forecast.empty and len(qtr_forecast) >= 12:  # Need P1-P12 (12 quarters)
+                            # Combine P0 (historical actual) with P1-P12 (forecasts)
+                            if p0_base_value is not None and p0_quarter_date is not None:
+                                # Create combined series: P0 (historical) + P1-P12 (forecasts)
+                                combined_values = np.concatenate([[p0_base_value], qtr_forecast.values])
+                                combined_index = [p0_quarter_date] + list(qtr_forecast.index)
+                                combined_series = pd.Series(combined_values, index=combined_index)
+                                severity_data[scen_name] = combined_series
+                            else:
+                                # Fallback: use forecast data as-is if no P0 data available
+                                severity_data[scen_name] = qtr_forecast
+                
+                if not severity_data:
+                    continue
+                
+                # SECTION 1: 13-Quarter Forecast Values (P0 to P12)
+                # P0 = historical actual at jump-off, P1-P12 = scenario forecasts
+                # Order: P0, P1, P2, ..., P9, P10, P11, P12 (not P1, P10, P11, P12, P2, ...)
+                for period_idx in range(13):  # P0 to P12
+                    period_name = f"P{period_idx}"
+                    
+                    for severity, data in severity_data.items():
+                        if len(data) > period_idx:
+                            stats_list.append({
+                                'model': model_id,
+                                'scenario_name': scen_set,
+                                'metric': period_name,
+                                'severity': severity,
+                                'value': float(data.iloc[period_idx])
+                            })
+                
+                # SECTION 2: CAGR Calculations (4Q, 9Q, 12Q) using P0 as starting point
+                for severity, data in severity_data.items():
+                    data_values = data.values
+                    p0_value = data_values[0]  # P0 as starting point
+                    
+                    # Calculate CAGR for different periods using P0 as base
+                    for quarters in [4, 9, 12]:
+                        if len(data_values) > quarters and p0_value > 0:  # P0 to P{quarters}
+                            end_val = data_values[quarters]  # P{quarters} value
+                            
+                            if end_val > 0:
+                                # CAGR = (P{quarters}/P0)^(1/(quarters/4)) - 1 (annualized)
+                                cagr = (end_val / p0_value) ** (4.0 / quarters) - 1
+                                
+                                stats_list.append({
+                                    'model': model_id,
+                                    'scenario_name': scen_set,
+                                    'metric': f'{quarters}Q_CAGR',
+                                    'severity': severity,
+                                    'value': float(cagr)
+                                })
+                
+                # SECTION 3: 9Q Change and %Change calculations
+                for severity, data in severity_data.items():
+                    data_values = data.values
+                    
+                    if len(data_values) > 9:  # Need P0 to P9
+                        p0_value = data_values[0]  # P0
+                        p9_value = data_values[9]  # P9
+                        
+                        # 9 Quarter Change = P9 - P0
+                        q9_change = p9_value - p0_value
+                        stats_list.append({
+                            'model': model_id,
+                            'scenario_name': scen_set,
+                            'metric': '9Q_Change',
+                            'severity': severity,
+                            'value': float(q9_change)
+                        })
+                        
+                        # 9 Quarter %Change = P9/P0 - 1
+                        if p0_value != 0:
+                            q9_pct_change = (p9_value / p0_value) - 1
+                            stats_list.append({
+                                'model': model_id,
+                                'scenario_name': scen_set,
+                                'metric': '9Q_%Change',
+                                'severity': severity,
+                                'value': float(q9_pct_change)
+                            })
+                
+                # SECTION 4: %Change from Base (at P9) - stress scenarios vs baseline
+                # Find base scenario with flexible pattern matching
+                base_data = None
+                base_severity_name = None
+                
+                for severity_name in severity_data.keys():
+                    severity_lower = severity_name.lower()
+                    if 'base' in severity_lower:
+                        base_data = severity_data[severity_name]
+                        base_severity_name = severity_name
+                        break
+                
+                # Calculate %Change from Base for stress scenarios
+                if base_data is not None and len(base_data) > 9:
+                    base_p9_value = base_data.iloc[9]  # Baseline P9 value
+                    
+                    if base_p9_value != 0:
+                        for stress_severity, stress_data in severity_data.items():
+                            # Only compare non-base scenarios
+                            stress_lower = stress_severity.lower()
+                            if (stress_severity != base_severity_name and 
+                                'base' not in stress_lower and
+                                len(stress_data) > 9):
+                                
+                                stress_p9_value = stress_data.iloc[9]  # Stress scenario P9 value
+                                
+                                # %Change from Base = stress_P9 / baseline_P9
+                                pct_change_from_base = stress_p9_value / base_p9_value - 1
+                                
+                                stats_list.append({
+                                    'model': model_id,
+                                    'scenario_name': scen_set,
+                                    'metric': '%Change_from_Base(at_P9)',
+                                    'severity': stress_severity,
+                                    'value': float(pct_change_from_base)
+                                })
+        
+        if not stats_list:
+            return None
+        
+        # Create DataFrame and sort to ensure proper ordering
+        df = pd.DataFrame(stats_list)
+        
+        # Define custom ordering for metrics
+        metric_order = []
+        
+        # 1. First: P0 to P12 forecast values (in numerical order)
+        for i in range(13):
+            metric_order.append(f'P{i}')
+        
+        # 2. Then: CAGR metrics
+        metric_order.extend(['4Q_CAGR', '9Q_CAGR', '12Q_CAGR'])
+        
+        # 3. Finally: Change metrics
+        metric_order.extend(['9Q_Change', '9Q_%Change', '%Change_from_Base(at_P9)'])
+        
+        # Create categorical ordering for proper sorting
+        df['metric'] = pd.Categorical(df['metric'], categories=metric_order, ordered=True)
+        
+        # Sort by scenario_name, metric (in custom order), then severity
+        df_sorted = df.sort_values(['scenario_name', 'metric', 'severity']).reset_index(drop=True)
+        
+        # Convert metric back to string for output
+        df_sorted['metric'] = df_sorted['metric'].astype(str)
+        
+        return df_sorted 
