@@ -701,7 +701,10 @@ class Segment:
             - 'scenario_testing': Scenario testing results with target and base variables
             - 'sensitivity_testing': Sensitivity testing results for parameters and inputs
             - 'test_results': Comprehensive test results from all tests
-        overwrite : bool, default False
+            - 'stability_testing': Walk-forward stability testing results
+            - 'stability_testing_stats': Walk-forward stability testing statistical metrics
+            - 'scenario_testing_stats': Scenario testing statistical metrics for base variables
+        overwrite : bool, default True
             Whether to overwrite existing files. If False and files exist, the operation
             will be cancelled with a warning message.
         
@@ -749,6 +752,12 @@ class Segment:
                 expected_files.append(output_dir / 'sensitivity_testing.csv')
             elif content_type == 'test_results':
                 expected_files.append(output_dir / 'test_results.csv')
+            elif content_type == 'stability_testing':
+                expected_files.append(output_dir / 'stability_testing.csv')
+            elif content_type == 'stability_testing_stats':
+                expected_files.append(output_dir / 'stability_testing_stats.csv')
+            elif content_type == 'scenario_testing_stats':
+                expected_files.append(output_dir / 'scenario_testing_stats.csv')
         
         # Check if any expected files exist
         existing_files = [f for f in expected_files if f.exists()]
@@ -777,6 +786,9 @@ class Segment:
                     return
         else:
             print(f"\n✓ No existing files detected. Proceeding with export to: {output_dir}")
+        
+        # Track files that existed before export for accurate reporting
+        files_existed_before = set(f.name for f in existing_files)
         
         # Get models to export
         if model_ids is None:
@@ -834,13 +846,34 @@ class Segment:
         # Export models
         export_manager.export_models(exportable_models, output_dir)
         
-        # Print final success message
-        print(f"\nExport completed successfully for segment '{self.segment_id}'!")
-        print(f"Results have been saved to: {output_dir}")
+        # Get the files that were actually written during export
+        written_files = strategy.get_written_files()
         
-        # Print overwrite confirmation if files were overwritten
-        if existing_files and overwrite:
-            print(f"✓ Successfully overwrote {len(existing_files)} existing file(s).")
+        if written_files:
+            # Categorize files as overwritten vs newly created
+            written_file_names = set(f.name for f in written_files)
+            overwritten_files = written_file_names.intersection(files_existed_before)
+            new_files = written_file_names - files_existed_before
+            
+            # Print detailed success message
+            print(f"\n✅ Export completed successfully for segment '{self.segment_id}'!")
+            print(f"📁 Output directory: {output_dir}")
+            
+            if new_files:
+                print(f"📄 New files created ({len(new_files)}):")
+                for file_name in sorted(new_files):
+                    print(f"   ✓ {file_name}")
+            
+            if overwritten_files:
+                print(f"🔄 Files overwritten ({len(overwritten_files)}):")
+                for file_name in sorted(overwritten_files):
+                    print(f"   ✓ {file_name}")
+            
+            print(f"📊 Total files written: {len(written_files)}")
+        else:
+            print(f"\n⚠️  Export completed but no files were written.")
+            print(f"This may indicate that the selected models had no data to export.")
+            print(f"Output directory: {output_dir}")
 
     def add_benchmark_cm(
         self,
