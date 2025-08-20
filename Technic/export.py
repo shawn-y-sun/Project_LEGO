@@ -1062,8 +1062,8 @@ class OLSModelAdapter(ExportableModel):
         The method processes:
         - Target variable forecasts: Monthly frequency only
         - Base variable forecasts: Both monthly and quarterly frequencies
-        - Driver scenario data: At model frequency, from dm.scen_mevs and dm.scen_internal_data
-        - Excludes seasonal dummies from driver data
+        - Driver scenario data: Actual transformed model drivers (P0 to P12), 
+          excludes seasonal dummies and intercept terms
         """
         if self.model.scen_manager is None:
             # Return empty DataFrame with correct schema
@@ -1270,64 +1270,38 @@ class OLSModelAdapter(ExportableModel):
         
         # === DRIVER SCENARIO DATA ===
         
-        # Process driver data from dm.scen_mevs and dm.scen_internal_data
-        dm = getattr(self.model, 'dm', None)
-        if dm is not None:
-            # Get scenario data from data manager
-            scen_mevs = getattr(dm, 'scen_mevs', {})
-            scen_internal_data = getattr(dm, 'scen_internal_data', {})
-            
-            # Process MEV scenario data
-            for scen_set, scen_dict in scen_mevs.items():
-                if scen_set in scen_results:  # Only process scenario sets that have target forecasts
-                    for scen_name, scen_df in scen_dict.items():
-                        if scen_df is not None and not scen_df.empty:
-                            # Filter out seasonal dummies and target/base variables
-                            driver_columns = filter_driver_columns(scen_df, target_var, base_var)
-                            
-                            for driver_name in driver_columns:
-                                driver_series = scen_df[driver_name].dropna()
-                                if not driver_series.empty:
-                                    df_data = {
-                                        'category': CATEGORY_DRIVER_DATA,
-                                        'model': model_id,
-                                        'scenario_name': scen_set,
-                                        'severity': scen_name,
-                                        'date': driver_series.index,
-                                        'frequency': frequency_str,
-                                        'value_type': driver_name,
-                                        'value': driver_series.values
-                                    }
-                                    data_list.append(pd.DataFrame(df_data))
-            
-            # Process internal scenario data
-            for scen_set, scen_dict in scen_internal_data.items():
-                if scen_set in scen_results:  # Only process scenario sets that have target forecasts
-                    for scen_name, scen_df in scen_dict.items():
-                        if scen_df is not None and not scen_df.empty:
-                            # Filter out seasonal dummies and target/base variables
-                            driver_columns = filter_driver_columns(scen_df, target_var, base_var)
-                            
-                            for driver_name in driver_columns:
-                                # Skip if this driver was already processed in MEV data
-                                if scen_set in scen_mevs and scen_name in scen_mevs[scen_set]:
-                                    mev_df = scen_mevs[scen_set][scen_name]
-                                    if mev_df is not None and driver_name in mev_df.columns:
-                                        continue  # Skip, already processed in MEV data
-                                
-                                driver_series = scen_df[driver_name].dropna()
-                                if not driver_series.empty:
-                                    df_data = {
-                                        'category': CATEGORY_DRIVER_DATA,
-                                        'model': model_id,
-                                        'scenario_name': scen_set,
-                                        'severity': scen_name,
-                                        'date': driver_series.index,
-                                        'frequency': frequency_str,
-                                        'value_type': driver_name,
-                                        'value': driver_series.values
-                                    }
-                                    data_list.append(pd.DataFrame(df_data))
+        # Get actual model drivers (transformed features used in the model)
+        model_drivers = get_model_driver_names(self.model)
+        
+        if model_drivers and hasattr(self.model, 'scen_manager') and self.model.scen_manager is not None:
+            # Process each scenario set that has target forecasts
+            for scen_set in scen_results.keys():
+                # Get all scenarios for this scenario set from target forecasts
+                scenarios = scen_results[scen_set]
+                
+                for scen_name in scenarios.keys():
+                    # Get transformed driver data for this scenario (P0 to P12)
+                    driver_data = get_scenario_driver_data(
+                        self.model, scen_set, scen_name, model_drivers, 
+                        jump_off_date=None, periods=12
+                    )
+                    
+                    if driver_data is not None and not driver_data.empty:
+                        # Export each driver as a separate series
+                        for driver_name in driver_data.columns:
+                            driver_series = driver_data[driver_name].dropna()
+                            if not driver_series.empty:
+                                df_data = {
+                                    'category': CATEGORY_DRIVER_DATA,
+                                    'model': model_id,
+                                    'scenario_name': scen_set,
+                                    'severity': scen_name,
+                                    'date': driver_series.index,
+                                    'frequency': frequency_str,
+                                    'value_type': driver_name,
+                                    'value': driver_series.values
+                                }
+                                data_list.append(pd.DataFrame(df_data))
         
         if not data_list:
             return pd.DataFrame(columns=SCENARIO_COLUMNS)
@@ -2539,3 +2513,116 @@ class OLSModelAdapter(ExportableModel):
         df_sorted['metric'] = df_sorted['metric'].astype(str)
         
         return df_sorted 
+
+# =============================================================================
+# Helper functions for driver scenario data export
+# =============================================================================
+
+def get_model_driver_names(model) -> List[str]:
+    """
+    Get the actual driver feature names used in a fitted model.
+    
+    This function extracts the column names from the model's feature matrix (X_in),
+    excluding seasonal dummies and the intercept term. These represent the actual
+    transformed features that are used as drivers in the model.
+    
+    Parameters
+    ----------
+    model : ModelBase
+        Fitted model instance with X_in attribute
+        
+    Returns
+    -------
+    List[str]
+        List of actual driver feature names used in the model
+    """
+    if not hasattr(model, 'X_in') or model.X_in is None or model.X_in.empty:
+        return []
+    
+    # Get all feature column names from the model
+    all_features = model.X_in.columns.tolist()
+    
+    # Filter out intercept and seasonal dummies
+    driver_features = []
+    for feature_name in all_features:
+        # Skip intercept terms
+        if feature_name.lower() in ['const', 'intercept', 'c']:
+            continue
+        # Skip seasonal dummies using existing function
+        if is_seasonal_dummy(feature_name):
+            continue
+        driver_features.append(feature_name)
+    
+    return driver_features
+
+
+def get_scenario_driver_data(model, scen_set: str, scen_name: str, driver_names: List[str], 
+                           jump_off_date=None, periods: int = 12) -> Optional[pd.DataFrame]:
+    """
+    Get transformed driver scenario data for specific scenario and drivers.
+    
+    This function gets the actual transformed driver data as used by the model,
+    filtered to the specified date range (P0 to P{periods}).
+    
+    Parameters
+    ----------
+    model : ModelBase
+        Fitted model instance with scenario manager
+    scen_set : str
+        Scenario set name
+    scen_name : str
+        Scenario name within the set
+    driver_names : List[str]
+        List of driver feature names to extract
+    jump_off_date : pd.Timestamp, optional
+        Jump-off date (P0). If None, uses model's scenario manager P0
+    periods : int, default 12
+        Number of periods after P0 to include (P1 to P{periods})
+        
+    Returns
+    -------
+    pd.DataFrame or None
+        DataFrame with driver data columns filtered to date range, or None if not available
+    """
+    if not hasattr(model, 'scen_manager') or model.scen_manager is None:
+        return None
+    
+    # Get scenario features from scenario manager
+    try:
+        X_scens = model.scen_manager.X_scens
+        if scen_set not in X_scens or scen_name not in X_scens[scen_set]:
+            return None
+        
+        scenario_features = X_scens[scen_set][scen_name]
+        
+        # Filter to only the requested driver names that exist in the scenario features
+        available_drivers = [name for name in driver_names if name in scenario_features.columns]
+        if not available_drivers:
+            return None
+        
+        driver_data = scenario_features[available_drivers].copy()
+        
+        # Apply date filtering (P0 to P{periods})
+        if jump_off_date is None:
+            jump_off_date = getattr(model.scen_manager, 'P0', None)
+        
+        if jump_off_date is not None:
+            # Convert to pandas timestamp if needed
+            jump_off_date = pd.to_datetime(jump_off_date)
+            
+            # Calculate end date (P{periods} after jump-off)
+            # Determine frequency from model
+            model_freq = getattr(model.dm, 'freq', 'M')
+            if model_freq == 'M':
+                end_date = jump_off_date + pd.DateOffset(months=periods)
+            else:  # Quarterly
+                end_date = jump_off_date + pd.DateOffset(months=periods*3)
+            
+            # Filter data to P0 to P{periods} range
+            mask = (driver_data.index >= jump_off_date) & (driver_data.index <= end_date)
+            driver_data = driver_data.loc[mask]
+        
+        return driver_data if not driver_data.empty else None
+        
+    except Exception:
+        return None
