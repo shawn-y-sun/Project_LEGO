@@ -54,7 +54,7 @@ class DataManager:
     poos_periods : List[int], optional
         List of integers specifying pseudo-out-of-sample period lengths for Walk Forward Test.
         Each number represents how many periods to use as pseudo out-of-sample ending at
-        the original in-sample end date. If None, defaults to [4, 9, 12] for quarterly 
+        the original in-sample end date. If None, defaults to [4, 8, 12] for quarterly
         data or [3, 6, 12] for monthly data.
 
     Examples
