@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Shared column schemas
 TIMESERIES_COLUMNS = ['date', 'model', 'series_type', 'value_type', 'value']
 STATICSTATS_COLUMNS = ['category', 'model', 'type', 'value_type', 'value']
-SCENARIO_COLUMNS = ['model', 'scenario_name', 'severity', 'date', 'frequency', 'value_type', 'value']
+SCENARIO_COLUMNS = ['category', 'model', 'scenario_name', 'severity', 'date', 'frequency', 'value_type', 'value']
 TEST_RESULTS_COLUMNS = ['model', 'test', 'index', 'metric', 'value']
 SENSITIVITY_COLUMNS = ['model', 'test', 'scenario_name', 'severity', 'variable/parameter', 'shock', 'date', 'frequency', 'value_type', 'value']
 STABILITY_COLUMNS = ['date', 'model', 'test_period', 'value_type', 'value']
@@ -39,6 +39,15 @@ SERIES_TYPE_BASE = 'Base'
 SERIES_TYPE_RESIDUAL = 'Residual'
 SERIES_TYPE_IV = 'Independent Variable'
 
+# Category constants for scenario testing
+CATEGORY_TARGET_FORECAST = 'Target Variable Forecast'
+CATEGORY_BASE_FORECAST = 'Base Variable Forecast'
+CATEGORY_DRIVER_DATA = 'Driver Scenario Data'
+
+# Value type constants for scenario testing
+VALUE_TYPE_TARGET_FORECAST = 'Target Variable Forecast'
+VALUE_TYPE_BASE_FORECAST = 'Base Variable Forecast'
+
 # Define available export content types as constants
 EXPORT_CONTENT_TYPES = {
     'timeseries_data': 'Combined modeling dataset and fit results',
@@ -50,6 +59,88 @@ EXPORT_CONTENT_TYPES = {
     'stability_testing_stats': 'Walk-forward stability testing statistical metrics',
     'scenario_testing_stats': 'Scenario testing statistical metrics for base variables'
 }
+
+# Utility functions for scenario testing
+def is_seasonal_dummy(var_name: str) -> bool:
+    """
+    Check if a variable name represents a seasonal dummy.
+    
+    Seasonal dummies follow patterns like:
+    - M:2, M:3, ..., M:12 (monthly dummies)
+    - Q:2, Q:3, Q:4 (quarterly dummies)
+    - System columns like 'M', 'Q'
+    
+    Parameters
+    ----------
+    var_name : str
+        Variable name to check
+        
+    Returns
+    -------
+    bool
+        True if the variable is a seasonal dummy, False otherwise
+    """
+    if not isinstance(var_name, str):
+        return False
+    
+    # Check for monthly dummies (M:2 through M:12)
+    if var_name.startswith('M:'):
+        try:
+            month_num = int(var_name.split(':')[1])
+            return 2 <= month_num <= 12
+        except (ValueError, IndexError):
+            return False
+    
+    # Check for quarterly dummies (Q:2 through Q:4)
+    if var_name.startswith('Q:'):
+        try:
+            quarter_num = int(var_name.split(':')[1])
+            return 2 <= quarter_num <= 4
+        except (ValueError, IndexError):
+            return False
+    
+    # Check for system columns
+    if var_name in ['M', 'Q']:
+        return True
+    
+    return False
+
+
+def filter_driver_columns(df: pd.DataFrame, target_var: str = None, base_var: str = None) -> List[str]:
+    """
+    Filter DataFrame columns to get driver variables, excluding seasonal dummies and target/base variables.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing driver data
+    target_var : str, optional
+        Target variable name to exclude
+    base_var : str, optional
+        Base variable name to exclude
+        
+    Returns
+    -------
+    List[str]
+        List of driver column names after filtering
+    """
+    if df.empty:
+        return []
+    
+    # Get all columns
+    all_columns = df.columns.tolist()
+    
+    # Filter out seasonal dummies
+    driver_columns = [col for col in all_columns if not is_seasonal_dummy(col)]
+    
+    # Filter out target and base variables if specified
+    if target_var and target_var in driver_columns:
+        driver_columns.remove(target_var)
+    
+    if base_var and base_var in driver_columns:
+        driver_columns.remove(base_var)
+    
+    return driver_columns
 
 class ExportableModel(ABC):
     """Abstract base class defining the interface for exportable models."""
@@ -370,16 +461,20 @@ class OLSExportStrategy(ExportStrategy):
         }
         
         config = content_config.get(content_type)
-        if not config or not config['chunks']:
+        if not config:
             return
             
         chunks = config['chunks']
         columns = config['columns']
         filepath = output_dir / config['filename']
         
-        # Combine chunks and ensure column order
-        df = pd.concat(chunks, copy=False)
-        df = df[columns]
+        # Combine chunks and ensure column order - create empty DataFrame if no chunks
+        if chunks:
+            df = pd.concat(chunks, copy=False)
+            df = df[columns]
+        else:
+            # Always create empty file with proper column headers
+            df = pd.DataFrame(columns=columns)
         
         # Determine write mode based on file existence
         file_exists = filepath.exists()
@@ -417,7 +512,8 @@ class OLSExportStrategy(ExportStrategy):
         
         # Get sensitivity results
         df = model.get_sensitivity_results()
-        if isinstance(df, pd.DataFrame) and not df.empty:
+        # Always add data to chunks (even if empty) to ensure file creation
+        if isinstance(df, pd.DataFrame):
             self._sensitivity_chunks.append(df)
             self._chunk_sizes['sensitivity_testing'] += len(df)
             if self._chunk_sizes['sensitivity_testing'] >= self.chunk_size:
@@ -437,7 +533,8 @@ class OLSExportStrategy(ExportStrategy):
             return
         
         df = model.get_test_results()
-        if isinstance(df, pd.DataFrame) and not df.empty:
+        # Always add data to chunks (even if empty) to ensure file creation
+        if isinstance(df, pd.DataFrame):
             self._test_results_chunks.append(df)
             self._chunk_sizes['test_results'] += len(df)
             if self._chunk_sizes['test_results'] >= self.chunk_size:
@@ -448,7 +545,8 @@ class OLSExportStrategy(ExportStrategy):
         if not self.should_export('timeseries_data'):
             return
         df = model.get_timeseries_data()
-        if isinstance(df, pd.DataFrame) and not df.empty:
+        # Always add data to chunks (even if empty) to ensure file creation
+        if isinstance(df, pd.DataFrame):
             self._timeseries_chunks.append(df)
             self._chunk_sizes['timeseries_data'] += len(df)
             if self._chunk_sizes['timeseries_data'] >= self.chunk_size:
@@ -460,7 +558,8 @@ class OLSExportStrategy(ExportStrategy):
             return
         
         df = model.get_model_statistics()
-        if isinstance(df, pd.DataFrame) and not df.empty:
+        # Always add data to chunks (even if empty) to ensure file creation
+        if isinstance(df, pd.DataFrame):
             self._statistics_chunks.append(df)
             self._chunk_sizes['staticStats'] += len(df)
             if self._chunk_sizes['staticStats'] >= self.chunk_size:
@@ -488,7 +587,8 @@ class OLSExportStrategy(ExportStrategy):
         
         # Get scenario results
         df = model.get_scenario_results()
-        if isinstance(df, pd.DataFrame) and not df.empty:
+        # Always add data to chunks (even if empty) to ensure file creation
+        if isinstance(df, pd.DataFrame):
             self._scenario_chunks.append(df)
             self._chunk_sizes['scenario_testing'] += len(df)
             if self._chunk_sizes['scenario_testing'] >= self.chunk_size:
@@ -500,7 +600,8 @@ class OLSExportStrategy(ExportStrategy):
             return
         
         df = model.get_stability_results()
-        if isinstance(df, pd.DataFrame) and not df.empty:
+        # Always add data to chunks (even if empty) to ensure file creation
+        if isinstance(df, pd.DataFrame):
             self._stability_chunks.append(df)
             self._chunk_sizes['stability_testing'] += len(df)
             if self._chunk_sizes['stability_testing'] >= self.chunk_size:
@@ -512,7 +613,8 @@ class OLSExportStrategy(ExportStrategy):
             return
         
         df = model.get_stability_stats_results()
-        if isinstance(df, pd.DataFrame) and not df.empty:
+        # Always add data to chunks (even if empty) to ensure file creation
+        if isinstance(df, pd.DataFrame):
             self._stability_stats_chunks.append(df)
             self._chunk_sizes['stability_testing_stats'] += len(df)
             if self._chunk_sizes['stability_testing_stats'] >= self.chunk_size:
@@ -524,7 +626,8 @@ class OLSExportStrategy(ExportStrategy):
             return
         
         df = model.get_scenario_stats_results()
-        if isinstance(df, pd.DataFrame) and not df.empty:
+        # Always add data to chunks (even if empty) to ensure file creation
+        if isinstance(df, pd.DataFrame):
             self._scenario_stats_chunks.append(df)
             self._chunk_sizes['scenario_testing_stats'] += len(df)
             if self._chunk_sizes['scenario_testing_stats'] >= self.chunk_size:
@@ -943,25 +1046,28 @@ class OLSModelAdapter(ExportableModel):
         # Create DataFrame efficiently
         return pd.DataFrame(stats_list)
     
-    def get_scenario_results(self) -> Optional[pd.DataFrame]:
-        """Return scenario testing results in long format.
+    def get_scenario_results(self) -> pd.DataFrame:
+        """Return scenario testing results in long format with driver data.
         
         Returns a DataFrame with columns:
+        - category: string ['Target Variable Forecast', 'Base Variable Forecast', 'Driver Scenario Data']
         - model: string, model_id
         - scenario_name: string (e.g., 'EWST_2024')
         - severity: string (e.g., 'base', 'adv', 'sev', 'p0')
         - date: timestamp
         - frequency: string ['monthly'/'quarterly']
-        - value_type: string ['Target'/'Base']
+        - value_type: string (specific series identifier)
         - value: numerical
         
-        The method processes both target and base variable forecasts if available:
-        - Target variable: Monthly frequency only (quarterly target forecasts deprecated)
-        - Base variable: Both monthly and quarterly frequencies
-        - Includes scen_p0 baseline data for both target and base variables
+        The method processes:
+        - Target variable forecasts: Monthly frequency only
+        - Base variable forecasts: Both monthly and quarterly frequencies
+        - Driver scenario data: Actual transformed model drivers (P0 to P12), 
+          excludes seasonal dummies and intercept terms
         """
         if self.model.scen_manager is None:
-            return None
+            # Return empty DataFrame with correct schema
+            return pd.DataFrame(columns=SCENARIO_COLUMNS)
         
         model_id = self._model_id
         data_list = []
@@ -969,19 +1075,38 @@ class OLSModelAdapter(ExportableModel):
         # Get target variable forecasts (monthly)
         scen_results = self.model.scen_manager.y_scens
         
+        if not scen_results:
+            return pd.DataFrame(columns=SCENARIO_COLUMNS)
+        
+        # Get model frequency to determine driver data frequency
+        model_freq = getattr(self.model, 'dm', None)
+        if model_freq is not None:
+            model_freq = getattr(model_freq, 'freq', 'M')
+        else:
+            model_freq = 'M'  # Default to monthly
+        
+        frequency_str = 'monthly' if model_freq == 'M' else 'quarterly'
+        
+        # Get target and base variable names for filtering
+        target_var = getattr(self.model, 'target', None)
+        base_var = getattr(self.model, 'target_base', None)
+        
+        # === TARGET VARIABLE FORECASTS ===
+        
         # Add scen_p0 data to scenario results if available
         if hasattr(self.model.scen_manager, 'scen_p0') and self.model.scen_manager.scen_p0 is not None:
             scen_p0_data = self.model.scen_manager.scen_p0
             for scen_set in scen_results.keys():
                 # Create scen_p0 entry for target variable
                 df_data = {
+                    'category': CATEGORY_TARGET_FORECAST,
                     'model': model_id,
                     'scenario_name': scen_set,
                     'severity': 'p0',
                     'date': scen_p0_data.index,
-                    'value_type': 'Target',
-                    'value': scen_p0_data.values,
-                    'frequency': 'monthly'
+                    'frequency': 'monthly',
+                    'value_type': VALUE_TYPE_TARGET_FORECAST,
+                    'value': scen_p0_data.values
                 }
                 data_list.append(pd.DataFrame(df_data))
         
@@ -991,31 +1116,34 @@ class OLSModelAdapter(ExportableModel):
                 if forecast is not None and not forecast.empty:
                     # Create DataFrame for target forecasts (monthly)
                     df_data = {
+                        'category': CATEGORY_TARGET_FORECAST,
                         'model': model_id,
                         'scenario_name': scen_set,
                         'severity': scen_name,
                         'date': forecast.index,
-                        'value_type': 'Target',
-                        'value': forecast.values,
-                        'frequency': 'monthly'
+                        'frequency': 'monthly',
+                        'value_type': VALUE_TYPE_TARGET_FORECAST,
+                        'value': forecast.values
                     }
                     data_list.append(pd.DataFrame(df_data))
- 
+
         # Add historical actuals (Target) monthly and quarterly (if applicable)
         target_actual = getattr(self.model, 'y_full', None)
         if target_actual is not None and not target_actual.empty:
             # Monthly actuals per scenario set
             for scen_set in scen_results.keys():
                 df_data = {
+                    'category': CATEGORY_TARGET_FORECAST,
                     'model': model_id,
                     'scenario_name': scen_set,
                     'severity': 'actual',
                     'date': target_actual.index,
-                    'value_type': 'Target',
-                    'value': target_actual.values,
-                    'frequency': 'monthly'
+                    'frequency': 'monthly',
+                    'value_type': VALUE_TYPE_TARGET_FORECAST,
+                    'value': target_actual.values
                 }
                 data_list.append(pd.DataFrame(df_data))
+            
             # Quarterly actuals aggregated to quarter-end
             actual_q = target_actual.copy()
             actual_q.index = pd.to_datetime(actual_q.index)
@@ -1024,19 +1152,19 @@ class OLSModelAdapter(ExportableModel):
             if not actual_q.empty:
                 for scen_set in scen_results.keys():
                     df_data = {
+                        'category': CATEGORY_TARGET_FORECAST,
                         'model': model_id,
                         'scenario_name': scen_set,
                         'severity': 'actual',
                         'date': actual_q.index,
-                        'value_type': 'Target',
-                        'value': actual_q.values,
-                        'frequency': 'quarterly'
+                        'frequency': 'quarterly',
+                        'value_type': VALUE_TYPE_TARGET_FORECAST,
+                        'value': actual_q.values
                     }
                     data_list.append(pd.DataFrame(df_data))
 
-        # Process target variable quarterly forecasts
-        # Target variable quarterly forecasts are no longer available (forecast_y_qtr_df deprecated)
- 
+        # === BASE VARIABLE FORECASTS ===
+        
         # Process base variable forecasts (monthly) if available
         if hasattr(self.model.scen_manager, 'y_base_scens'):
             base_results = self.model.scen_manager.y_base_scens
@@ -1050,13 +1178,14 @@ class OLSModelAdapter(ExportableModel):
                     for scen_set in base_results.keys():
                         # Create scen_p0 entry for base variable
                         df_data = {
+                            'category': CATEGORY_BASE_FORECAST,
                             'model': model_id,
                             'scenario_name': scen_set,
                             'severity': 'p0',
                             'date': base_p0_values.index,
-                            'value_type': 'Base',
-                            'value': base_p0_values.values,
-                            'frequency': 'monthly'
+                            'frequency': 'monthly',
+                            'value_type': VALUE_TYPE_BASE_FORECAST,
+                            'value': base_p0_values.values
                         }
                         data_list.append(pd.DataFrame(df_data))
             
@@ -1065,30 +1194,33 @@ class OLSModelAdapter(ExportableModel):
                     if forecast is not None and not forecast.empty:
                         # Create DataFrame for base forecasts (monthly)
                         df_data = {
+                            'category': CATEGORY_BASE_FORECAST,
                             'model': model_id,
                             'scenario_name': scen_set,
                             'severity': scen_name,
                             'date': forecast.index,
-                            'value_type': 'Base',
-                            'value': forecast.values,
-                            'frequency': 'monthly'
+                            'frequency': 'monthly',
+                            'value_type': VALUE_TYPE_BASE_FORECAST,
+                            'value': forecast.values
                         }
                         data_list.append(pd.DataFrame(df_data))
- 
+
         # Add historical actuals (Base) monthly and quarterly if base actuals exist on model
         base_actual = getattr(self.model, 'y_base_full', None)
         if base_actual is not None and not base_actual.empty:
             for scen_set in scen_results.keys():
                 df_data = {
+                    'category': CATEGORY_BASE_FORECAST,
                     'model': model_id,
                     'scenario_name': scen_set,
                     'severity': 'actual',
                     'date': base_actual.index,
-                    'value_type': 'Base',
-                    'value': base_actual.values,
-                    'frequency': 'monthly'
+                    'frequency': 'monthly',
+                    'value_type': VALUE_TYPE_BASE_FORECAST,
+                    'value': base_actual.values
                 }
                 data_list.append(pd.DataFrame(df_data))
+            
             # Quarterly aggregation
             base_actual_q = base_actual.copy()
             base_actual_q.index = pd.to_datetime(base_actual_q.index)
@@ -1097,13 +1229,14 @@ class OLSModelAdapter(ExportableModel):
             if not base_actual_q.empty:
                 for scen_set in scen_results.keys():
                     df_data = {
+                        'category': CATEGORY_BASE_FORECAST,
                         'model': model_id,
                         'scenario_name': scen_set,
                         'severity': 'actual',
                         'date': base_actual_q.index,
-                        'value_type': 'Base',
-                        'value': base_actual_q.values,
-                        'frequency': 'quarterly'
+                        'frequency': 'quarterly',
+                        'value_type': VALUE_TYPE_BASE_FORECAST,
+                        'value': base_actual_q.values
                     }
                     data_list.append(pd.DataFrame(df_data))
 
@@ -1124,22 +1257,58 @@ class OLSModelAdapter(ExportableModel):
                                 if not qtr_forecast.empty:
                                     # Create quarterly base data
                                     df_data = {
+                                        'category': CATEGORY_BASE_FORECAST,
                                         'model': model_id,
                                         'scenario_name': scen_set,
                                         'severity': scen_name,
                                         'date': qtr_forecast.index,
-                                        'value_type': 'Base',
-                                        'value': qtr_forecast.values,
-                                        'frequency': 'quarterly'
+                                        'frequency': 'quarterly',
+                                        'value_type': VALUE_TYPE_BASE_FORECAST,
+                                        'value': qtr_forecast.values
                                     }
                                     data_list.append(pd.DataFrame(df_data))
         
+        # === DRIVER SCENARIO DATA ===
+        
+        # Get actual model drivers (transformed features used in the model)
+        model_drivers = get_model_driver_names(self.model)
+        
+        if model_drivers and hasattr(self.model, 'scen_manager') and self.model.scen_manager is not None:
+            # Process each scenario set that has target forecasts
+            for scen_set in scen_results.keys():
+                # Get all scenarios for this scenario set from target forecasts
+                scenarios = scen_results[scen_set]
+                
+                for scen_name in scenarios.keys():
+                    # Get transformed driver data for this scenario (P0 to P12)
+                    driver_data = get_scenario_driver_data(
+                        self.model, scen_set, scen_name, model_drivers, 
+                        jump_off_date=None, periods=12
+                    )
+                    
+                    if driver_data is not None and not driver_data.empty:
+                        # Export each driver as a separate series
+                        for driver_name in driver_data.columns:
+                            driver_series = driver_data[driver_name].dropna()
+                            if not driver_series.empty:
+                                df_data = {
+                                    'category': CATEGORY_DRIVER_DATA,
+                                    'model': model_id,
+                                    'scenario_name': scen_set,
+                                    'severity': scen_name,
+                                    'date': driver_series.index,
+                                    'frequency': frequency_str,
+                                    'value_type': driver_name,
+                                    'value': driver_series.values
+                                }
+                                data_list.append(pd.DataFrame(df_data))
+        
         if not data_list:
-            return None
+            return pd.DataFrame(columns=SCENARIO_COLUMNS)
             
         # Combine all data and ensure column order
         result = pd.concat(data_list, ignore_index=True)
-        return result[['model', 'scenario_name', 'severity', 'date', 'frequency', 'value_type', 'value']]
+        return result[SCENARIO_COLUMNS]
 
     def get_test_results(self) -> Optional[pd.DataFrame]:
         """Return test results in long format.
@@ -2344,3 +2513,116 @@ class OLSModelAdapter(ExportableModel):
         df_sorted['metric'] = df_sorted['metric'].astype(str)
         
         return df_sorted 
+
+# =============================================================================
+# Helper functions for driver scenario data export
+# =============================================================================
+
+def get_model_driver_names(model) -> List[str]:
+    """
+    Get the actual driver feature names used in a fitted model.
+    
+    This function extracts the column names from the model's feature matrix (X_in),
+    excluding seasonal dummies and the intercept term. These represent the actual
+    transformed features that are used as drivers in the model.
+    
+    Parameters
+    ----------
+    model : ModelBase
+        Fitted model instance with X_in attribute
+        
+    Returns
+    -------
+    List[str]
+        List of actual driver feature names used in the model
+    """
+    if not hasattr(model, 'X_in') or model.X_in is None or model.X_in.empty:
+        return []
+    
+    # Get all feature column names from the model
+    all_features = model.X_in.columns.tolist()
+    
+    # Filter out intercept and seasonal dummies
+    driver_features = []
+    for feature_name in all_features:
+        # Skip intercept terms
+        if feature_name.lower() in ['const', 'intercept', 'c']:
+            continue
+        # Skip seasonal dummies using existing function
+        if is_seasonal_dummy(feature_name):
+            continue
+        driver_features.append(feature_name)
+    
+    return driver_features
+
+
+def get_scenario_driver_data(model, scen_set: str, scen_name: str, driver_names: List[str], 
+                           jump_off_date=None, periods: int = 12) -> Optional[pd.DataFrame]:
+    """
+    Get transformed driver scenario data for specific scenario and drivers.
+    
+    This function gets the actual transformed driver data as used by the model,
+    filtered to the specified date range (P0 to P{periods}).
+    
+    Parameters
+    ----------
+    model : ModelBase
+        Fitted model instance with scenario manager
+    scen_set : str
+        Scenario set name
+    scen_name : str
+        Scenario name within the set
+    driver_names : List[str]
+        List of driver feature names to extract
+    jump_off_date : pd.Timestamp, optional
+        Jump-off date (P0). If None, uses model's scenario manager P0
+    periods : int, default 12
+        Number of periods after P0 to include (P1 to P{periods})
+        
+    Returns
+    -------
+    pd.DataFrame or None
+        DataFrame with driver data columns filtered to date range, or None if not available
+    """
+    if not hasattr(model, 'scen_manager') or model.scen_manager is None:
+        return None
+    
+    # Get scenario features from scenario manager
+    try:
+        X_scens = model.scen_manager.X_scens
+        if scen_set not in X_scens or scen_name not in X_scens[scen_set]:
+            return None
+        
+        scenario_features = X_scens[scen_set][scen_name]
+        
+        # Filter to only the requested driver names that exist in the scenario features
+        available_drivers = [name for name in driver_names if name in scenario_features.columns]
+        if not available_drivers:
+            return None
+        
+        driver_data = scenario_features[available_drivers].copy()
+        
+        # Apply date filtering (P0 to P{periods})
+        if jump_off_date is None:
+            jump_off_date = getattr(model.scen_manager, 'P0', None)
+        
+        if jump_off_date is not None:
+            # Convert to pandas timestamp if needed
+            jump_off_date = pd.to_datetime(jump_off_date)
+            
+            # Calculate end date (P{periods} after jump-off)
+            # Determine frequency from model
+            model_freq = getattr(model.dm, 'freq', 'M')
+            if model_freq == 'M':
+                end_date = jump_off_date + pd.DateOffset(months=periods)
+            else:  # Quarterly
+                end_date = jump_off_date + pd.DateOffset(months=periods*3)
+            
+            # Filter data to P0 to P{periods} range
+            mask = (driver_data.index >= jump_off_date) & (driver_data.index <= end_date)
+            driver_data = driver_data.loc[mask]
+        
+        return driver_data if not driver_data.empty else None
+        
+    except Exception:
+        return None
