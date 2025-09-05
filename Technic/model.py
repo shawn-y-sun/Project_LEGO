@@ -1,6 +1,8 @@
 # =============================================================================
 # module: model.py
-# Purpose: Define base and OLS regression models with testing and reporting hooks
+# Purpose: Define base model framework and linear regression variants with testing and reporting hooks
+# Key Types/Classes: ModelBase, OLS, WLS, FixedOLS
+# Key Functions: _validate_data
 # Dependencies: pandas, numpy, statsmodels, typing, .testset.TestSet, .report.OLS_ModelReport
 # =============================================================================
 
@@ -1503,6 +1505,199 @@ class OLS(ModelBase):
 
     def __repr__(self) -> str:
         return f'OLS-{self.cov_type}'
+
+class WLS(OLS):
+    """
+    Weighted Least Squares regression model with testing and reporting hooks.
+
+    Parameters
+    ----------
+    weights : Union[pd.Series, np.ndarray], optional
+        Observation weights aligned with the in-sample target vector. Defaults
+        to a vector of ones, reducing to ordinary least squares when no
+        heteroscedasticity information is available.
+    dm, specs, sample, outlier_idx, target, testset_func, test_update_func,
+    testset_cls, scen_cls, model_type, target_base, target_exposure,
+    report_cls, stability_test_cls, X, y, X_out, y_out, qtr_method :
+        See :class:`OLS` for documentation of these parameters. The majority of
+        arguments mirror those of the :class:`OLS` model to ensure
+        compatibility across the package.
+
+    Raises
+    ------
+    ValueError
+        If ``weights`` length does not match ``y`` or contains NaN or infinite
+        values.
+
+    Examples
+    --------
+    >>> mdl = WLS(dm, specs, 'in', target='y')
+    >>> mdl.fit()
+    """
+
+    def __init__(
+        self,
+        dm: Any,
+        specs: List[Union[str, Dict[str, Any]]],
+        sample: str,
+        weights: Optional[Union[pd.Series, np.ndarray]] = None,
+        outlier_idx: Optional[List[Any]] = None,
+        target: str = None,
+        testset_func: Callable[['ModelBase'], Dict[str, ModelTestBase]] = ppnr_ols_testset_func,
+        test_update_func: Optional[Callable[['ModelBase'], Dict[str, Any]]] = None,
+        testset_cls: Type = TestSet,
+        scen_cls: Optional[Type] = None,
+        model_type: Optional[Type] = None,
+        target_base: Optional[str] = None,
+        target_exposure: Optional[str] = None,
+        report_cls: Type = OLS_ModelReport,
+        stability_test_cls: Optional[Type] = None,
+        X: Optional[pd.DataFrame] = None,
+        y: Optional[pd.Series] = None,
+        X_out: Optional[pd.DataFrame] = None,
+        y_out: Optional[pd.Series] = None,
+        qtr_method: str = 'mean'
+    ) -> None:
+        """Initialize WLS model and validate weights."""
+        if stability_test_cls is None:
+            from .stability import WalkForwardTest
+            stability_test_cls = WalkForwardTest
+
+        super().__init__(
+            dm=dm,
+            specs=specs,
+            sample=sample,
+            outlier_idx=outlier_idx,
+            target=target,
+            testset_func=testset_func,
+            test_update_func=test_update_func,
+            testset_cls=testset_cls,
+            scen_cls=scen_cls,
+            model_type=model_type,
+            target_base=target_base,
+            target_exposure=target_exposure,
+            report_cls=report_cls,
+            stability_test_cls=stability_test_cls,
+            X=X,
+            y=y,
+            X_out=X_out,
+            y_out=y_out,
+            qtr_method=qtr_method
+        )
+
+        if weights is None:
+            w_series = pd.Series(1.0, index=self.y.index)
+        else:
+            w_series = weights if isinstance(weights, pd.Series) else pd.Series(weights, index=self.y.index)
+            if len(w_series) != len(self.y):
+                raise ValueError("weights length must match number of observations in y.")
+            if w_series.isna().any() or (~np.isfinite(w_series)).any():
+                raise ValueError("weights contain NaN or infinite values.")
+
+        self.weights = w_series.astype(float)
+
+    def fit(self) -> 'WLS':
+        """
+        Fit weighted least squares and adjust covariance if diagnostics fail.
+
+        Returns
+        -------
+        WLS
+            The fitted model instance.
+
+        Raises
+        ------
+        ValueError
+            If data or weights contain NaN or infinite values.
+        """
+        self._validate_data(self.X, self.y)
+
+        if self.weights.isna().any() or (~np.isfinite(self.weights)).any():
+            raise ValueError("weights contain NaN or infinite values.")
+
+        Xc = sm.add_constant(self.X)
+        res = sm.WLS(self.y, Xc, weights=self.weights).fit()
+
+        self.fitted = res
+        self.params = res.params
+        self.pvalues = res.pvalues
+        self.rsquared = res.rsquared
+        self.rsquared_adj = res.rsquared_adj
+        self.y_fitted_in = res.fittedvalues
+        self.resid = res.resid
+        self.bse = res.bse
+        self.se = self.bse
+        self.tvalues = res.tvalues
+        self.fvalue = res.fvalue
+        self.f_pvalue = res.f_pvalue
+        self.llf = res.llf
+        self.vif = pd.Series({
+            col: variance_inflation_factor(Xc.values, i)
+            for i, col in enumerate(Xc.columns)
+        })
+        self.is_fitted = True
+
+        self.conf_int_df = pd.DataFrame(
+            self.fitted.conf_int(alpha=self.conf_int_alpha),
+            index=self.params.index,
+            columns=[0, 1]
+        )
+        self.aic = self.fitted.aic
+        self.bic = self.fitted.bic
+
+        ac_test = AutocorrTest(
+            results=self.fitted,
+            alias='Residual Autocorrelation',
+            filter_mode='moderate'
+        )
+        het_test = HetTest(
+            resids=self.resid,
+            exog=Xc,
+            alias='Residual Heteroscedasticity',
+            filter_mode='moderate'
+        )
+        ac_fail = not ac_test.test_filter
+        het_fail = not het_test.test_filter
+
+        if ac_fail or het_fail:
+            if het_fail and not ac_fail:
+                robust = self.fitted.get_robustcov_results(cov_type='HC1')
+                self.cov_type = 'HC1'
+            else:
+                n = len(self.y)
+                lag = int(np.floor(4 * (n / 100) ** (2/9)))
+                robust = self.fitted.get_robustcov_results(
+                    cov_type='HAC', maxlags=lag
+                )
+                self.cov_type = f'HAC({lag})'
+
+            self.fitted = robust
+            idx = self.params.index
+            self.bse = pd.Series(robust.bse, index=idx)
+            self.se = self.bse
+            self.tvalues = pd.Series(robust.tvalues, index=idx)
+            self.pvalues = pd.Series(robust.pvalues, index=idx)
+            self.fvalue = robust.fvalue
+            self.f_pvalue = robust.f_pvalue
+            self.llf = robust.llf
+            self.conf_int_df = pd.DataFrame(
+                self.fitted.conf_int(alpha=self.conf_int_alpha),
+                index=self.params.index,
+                columns=[0, 1]
+            )
+            self.aic = self.fitted.aic
+            self.bic = self.fitted.bic
+        else:
+            self.cov_type = 'NR'
+
+        self.load_testset()
+        self._create_scenario_manager()
+        return self
+
+    def __repr__(self) -> str:
+        """Return model identifier including covariance type."""
+        return f'WLS-{self.cov_type}'
+
 
 class FixedOLS(OLS):
     """

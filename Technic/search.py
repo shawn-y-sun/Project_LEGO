@@ -1,3 +1,12 @@
+# =============================================================================
+# module: search.py
+# Purpose: Generate and evaluate feature combinations for model search.
+# Key Types/Classes: ModelSearch
+# Key Functions: build_spec_combos, assess_spec, filter_specs, run_search
+# Dependencies: typing, itertools, time, datetime, collections, warnings,
+#               sys, os, contextlib, io, pandas, tqdm, .data, .feature,
+#               .transform, .model, .cm
+# =============================================================================
 from typing import List, Union, Tuple, Type, Any, Optional, Callable, Dict
 import itertools
 import time
@@ -296,7 +305,8 @@ class ModelSearch:
         specs: List[Union[str, TSFM, Feature, Tuple[Any, ...]]],
         sample: str = 'in',
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
-        outlier_idx: Optional[List[Any]] = None
+        outlier_idx: Optional[List[Any]] = None,
+        model_kwargs: Optional[Dict[str, Any]] = None
     ) -> Union[CM, Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str], Dict[str, Dict[str, str]]]]:
         """
         Build and assess a single spec combo via CM.build(), reload tests, and TestSet.filter_pass().
@@ -316,6 +326,10 @@ class ModelSearch:
             records to remove from the in-sample data. If provided and `build_in`
             is True, each label must exist within the in-sample period; otherwise,
             a ValueError is raised.
+        model_kwargs : dict, optional
+            Additional keyword arguments forwarded to ``CM.build`` for
+            customizing the underlying model class (e.g., weights for a
+            weighted least squares model).
 
         Returns
         -------
@@ -329,16 +343,16 @@ class ModelSearch:
 
         # Build the candidate model
         cm = CM(
-            model_id=model_id, 
-            target=self.target, 
+            model_id=model_id,
+            target=self.target,
             model_type=self.model_type,
             target_base=self.target_base,
             target_exposure=self.target_exposure,
-            model_cls=self.model_cls, 
+            model_cls=self.model_cls,
             data_manager=self.dm,
             qtr_method=self.qtr_method
         )
-        cm.build(specs, sample=sample, outlier_idx=outlier_idx)
+        cm.build(specs, sample=sample, outlier_idx=outlier_idx, model_kwargs=model_kwargs)
         mdl = cm.model_in if sample == 'in' else cm.model_full
 
         # Reload testset, applying update if provided
@@ -355,7 +369,8 @@ class ModelSearch:
         model_id_prefix: str = 'cm',
         sample: str = 'in',
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
-        outlier_idx: Optional[List[Any]] = None
+        outlier_idx: Optional[List[Any]] = None,
+        model_kwargs: Optional[Dict[str, Any]] = None
     ) -> Tuple[List[CM], List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]], List[Tuple[List[Any], str, str]]]:
         """
         Assess all built spec combos and separate passed and failed results,
@@ -374,6 +389,10 @@ class ModelSearch:
             records to remove from the in-sample data. If provided and `build_in`
             is True, each label must exist within the in-sample period; otherwise,
             a ValueError is raised.
+        model_kwargs : dict, optional
+            Additional keyword arguments forwarded to ``assess_spec`` and
+            ultimately ``CM.build``. Enables customization of the model
+            class, such as providing weights for weighted least squares.
 
         Returns
         -------
@@ -413,7 +432,8 @@ class ModelSearch:
                             specs,
                             sample,
                             test_update_func,
-                            outlier_idx=outlier_idx
+                            outlier_idx=outlier_idx,
+                            model_kwargs=model_kwargs
                         )
                     
                     if isinstance(result, CM):
@@ -593,7 +613,8 @@ class ModelSearch:
         exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
-        outlier_idx: Optional[List[Any]] = None
+        outlier_idx: Optional[List[Any]] = None,
+        model_kwargs: Optional[Dict[str, Any]] = None
     ) -> List[CM]:
         """
         Execute full search pipeline: build specs, filter, rank, and select top_n models.
@@ -633,11 +654,25 @@ class ModelSearch:
             Optional function to update each CM's test set.
         outlier_idx : list, optional
             List of index labels corresponding to outliers to exclude.
+        model_kwargs : dict, optional
+            Additional keyword arguments forwarded to
+            :meth:`filter_specs` and ultimately :meth:`CM.build`.
+            Useful for customizing the selected ModelBase subclass, for
+            example providing ``weights`` when using :class:`WLS`.
 
         Returns
         -------
         top_models : list of CM
             The top_n CM instances sorted by composite score.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> searcher.run_search(
+        ...     desired_pool=["x1", "x2"],
+        ...     sample="in",
+        ...     model_kwargs={"weights": np.ones(len(dm.internal_data))}
+        ... )
         """
         forced = forced_in or []
         # 1. Configuration
@@ -655,7 +690,8 @@ class ModelSearch:
               f"Top N           : {top_n}\n"
               f"Rank weights    : {rank_weights}\n"
               f"Test update func: {test_update_func}\n"
-              f"Outlier idx     : {outlier_idx}\n")
+              f"Outlier idx     : {outlier_idx}\n"
+              f"Model kwargs    : {model_kwargs}\n")
         print("==================================\n")
 
         # 2. Build specs
@@ -666,7 +702,8 @@ class ModelSearch:
         passed, failed, errors = self.filter_specs(
             sample=sample,
             test_update_func=test_update_func,
-            outlier_idx=outlier_idx
+            outlier_idx=outlier_idx,
+            model_kwargs=model_kwargs
         )
         # Print empty line after test info
         print("")  # Empty line after test info
