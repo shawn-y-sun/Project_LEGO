@@ -327,10 +327,14 @@ class ModelSearch:
         if sample not in {'in', 'full'}:
             raise ValueError("`sample` must be either 'in' or 'full'.")
 
+        # Ensure feature cache is reset for this assessment
+        if hasattr(self.dm, "clear_feature_cache"):
+            self.dm.clear_feature_cache()
+
         # Build the candidate model
         cm = CM(
-            model_id=model_id, 
-            target=self.target, 
+            model_id=model_id,
+            target=self.target,
             model_type=self.model_type,
             target_base=self.target_base,
             target_exposure=self.target_exposure,

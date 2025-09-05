@@ -170,9 +170,12 @@ class DataManager:
         self._scen_internal_data_cache: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None
         self._model_mev_cache: Optional[pd.DataFrame] = None
         self._scen_mevs_cache: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None
-        
+
         # Frequency cache
         self._freq_cache: Optional[str] = None
+
+        # Cache for feature building results
+        self._feature_cache: Dict[str, Union[pd.Series, pd.DataFrame]] = {}
         
         # Check if both monthly and quarterly MEVs exist
         if not (self._mev_loader.model_mev_mth.empty or self._mev_loader.model_mev_qtr.empty):
@@ -243,6 +246,11 @@ class DataManager:
         self._model_mev_cache = None
         self._scen_mevs_cache = None
         self._freq_cache = None
+        self._feature_cache.clear()
+
+    def clear_feature_cache(self) -> None:
+        """Clear cached feature results."""
+        self._feature_cache.clear()
 
     @property
     def internal_data(self) -> pd.DataFrame:
@@ -766,47 +774,61 @@ class DataManager:
                             UserWarning
                         )
                         spec.freq = self.freq
-                
-                # For Features, we need to handle the result differently based on data type
-                feature_result = spec.apply(data_int, data_mev)
-                
+
+                cache_key = spec.name
+                cached = self._feature_cache.get(cache_key)
+                if cached is not None:
+                    feature_result = cached.copy()
+                else:
+                    feature_result = spec.apply(data_int, data_mev)
+                    self._feature_cache[cache_key] = feature_result.copy()
+
                 if is_panel:
                     # For panel data, we need to ensure we have the entity and date columns
                     if isinstance(feature_result, pd.Series):
-                        # Convert Series to DataFrame
                         feature_result = feature_result.to_frame()
-                    
+
                     if isinstance(feature_result, pd.DataFrame):
                         if date_col not in feature_result.columns:
-                            # For panel data, we need to preserve the original entity-date structure
-                            # Create a mapping DataFrame with entity and date columns
+                            # Preserve original entity-date structure
                             date_mapping = data_int[[entity_col, date_col]].copy()
-                            # Add the feature result columns using the original index alignment
                             for col in feature_result.columns:
                                 date_mapping[col] = feature_result[col].values
                             feature_result = date_mapping
                     feature_pieces.append(feature_result)
                 else:
-                    # For time series, just collect the result
                     feature_pieces.append(feature_result)
-                    
+
             elif isinstance(spec, str):
-                # Raw variable - collect in appropriate list
-                if spec in data_int.columns:
-                    if is_panel:
-                        # For panel data, we need the entity/date cols temporarily for alignment
-                        temp_df = data_int[[entity_col, date_col, spec]].copy()
-                        internal_pieces.append(temp_df)
+                cache_key = spec
+                cached = self._feature_cache.get(cache_key)
+                if cached is not None:
+                    piece = cached.copy()
+                else:
+                    if spec in data_int.columns:
+                        if is_panel:
+                            piece = data_int[[entity_col, date_col, spec]].copy()
+                        else:
+                            piece = data_int[spec].copy()
+                    elif spec in data_mev.columns:
+                        if is_panel:
+                            # For panel data, we'll merge later using column name
+                            piece = spec
+                        else:
+                            piece = data_mev[spec].copy()
                     else:
-                        internal_pieces.append(data_int[spec])
+                        raise KeyError(f"Feature '{spec}' not found in data sources.")
+
+                    if not (is_panel and spec in data_mev.columns):
+                        self._feature_cache[cache_key] = piece.copy()
+
+                if spec in data_int.columns:
+                    internal_pieces.append(piece)
                 elif spec in data_mev.columns:
                     if is_panel:
-                        # For panel data, we'll need to merge MEV features later
-                        mev_pieces.append(spec)
+                        mev_pieces.append(piece)
                     else:
-                        mev_pieces.append(data_mev[spec])
-                else:
-                    raise KeyError(f"Feature '{spec}' not found in data sources.")
+                        mev_pieces.append(piece)
             else:
                 raise TypeError(f"Invalid spec type after flatten(): {type(spec)}")
 
