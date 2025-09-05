@@ -1181,7 +1181,10 @@ class DataManager:
             monthly_index = pd.date_range(start=start_month, end=end_month, freq='M')
             monthly_df = pd.DataFrame(index=monthly_index)
 
-            var_map = self.var_map
+            # Access the MEV metadata directly from the loader to avoid
+            # triggering DataManager.var_map, which depends on model_mev and
+            # can cause recursion during the initial interpolation.
+            var_map = self._mev_loader.mev_map
             for col in df2.columns:
                 q_series = df2[col]
                 if q_series.isnull().all():
