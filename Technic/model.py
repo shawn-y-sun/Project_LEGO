@@ -686,7 +686,8 @@ class ModelBase(ABC):
         Get in-sample fitted base predictions.
         
         For level models (RateLevel, BalanceLevel), directly returns y_fitted_in.
-        For other models, uses base predictor to convert predictions to base variable.
+        For other models, uses the base predictor with ``reset=True`` to convert
+        predictions using actual base values from the previous period.
         
         Returns
         -------
@@ -713,7 +714,9 @@ class ModelBase(ABC):
             return pd.Series(dtype=float)
         
         try:
-            base_predictions = self.base_predictor.predict_base(self.y_fitted_in, self.dm.p0)
+            base_predictions = self.base_predictor.predict_base(
+                self.y_fitted_in, self.dm.p0, reset=True
+            )
             # Exclude p0 from the result
             if self.dm.p0 in base_predictions.index:
                 base_predictions = base_predictions.drop(self.dm.p0)
@@ -728,7 +731,8 @@ class ModelBase(ABC):
         Get out-of-sample base predictions.
         
         For level models (RateLevel, BalanceLevel), directly returns y_pred_out.
-        For other models, uses base predictor to convert predictions to base variable.
+        For other models, uses the base predictor with ``reset=True`` to convert
+        predictions using actual base values from the previous period.
         
         Returns
         -------
@@ -758,7 +762,9 @@ class ModelBase(ABC):
             return pd.Series(dtype=float)
         
         try:
-            base_predictions = self.base_predictor.predict_base(y_pred_out, self.dm.out_p0)
+            base_predictions = self.base_predictor.predict_base(
+                y_pred_out, self.dm.out_p0, reset=True
+            )
             # Exclude out_p0 from the result
             if self.dm.out_p0 in base_predictions.index:
                 base_predictions = base_predictions.drop(self.dm.out_p0)
