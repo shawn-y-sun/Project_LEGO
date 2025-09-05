@@ -1,4 +1,13 @@
-# TECHNIC/segment.py
+# =============================================================================
+# module: segment.py
+# Purpose: Manage candidate model collections and reporting.
+# Key Types/Classes: Segment, CM
+# Key Functions: build_cm, search_cms
+# Dependencies: warnings, pandas, numpy, matplotlib, math,
+#               typing, pathlib, .cm, .model, .template,
+#               .report, .search, .scenario, .sensitivity,
+#               .stability, .export
+# =============================================================================
 import warnings
 warnings.simplefilter(action="ignore", category=FutureWarning)
 import pandas as pd
@@ -9,7 +18,7 @@ from typing import Type, Dict, List, Optional, Any, Union, Callable, Tuple, Set
 from pathlib import Path
 
 from .cm import CM
-from .model import ModelBase, OLS, FixedOLS
+from .model import ModelBase, OLS, FixedOLS, WLS
 from .template import ExportTemplateBase
 from .report import ReportSet
 from .search import ModelSearch
@@ -126,7 +135,8 @@ class Segment:
         self,
         cm_id: str,
         specs: Any,
-        sample: str = 'both'
+        sample: str = 'both',
+        model_kwargs: Optional[Dict[str, Any]] = None
     ) -> CM:
         """
         Instantiate and fit a Candidate Model (CM) with given specifications.
@@ -150,6 +160,10 @@ class Segment:
             - 'in': in-sample only
             - 'full': full sample
             - 'both': both in-sample and full sample (default)
+        model_kwargs : dict, optional
+            Additional keyword arguments forwarded to the underlying
+            model class via ``CM.build``. Useful for ModelBase subclasses
+            such as :class:`WLS` that accept per-observation weights.
 
         Returns
         -------
@@ -173,6 +187,19 @@ class Segment:
         ...         "transforms": ["diff", "pct_change"]
         ...     }
         ... )
+        >>>
+        >>> # Build a weighted least squares model with custom weights
+        >>> wls_segment = Segment(
+        ...     segment_id="wls_seg",
+        ...     target="gdp_growth",
+        ...     data_manager=dm,
+        ...     model_cls=WLS
+        ... )
+        >>> cm = wls_segment.build_cm(
+        ...     cm_id="wls_model",
+        ...     specs=["inflation", "unemployment"],
+        ...     model_kwargs={"weights": np.linspace(1.0, 0.5, len(dm.internal_data))}
+        ... )
         """
         cm = CM(
             model_id=cm_id,
@@ -185,7 +212,7 @@ class Segment:
             scen_cls=self.scen_cls,
             qtr_method=self.qtr_method,
         )
-        cm.build(specs, sample=sample)
+        cm.build(specs, sample=sample, model_kwargs=model_kwargs)
         self.cms[cm_id] = cm
         return cm
     
@@ -1427,7 +1454,8 @@ class Segment:
         outlier_idx: Optional[List[Any]] = None,
         add_in: bool = True,
         override: bool = False,
-        re_rank: bool = True
+        re_rank: bool = True,
+        model_kwargs: Optional[Dict[str, Any]] = None
     ) -> None:
         """
         Run an exhaustive search to find the best performing model specifications.
@@ -1472,6 +1500,11 @@ class Segment:
             Optional function to update each CM's test set.
         outlier_idx : Optional[List[Any]], default None
             List of index labels corresponding to outliers to exclude.
+        model_kwargs : dict, optional
+            Additional keyword arguments forwarded to
+            :meth:`ModelSearch.run_search`, enabling customization of the
+            underlying ModelBase subclass (e.g., supplying weights for
+            weighted least squares).
         add_in : bool, default True
             If True, add the resulting top CMs to self.cms.
         override : bool, default False
@@ -1548,7 +1581,8 @@ class Segment:
             rank_weights=rank_weights,
             test_update_func=test_update_func,
             outlier_idx=outlier_idx,
-            exp_sign_map=exp_sign_map
+            exp_sign_map=exp_sign_map,
+            model_kwargs=model_kwargs
         )
 
         # 3) Collect the top_n results from the searcher
