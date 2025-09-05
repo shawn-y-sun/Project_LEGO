@@ -1,10 +1,11 @@
 # =============================================================================
 # module: mev.py
 # Purpose: Load and manage Macro Economic Variables (MEVs) from various sources
-# Dependencies: pandas, yaml, pathlib, typing
+# Key Types/Classes: MEVLoader
+# Key Functions: _process_quarterly_excel, _process_monthly_excel
+# Dependencies: pandas, yaml, pathlib, typing, warnings
 # =============================================================================
 
-import os
 from pathlib import Path
 import pandas as pd
 import yaml
@@ -252,35 +253,79 @@ class MEVLoader:
             self._validate_mev_codes()
         
     def _load_mev_map(self, path: Optional[Union[str, Path]] = None) -> Dict[str, Dict[str, Optional[str]]]:
-        """Load MEV mapping from Excel file."""
+        """Load MEV mapping from an Excel file.
+
+        The mapping file must contain ``mev_code``, ``type`` and ``description``
+        columns and may optionally include ``category`` and ``aggregation``. The
+        ``aggregation`` field describes how a quarterly MEV series is
+        constructed (e.g., ``average``, ``sum`` or ``end``) and is later used by
+        :class:`~Technic.data.DataManager` to choose the appropriate
+        interpolation strategy. Returned values include all available fields,
+        defaulting to ``None`` when optional entries are absent. When
+        ``aggregation`` is missing, :class:`~Technic.data.DataManager` assumes
+        the MEV represents a quarterly average during interpolation.
+
+        Parameters
+        ----------
+        path : str or Path, optional
+            Custom path to the mapping file. If omitted, the default
+            ``support/mev_type.xlsx`` is used.
+
+        Returns
+        -------
+        Dict[str, Dict[str, Optional[str]]]
+            Dictionary keyed by MEV code with values containing ``type``,
+            ``description``, ``category`` and ``aggregation`` information.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the mapping file does not exist.
+        ValueError
+            If required columns are missing from the Excel file.
+
+        Examples
+        --------
+        >>> loader = MEVLoader()
+        >>> mev_map = loader._load_mev_map("/path/to/mev_type.xlsx")
+        >>> mev_map["GDP"]["aggregation"]
+        'average'
+        """
         file_path = Path(path) if path else _DEFAULT_MEV_MAP_PATH
         if not file_path.exists():
             raise FileNotFoundError(f"MEV type mapping file not found: {file_path}")
-            
+
         df = pd.read_excel(file_path)
-        required_cols = {'mev_code', 'type', 'description'}
+        required_cols = {"mev_code", "type", "description"}
         if not required_cols.issubset(df.columns):
             raise ValueError(f"Expected columns {required_cols} in {file_path}")
-            
-        # Check if category column exists
-        has_category = 'category' in df.columns
-        
-        if has_category:
-            return {
-                code: {
-                    'type': type_, 
-                    'description': desc, 
-                    'category': cat if pd.notna(cat) else None
-                }
-                for code, type_, desc, cat in zip(
-                    df['mev_code'], df['type'], df['description'], df['category']
-                )
+
+        # Optional columns may be absent; fall back to ``None`` for missing
+        # entries so downstream consumers always see the same keys.
+        has_category = "category" in df.columns
+        has_aggregation = "aggregation" in df.columns
+
+        category_values = df["category"] if has_category else [None] * len(df)
+        aggregation_values = df["aggregation"] if has_aggregation else [None] * len(df)
+
+        mapping: Dict[str, Dict[str, Optional[str]]] = {}
+        for code, type_, desc, cat, agg in zip(
+            df["mev_code"],
+            df["type"],
+            df["description"],
+            category_values,
+            aggregation_values,
+        ):
+            # Normalize optional fields: pandas reads missing cells as NaN,
+            # which we convert to ``None`` for cleaner downstream handling.
+            mapping[code] = {
+                "type": type_,
+                "description": desc,
+                "category": cat if pd.notna(cat) else None,
+                "aggregation": agg if pd.notna(agg) else None,
             }
-        else:
-            return {
-                code: {'type': type_, 'description': desc, 'category': None}
-                for code, type_, desc in zip(df['mev_code'], df['type'], df['description'])
-            }
+
+        return mapping
         
     def _load_tsfm_map(self, path: Optional[Union[str, Path]] = None) -> Dict[str, List[str]]:
         """Load transform mapping from YAML file."""
