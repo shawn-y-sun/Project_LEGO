@@ -1,4 +1,4 @@
-from typing import List, Union, Tuple, Type, Any, Optional, Callable, Dict
+from typing import List, Union, Tuple, Type, Any, Optional, Callable, Dict, Set
 import itertools
 import time
 import datetime
@@ -663,7 +663,7 @@ class ModelSearch:
         print(f"Built {len(combos)} spec combinations.\n")
 
         # Summarize variables used across all combinations (excluding seasonal dummies)
-        var_counts: Dict[str, int] = defaultdict(int)
+        unique_vars: Set[str] = set()
 
         def _flatten(items):
             for it in items:
@@ -673,7 +673,6 @@ class ModelSearch:
                     yield it
 
         for combo in combos:
-            vars_in_combo = set()
             for spec in _flatten(combo):
                 if isinstance(spec, DumVar):
                     continue
@@ -684,36 +683,37 @@ class ModelSearch:
                     var_name = spec.var
                 elif isinstance(spec, Feature):
                     var_name = getattr(spec, 'var', None)
-                if var_name and str(var_name).upper() in {'Q', 'M'}:
-                    continue
-                if var_name:
-                    vars_in_combo.add(var_name)
-            for v in vars_in_combo:
-                var_counts[v] += 1
+                if var_name and str(var_name).upper() not in {'Q', 'M'}:
+                    unique_vars.add(var_name)
 
-        if var_counts:
+        if unique_vars:
             var_map = getattr(self.dm, 'var_map', {})
             dm_sign_map = getattr(self.dm, 'sign_map', {})
             sig_map = dm_sign_map if dm_sign_map else (exp_sign_map or {})
             rows = []
-            model_cols = getattr(self.dm, 'model_mev', pd.DataFrame()).columns
             internal_cols = getattr(self.dm, 'internal_data', pd.DataFrame()).columns
-            for var, freq in sorted(var_counts.items()):
+            mev_loader = getattr(self.dm, '_mev_loader', None)
+            mth_cols = set(getattr(getattr(mev_loader, 'model_mev_mth', pd.DataFrame()), 'columns', []))
+            qtr_cols = set(getattr(getattr(mev_loader, 'model_mev_qtr', pd.DataFrame()), 'columns', []))
+            for var in sorted(unique_vars):
                 info = var_map.get(var, {})
-                if var in model_cols:
-                    source = 'MEV'
-                elif var in internal_cols:
-                    source = 'Internal'
+                if var in internal_cols:
+                    frequency = 'Monthly' if self.dm.freq == 'M' else 'Quarterly'
                 else:
-                    source = info.get('source')
+                    base_var = var[:-2] if var.endswith(('_Q', '_M')) else var
+                    if base_var in mth_cols:
+                        frequency = 'Monthly'
+                    elif base_var in qtr_cols:
+                        frequency = 'Quarterly'
+                    else:
+                        frequency = 'Monthly' if self.dm.freq == 'M' else 'Quarterly'
                 rows.append({
                     'variable': var,
-                    'source': source,
                     'type': info.get('type'),
                     'category': info.get('category'),
                     'expected_sign': sig_map.get(var),
                     'aggregation': info.get('aggregation'),
-                    'frequency': freq
+                    'frequency': frequency
                 })
             df_vars = pd.DataFrame(rows)
             print("=== Variable Information (excluding seasonal dummies) ===")

@@ -41,7 +41,7 @@ class DataLoader(ABC):
     
     Parameters
     ----------
-    freq : str, default='M'
+    freq : str, optional
         Frequency code ('M' for monthly, 'Q' for quarterly)
     full_sample_start : Optional[str], optional
         Start date for full sample period (YYYY-MM-DD)
@@ -660,7 +660,7 @@ class TimeSeriesLoader(DataLoader):
         Start date for full sample period (YYYY-MM-DD)
     full_sample_end : str, optional
         End date for full sample period (YYYY-MM-DD)
-    freq : str, default='M'
+    freq : str, optional
         Frequency code ('M' for monthly, 'Q' for quarterly)
     scen_p0 : str, optional
         The month-end date that serves as the jumpoff date for scenario forecasting
@@ -706,7 +706,7 @@ class TimeSeriesLoader(DataLoader):
         in_sample_end: Optional[str] = None,
         full_sample_start: Optional[str] = None,
         full_sample_end: Optional[str] = None,
-        freq: str = 'M',
+        freq: Optional[str] = None,
         scen_p0: Optional[str] = None
     ):
         """
@@ -722,7 +722,7 @@ class TimeSeriesLoader(DataLoader):
             Start date for full sample period (YYYY-MM-DD)
         full_sample_end : str, optional
             End date for full sample period (YYYY-MM-DD)
-        freq : str, default='M'
+        freq : str, optional
             Frequency code ('M' for monthly, 'Q' for quarterly)
         scen_p0 : str, optional
             The month-end date that serves as the jumpoff date for scenario forecasting
@@ -1057,7 +1057,7 @@ class PanelLoader(DataLoader):
         Start date for full sample period
     full_sample_end : str, optional
         End date for full sample period
-    freq : str, default='M'
+    freq : str, optional
         Frequency code ('M' for monthly, 'Q' for quarterly)
     scen_p0 : str, optional
         The month-end date that serves as the jumpoff date for scenario forecasting
@@ -1118,7 +1118,7 @@ class PanelLoader(DataLoader):
         in_sample_end: Optional[str] = None,
         full_sample_start: Optional[str] = None,
         full_sample_end: Optional[str] = None,
-        freq: str = 'M',
+        freq: Optional[str] = None,
         scen_p0: Optional[str] = None
     ):
         """
@@ -1144,7 +1144,7 @@ class PanelLoader(DataLoader):
             Start date for full sample period (YYYY-MM-DD)
         full_sample_end : str, optional
             End date for full sample period (YYYY-MM-DD)
-        freq : str, default='M'
+        freq : str, optional
             Frequency code ('M' for monthly, 'Q' for quarterly)
         scen_p0 : str, optional
             The month-end date that serves as the jumpoff date for scenario forecasting
@@ -1443,7 +1443,7 @@ class PPNRInternalLoader(TimeSeriesLoader):
         Start date for full sample period (YYYY-MM-DD)
     full_sample_end : str, optional
         End date for full sample period (YYYY-MM-DD)
-    freq : str, default='M'
+    freq : str, optional
         Frequency code ('M' for monthly, 'Q' for quarterly)
     scen_p0 : str, optional
         The month-end date that serves as the jumpoff date for scenario forecasting
@@ -1495,7 +1495,7 @@ class PPNRInternalLoader(TimeSeriesLoader):
         in_sample_end: Optional[str] = None,
         full_sample_start: Optional[str] = None,
         full_sample_end: Optional[str] = None,
-        freq: str = 'M',
+        freq: Optional[str] = None,
         scen_p0: Optional[str] = None
     ):
         # Call parent's __init__ with all parameters
