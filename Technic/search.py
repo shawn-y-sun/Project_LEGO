@@ -662,6 +662,64 @@ class ModelSearch:
         combos = self.build_spec_combos(forced, desired_pool, max_var_num, max_lag, max_periods, category_limit, exp_sign_map)
         print(f"Built {len(combos)} spec combinations.\n")
 
+        # Summarize variables used across all combinations (excluding seasonal dummies)
+        var_counts: Dict[str, int] = defaultdict(int)
+
+        def _flatten(items):
+            for it in items:
+                if isinstance(it, (list, tuple, set)):
+                    yield from _flatten(it)
+                else:
+                    yield it
+
+        for combo in combos:
+            vars_in_combo = set()
+            for spec in _flatten(combo):
+                if isinstance(spec, DumVar):
+                    continue
+                var_name = None
+                if isinstance(spec, str):
+                    var_name = spec
+                elif isinstance(spec, TSFM):
+                    var_name = spec.var
+                elif isinstance(spec, Feature):
+                    var_name = getattr(spec, 'var', None)
+                if var_name and str(var_name).upper() in {'Q', 'M'}:
+                    continue
+                if var_name:
+                    vars_in_combo.add(var_name)
+            for v in vars_in_combo:
+                var_counts[v] += 1
+
+        if var_counts:
+            var_map = getattr(self.dm, 'var_map', {})
+            dm_sign_map = getattr(self.dm, 'sign_map', {})
+            sig_map = dm_sign_map if dm_sign_map else (exp_sign_map or {})
+            rows = []
+            model_cols = getattr(self.dm, 'model_mev', pd.DataFrame()).columns
+            internal_cols = getattr(self.dm, 'internal_data', pd.DataFrame()).columns
+            for var, freq in sorted(var_counts.items()):
+                info = var_map.get(var, {})
+                if var in model_cols:
+                    source = 'MEV'
+                elif var in internal_cols:
+                    source = 'Internal'
+                else:
+                    source = info.get('source')
+                rows.append({
+                    'variable': var,
+                    'source': source,
+                    'type': info.get('type'),
+                    'category': info.get('category'),
+                    'expected_sign': sig_map.get(var),
+                    'aggregation': info.get('aggregation'),
+                    'frequency': freq
+                })
+            df_vars = pd.DataFrame(rows)
+            print("=== Variable Information (excluding seasonal dummies) ===")
+            print(df_vars.to_string(index=False))
+            print("\n⚠️  Review the variable information above and update 'mev_type.xlsx' if corrections are needed.\n")
+
         # 3) Filter specs
         passed, failed, errors = self.filter_specs(
             sample=sample,
