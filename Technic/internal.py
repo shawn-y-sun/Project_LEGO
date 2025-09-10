@@ -41,8 +41,9 @@ class DataLoader(ABC):
     
     Parameters
     ----------
-    freq : str or None
-        Frequency code ('M' for monthly, 'Q' for quarterly). Pass None to infer from data.
+    freq : str or None, optional
+        Frequency code ('M' for monthly, 'Q' for quarterly). Pass ``None`` to infer the
+        frequency from the data.
     full_sample_start : Optional[str], optional
         Start date for full sample period (YYYY-MM-DD)
     full_sample_end : Optional[str], optional
@@ -62,7 +63,7 @@ class DataLoader(ABC):
     
     def __init__(
         self,
-        freq: Optional[str],
+        freq: Optional[str] = None,
         full_sample_start: Optional[str] = None,
         full_sample_end: Optional[str] = None,
         scen_p0: Optional[str] = None
@@ -709,7 +710,7 @@ class TimeSeriesLoader(DataLoader):
         full_sample_start: Optional[str] = None,
         full_sample_end: Optional[str] = None,
         *,
-        freq: Optional[str],
+        freq: Optional[str] = None,
         scen_p0: Optional[str] = None
     ):
         """
@@ -725,8 +726,9 @@ class TimeSeriesLoader(DataLoader):
             Start date for full sample period (YYYY-MM-DD)
         full_sample_end : str, optional
             End date for full sample period (YYYY-MM-DD)
-        freq : str or None
-            Frequency code ('M' for monthly, 'Q' for quarterly). Pass None to infer from data.
+        freq : str or None, optional
+            Frequency code ('M' for monthly, 'Q' for quarterly). Pass ``None`` to infer
+            from the data.
         scen_p0 : str, optional
             The month-end date that serves as the jumpoff date for scenario forecasting
         """
@@ -1126,7 +1128,7 @@ class PanelLoader(DataLoader):
         full_sample_start: Optional[str] = None,
         full_sample_end: Optional[str] = None,
         *,
-        freq: Optional[str],
+        freq: Optional[str] = None,
         scen_p0: Optional[str] = None
     ):
         """
@@ -1152,8 +1154,9 @@ class PanelLoader(DataLoader):
             Start date for full sample period (YYYY-MM-DD)
         full_sample_end : str, optional
             End date for full sample period (YYYY-MM-DD)
-        freq : str or None
-            Frequency code ('M' for monthly, 'Q' for quarterly). Pass None to infer from data.
+        freq : str or None, optional
+            Frequency code ('M' for monthly, 'Q' for quarterly). Pass ``None`` to infer
+            from the data.
         scen_p0 : str, optional
             The month-end date that serves as the jumpoff date for scenario forecasting
         """
@@ -1506,7 +1509,7 @@ class PPNRInternalLoader(TimeSeriesLoader):
         full_sample_start: Optional[str] = None,
         full_sample_end: Optional[str] = None,
         *,
-        freq: Optional[str],
+        freq: Optional[str] = None,
         scen_p0: Optional[str] = None
     ):
         # Call parent's __init__ with all parameters

@@ -1479,19 +1479,27 @@ class DataManager:
             col if col not in mth_cols else f"{col}_Q" for col in qtr_cols
         }
 
+        # Load aggregation information from mev_type.xlsx
+        support_path = Path(__file__).resolve().parent / "support" / "mev_type.xlsx"
+        agg_map = (
+            pd.read_excel(support_path)
+            .set_index("mev_code")["aggregation"]
+            .to_dict()
+        )
+
         results: List[Dict[str, Any]] = []
         for name in var_names:
-            # Only consider variables that both exist in model_mev and were
-            # sourced from quarterly data (i.e., interpolated)
             if name in interpolated_cols and name in self.model_mev.columns:
-                agg = self.var_map.get(name, {}).get("aggregation")
+                base = name[:-2] if name.endswith(("_Q", "_M")) else name
+                agg = agg_map.get(base)
                 results.append({"variable": name, "aggregation": agg})
 
         if results:
-            print(
+            warnings.warn(
                 "Please review the aggregation method for interpolated variables below. "
                 "Revise the aggregation column in the mev_type.xlsx under folder "
-                "Technic-support if necessary."
+                "Technic-support if necessary.",
+                UserWarning,
             )
             return pd.DataFrame(results)
         return None
