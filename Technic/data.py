@@ -1477,10 +1477,8 @@ class DataManager:
         interpolated_cols = {
             col if col not in mth_cols else f"{col}_Q" for col in qtr_cols
         }
-
         # Retrieve aggregation information from the existing variable map
         var_map = self.var_map
-
         results: List[Dict[str, Any]] = []
         for name in var_names:
             if name in interpolated_cols and name in self.model_mev.columns:
