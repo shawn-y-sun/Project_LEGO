@@ -5,7 +5,6 @@
 # Key Functions: build_features, _interpolate_df
 # Dependencies: pandas, numpy, scipy, typing, DataLoader, MEVLoader, TSFM, CondVar, DumVar
 # =============================================================================
-from pathlib import Path
 import pandas as pd
 import warnings
 from typing import Any, Dict, List, Optional, Callable, Union, Tuple
@@ -1478,28 +1477,19 @@ class DataManager:
         interpolated_cols = {
             col if col not in mth_cols else f"{col}_Q" for col in qtr_cols
         }
-
-        # Load aggregation information from mev_type.xlsx
-        support_path = Path(__file__).resolve().parent / "support" / "mev_type.xlsx"
-        agg_map = (
-            pd.read_excel(support_path)
-            .set_index("mev_code")["aggregation"]
-            .to_dict()
-        )
-
+        # Retrieve aggregation information from the existing variable map
+        var_map = self.var_map
         results: List[Dict[str, Any]] = []
         for name in var_names:
             if name in interpolated_cols and name in self.model_mev.columns:
                 base = name[:-2] if name.endswith(("_Q", "_M")) else name
-                agg = agg_map.get(base)
+                agg = var_map.get(base, {}).get("aggregation")
                 results.append({"variable": name, "aggregation": agg})
 
         if results:
-            warnings.warn(
+            print("⚠️"
                 "Please review the aggregation method for interpolated variables below. "
-                "Revise the aggregation column in the mev_type.xlsx under folder "
-                "Technic-support if necessary.",
-                UserWarning,
+                "Revise the aggregation column in the mev_type.xlsx under folder Technic/support if necessary."
             )
             return pd.DataFrame(results)
         return None
