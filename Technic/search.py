@@ -662,6 +662,21 @@ class ModelSearch:
         combos = self.build_spec_combos(forced, desired_pool, max_var_num, max_lag, max_periods, category_limit, exp_sign_map)
         print(f"Built {len(combos)} spec combinations.\n")
 
+        # Warn about interpolated MEV variables within the candidate pool
+        vars_to_check: List[Union[str, TSFM]] = []
+
+        def _collect_vars(item: Any) -> None:
+            if isinstance(item, (str, TSFM)):
+                vars_to_check.append(item)
+            elif isinstance(item, (list, tuple, set)):
+                for sub in item:
+                    _collect_vars(sub)
+
+        for item in forced + desired_pool:
+            _collect_vars(item)
+
+        self.dm.interpolated_vars(vars_to_check)
+
         # 3) Filter specs
         passed, failed, errors = self.filter_specs(
             sample=sample,
