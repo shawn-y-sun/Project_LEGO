@@ -1489,11 +1489,9 @@ class DataManager:
                 results.append({"variable": name, "aggregation": agg})
 
         if results:
-            warnings.warn(
+            print("⚠️"
                 "Please review the aggregation method for interpolated variables below. "
-                "Revise the aggregation column in the mev_type.xlsx under folder "
-                "Technic-support if necessary.",
-                UserWarning,
+                "Revise the aggregation column in the mev_type.xlsx under folder Technic/support if necessary."
             )
             return pd.DataFrame(results)
         return None
