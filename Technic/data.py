@@ -1458,6 +1458,7 @@ class DataManager:
         -----
         The method prints a warning and displays a table of interpolated
         variables before returning the DataFrame.
+
         """
 
         # Accept both raw variable names and TSFM objects
@@ -1493,6 +1494,7 @@ class DataManager:
             # Only consider variables that both exist in model_mev and were
             # sourced from quarterly data (i.e., interpolated)
             if name in interpolated_cols and name in self.model_mev.columns:
+
                 agg = agg_map.get(name)
                 if agg is None:
                     agg = agg_map.get(name.rstrip("_Q"))

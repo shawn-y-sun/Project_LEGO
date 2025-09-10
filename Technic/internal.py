@@ -63,7 +63,7 @@ class DataLoader(ABC):
     
     def __init__(
         self,
-        freq: Optional[str] = None,
+        freq: Optional[str],
         full_sample_start: Optional[str] = None,
         full_sample_end: Optional[str] = None,
         scen_p0: Optional[str] = None
@@ -665,6 +665,7 @@ class TimeSeriesLoader(DataLoader):
     freq : str, optional
         Frequency code ('M' for monthly, 'Q' for quarterly). If ``None``, the
         frequency will be inferred from the data.
+
     scen_p0 : str, optional
         The month-end date that serves as the jumpoff date for scenario forecasting
         
