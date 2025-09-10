@@ -663,18 +663,16 @@ class ModelSearch:
         print(f"Built {len(combos)} spec combinations.\n")
 
         # Warn about interpolated MEV variables within the candidate pool
-        vars_to_check: List[Union[str, TSFM]] = []
+        def _flatten(items: Any) -> List[Union[str, TSFM]]:
+            flat: List[Union[str, TSFM]] = []
+            for it in items:
+                if isinstance(it, (str, TSFM)):
+                    flat.append(it)
+                elif isinstance(it, (list, tuple, set)):
+                    flat.extend(_flatten(it))
+            return flat
 
-        def _collect_vars(item: Any) -> None:
-            if isinstance(item, (str, TSFM)):
-                vars_to_check.append(item)
-            elif isinstance(item, (list, tuple, set)):
-                for sub in item:
-                    _collect_vars(sub)
-
-        for item in forced + desired_pool:
-            _collect_vars(item)
-
+        vars_to_check = _flatten(forced + desired_pool)
         interp_df = self.dm.interpolated_vars(vars_to_check)
         if interp_df is not None:
             print(interp_df.to_string(index=False))

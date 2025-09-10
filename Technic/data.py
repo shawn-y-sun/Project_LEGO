@@ -5,7 +5,6 @@
 # Key Functions: build_features, _interpolate_df
 # Dependencies: pandas, numpy, scipy, typing, DataLoader, MEVLoader, TSFM, CondVar, DumVar
 # =============================================================================
-from pathlib import Path
 import pandas as pd
 import warnings
 from typing import Any, Dict, List, Optional, Callable, Union, Tuple
@@ -1479,19 +1478,22 @@ class DataManager:
             col if col not in mth_cols else f"{col}_Q" for col in qtr_cols
         }
 
+        # Retrieve aggregation information from the existing variable map
+        var_map = self.var_map
+
         results: List[Dict[str, Any]] = []
         for name in var_names:
-            # Only consider variables that both exist in model_mev and were
-            # sourced from quarterly data (i.e., interpolated)
             if name in interpolated_cols and name in self.model_mev.columns:
-                agg = self.var_map.get(name, {}).get("aggregation")
+                base = name[:-2] if name.endswith(("_Q", "_M")) else name
+                agg = var_map.get(base, {}).get("aggregation")
                 results.append({"variable": name, "aggregation": agg})
 
         if results:
-            print(
+            warnings.warn(
                 "Please review the aggregation method for interpolated variables below. "
                 "Revise the aggregation column in the mev_type.xlsx under folder "
-                "Technic-support if necessary."
+                "Technic-support if necessary.",
+                UserWarning,
             )
             return pd.DataFrame(results)
         return None
