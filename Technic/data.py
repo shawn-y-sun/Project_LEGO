@@ -1435,8 +1435,66 @@ class DataManager:
             code: info for code, info in full_var_map.items()
             if code in all_available_codes
         }
-        
+
         return filtered_map
+
+    def interpolated_vars(self, variables: List[Union[str, TSFM]]) -> Optional[pd.DataFrame]:
+        """Identify interpolated variables within ``model_mev``.
+
+        Parameters
+        ----------
+        variables : List[Union[str, TSFM]]
+            Variable names or :class:`TSFM` objects to inspect.
+
+        Returns
+        -------
+        Optional[pandas.DataFrame]
+            DataFrame listing interpolated variable names and their aggregation
+            methods. Returns ``None`` if none of the provided variables are
+            interpolated or if the internal data frequency is quarterly.
+
+        Notes
+        -----
+        The method prints a warning reminding users to verify aggregation
+        methods for interpolated series before returning the DataFrame.
+        """
+
+        # Accept both raw variable names and TSFM objects
+        var_names: List[str] = []
+        for v in variables:
+            if isinstance(v, TSFM):
+                var_names.append(v.var)
+            elif isinstance(v, str):
+                var_names.append(v)
+            else:
+                raise TypeError("Variables must be provided as str or TSFM objects.")
+
+        # Interpolation only occurs for monthly frequency
+        if self.freq != "M":
+            return None
+
+        qtr_cols = set(self._mev_loader.model_mev_qtr.columns)
+        mth_cols = set(self._mev_loader.model_mev_mth.columns)
+        interpolated_cols = {
+            col if col not in mth_cols else f"{col}_Q" for col in qtr_cols
+        }
+
+        results: List[Dict[str, Any]] = []
+        for name in var_names:
+            # Only consider variables that both exist in model_mev and were
+            # sourced from quarterly data (i.e., interpolated)
+            if name in interpolated_cols and name in self.model_mev.columns:
+                agg = self.var_map.get(name, {}).get("aggregation")
+                results.append({"variable": name, "aggregation": agg})
+
+        if results:
+            print(
+                "Please review the aggregation method for interpolated variables below. "
+                "Revise the aggregation column in the mev_type.xlsx under folder "
+                "Technic-support if necessary."
+            )
+            return pd.DataFrame(results)
+        return None
 
     @property
     def in_sample_end(self) -> Optional[pd.Timestamp]:
