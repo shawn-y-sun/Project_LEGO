@@ -803,6 +803,433 @@ class SensitivityTest:
         plt.tight_layout()
         plt.show()
 
+    @property
+    def results_df(self) -> Optional[pd.DataFrame]:
+        """Return sensitivity testing results in long format.
+
+        This assembles both parameter and input sensitivity testing results into a
+        standardized DataFrame suitable for export. For monthly models, results are
+        provided at both monthly and aggregated quarterly frequencies. For quarterly
+        models, only quarterly results are returned.
+
+        Returns
+        -------
+        pd.DataFrame or None
+            DataFrame with columns ['test', 'scenario_name', 'severity',
+            'variable/parameter', 'shock', 'date', 'frequency', 'value_type', 'value'].
+            Returns None if no sensitivity results are available.
+        """
+        sens_test = self
+
+        # Determine model frequency
+        model_freq = getattr(self.dm, 'freq', 'M')
+        is_monthly = model_freq == 'M'
+
+        data_list = []
+
+        # Baseline scen_p0 data if available
+        if hasattr(self.scen_manager, 'scen_p0') and self.scen_manager.scen_p0 is not None:
+            scen_p0_data = self.scen_manager.scen_p0
+
+            param_shock_df = sens_test.param_shock_df
+            for scen_set in param_shock_df.keys():
+                for scen_name in param_shock_df[scen_set].keys():
+                    df_data = {
+                        'test': 'Parameter Sensitivity Test',
+                        'scenario_name': scen_set,
+                        'severity': scen_name,
+                        'variable/parameter': 'baseline_p0',
+                        'shock': 'baseline',
+                        'date': scen_p0_data.index,
+                        'value_type': 'Target',
+                        'value': scen_p0_data.values,
+                        'frequency': 'monthly' if is_monthly else 'quarterly'
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
+            input_shock_df = sens_test.input_shock_df
+            for scen_set in input_shock_df.keys():
+                for scen_name in input_shock_df[scen_set].keys():
+                    df_data = {
+                        'test': 'Input Sensitivity Test',
+                        'scenario_name': scen_set,
+                        'severity': scen_name,
+                        'variable/parameter': 'baseline_p0',
+                        'shock': 'baseline',
+                        'date': scen_p0_data.index,
+                        'value_type': 'Target',
+                        'value': scen_p0_data.values,
+                        'frequency': 'monthly' if is_monthly else 'quarterly'
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
+            if hasattr(self.model, 'base_predictor') and self.model.base_predictor is not None:
+                base_p0_values = self.model.base_predictor.predict_base(scen_p0_data, scen_p0_data)
+                for scen_set in param_shock_df.keys():
+                    for scen_name in param_shock_df[scen_set].keys():
+                        df_data = {
+                            'test': 'Parameter Sensitivity Test',
+                            'scenario_name': scen_set,
+                            'severity': scen_name,
+                            'variable/parameter': 'baseline_p0',
+                            'shock': 'baseline',
+                            'date': base_p0_values.index,
+                            'value_type': 'Base',
+                            'value': base_p0_values.values,
+                            'frequency': 'monthly' if is_monthly else 'quarterly'
+                        }
+                        data_list.append(pd.DataFrame(df_data))
+
+                for scen_set in input_shock_df.keys():
+                    for scen_name in input_shock_df[scen_set].keys():
+                        df_data = {
+                            'test': 'Input Sensitivity Test',
+                            'scenario_name': scen_set,
+                            'severity': scen_name,
+                            'variable/parameter': 'baseline_p0',
+                            'shock': 'baseline',
+                            'date': base_p0_values.index,
+                            'value_type': 'Base',
+                            'value': base_p0_values.values,
+                            'frequency': 'monthly' if is_monthly else 'quarterly'
+                        }
+                        data_list.append(pd.DataFrame(df_data))
+
+        # Parameter sensitivity results (original frequency)
+        param_shock_df = sens_test.param_shock_df
+        for scen_set, scen_dict in param_shock_df.items():
+            for scen_name, df in scen_dict.items():
+                baseline_col = f"{scen_set}_{scen_name}"
+                freq_label = 'monthly' if is_monthly else 'quarterly'
+
+                if baseline_col in df.columns:
+                    df_data = {
+                        'test': 'Parameter Sensitivity Test',
+                        'scenario_name': scen_set,
+                        'severity': scen_name,
+                        'variable/parameter': 'no_shock',
+                        'shock': 'baseline',
+                        'date': df.index,
+                        'value_type': 'Target',
+                        'value': df[baseline_col].values,
+                        'frequency': freq_label
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
+                for col in df.columns:
+                    if col == baseline_col:
+                        continue
+                    param_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
+                    shock = ('+' if '+' in col else '-') + shock
+                    df_data = {
+                        'test': 'Parameter Sensitivity Test',
+                        'scenario_name': scen_set,
+                        'severity': scen_name,
+                        'variable/parameter': param_name,
+                        'shock': shock,
+                        'date': df.index,
+                        'value_type': 'Target',
+                        'value': df[col].values,
+                        'frequency': freq_label
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
+        # Parameter sensitivity quarterly aggregation for monthly models
+        if is_monthly and hasattr(sens_test, 'param_shock_qtr_df'):
+            param_shock_qtr_df = sens_test.param_shock_qtr_df
+            for scen_set, scen_dict in param_shock_qtr_df.items():
+                for scen_name, qtr_df in scen_dict.items():
+                    if qtr_df is None or qtr_df.empty:
+                        continue
+                    baseline_col = f"{scen_set}_{scen_name}"
+                    if baseline_col in qtr_df.columns:
+                        qtr_forecast = qtr_df[baseline_col].dropna()
+                        if not qtr_forecast.empty:
+                            df_data = {
+                                'test': 'Parameter Sensitivity Test',
+                                'scenario_name': scen_set,
+                                'severity': scen_name,
+                                'variable/parameter': 'no_shock',
+                                'shock': 'baseline',
+                                'date': qtr_forecast.index,
+                                'value_type': 'Target',
+                                'value': qtr_forecast.values,
+                                'frequency': 'quarterly'
+                            }
+                            data_list.append(pd.DataFrame(df_data))
+                    for col in qtr_df.columns:
+                        if col == baseline_col:
+                            continue
+                        param_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
+                        shock = ('+' if '+' in col else '-') + shock
+                        qtr_forecast = qtr_df[col].dropna()
+                        if not qtr_forecast.empty:
+                            df_data = {
+                                'test': 'Parameter Sensitivity Test',
+                                'scenario_name': scen_set,
+                                'severity': scen_name,
+                                'variable/parameter': param_name,
+                                'shock': shock,
+                                'date': qtr_forecast.index,
+                                'value_type': 'Target',
+                                'value': qtr_forecast.values,
+                                'frequency': 'quarterly'
+                            }
+                            data_list.append(pd.DataFrame(df_data))
+
+        # Input sensitivity results (original frequency)
+        input_shock_df = sens_test.input_shock_df
+        for scen_set, scen_dict in input_shock_df.items():
+            for scen_name, df in scen_dict.items():
+                baseline_col = f"{scen_set}_{scen_name}"
+                freq_label = 'monthly' if is_monthly else 'quarterly'
+
+                if baseline_col in df.columns:
+                    df_data = {
+                        'test': 'Input Sensitivity Test',
+                        'scenario_name': scen_set,
+                        'severity': scen_name,
+                        'variable/parameter': 'no_shock',
+                        'shock': 'baseline',
+                        'date': df.index,
+                        'value_type': 'Target',
+                        'value': df[baseline_col].values,
+                        'frequency': freq_label
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
+                for col in df.columns:
+                    if col == baseline_col:
+                        continue
+                    var_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
+                    shock = ('+' if '+' in col else '-') + shock
+                    df_data = {
+                        'test': 'Input Sensitivity Test',
+                        'scenario_name': scen_set,
+                        'severity': scen_name,
+                        'variable/parameter': var_name,
+                        'shock': shock,
+                        'date': df.index,
+                        'value_type': 'Target',
+                        'value': df[col].values,
+                        'frequency': freq_label
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
+        # Input sensitivity quarterly aggregation for monthly models
+        if is_monthly and hasattr(sens_test, 'input_shock_qtr_df'):
+            input_shock_qtr_df = sens_test.input_shock_qtr_df
+            for scen_set, scen_dict in input_shock_qtr_df.items():
+                for scen_name, qtr_df in scen_dict.items():
+                    if qtr_df is None or qtr_df.empty:
+                        continue
+                    baseline_col = f"{scen_set}_{scen_name}"
+                    if baseline_col in qtr_df.columns:
+                        qtr_forecast = qtr_df[baseline_col].dropna()
+                        if not qtr_forecast.empty:
+                            df_data = {
+                                'test': 'Input Sensitivity Test',
+                                'scenario_name': scen_set,
+                                'severity': scen_name,
+                                'variable/parameter': 'no_shock',
+                                'shock': 'baseline',
+                                'date': qtr_forecast.index,
+                                'value_type': 'Target',
+                                'value': qtr_forecast.values,
+                                'frequency': 'quarterly'
+                            }
+                            data_list.append(pd.DataFrame(df_data))
+                    for col in qtr_df.columns:
+                        if col == baseline_col:
+                            continue
+                        var_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
+                        shock = ('+' if '+' in col else '-') + shock
+                        qtr_forecast = qtr_df[col].dropna()
+                        if not qtr_forecast.empty:
+                            df_data = {
+                                'test': 'Input Sensitivity Test',
+                                'scenario_name': scen_set,
+                                'severity': scen_name,
+                                'variable/parameter': var_name,
+                                'shock': shock,
+                                'date': qtr_forecast.index,
+                                'value_type': 'Target',
+                                'value': qtr_forecast.values,
+                                'frequency': 'quarterly'
+                            }
+                            data_list.append(pd.DataFrame(df_data))
+
+        # Base variable conversions if base predictor exists
+        if hasattr(self.model, 'base_predictor') and self.model.base_predictor is not None:
+            # Parameter sensitivity base conversions
+            for scen_set, scen_dict in param_shock_df.items():
+                for scen_name, df in scen_dict.items():
+                    baseline_col = f"{scen_set}_{scen_name}"
+                    if baseline_col in df.columns:
+                        base_values = self.model.base_predictor.predict_base(df[baseline_col], self.dm.scen_p0)
+                        df_data = {
+                            'test': 'Parameter Sensitivity Test',
+                            'scenario_name': scen_set,
+                            'severity': scen_name,
+                            'variable/parameter': 'no_shock',
+                            'shock': 'baseline',
+                            'date': base_values.index,
+                            'value_type': 'Base',
+                            'value': base_values.values,
+                            'frequency': 'monthly' if is_monthly else 'quarterly'
+                        }
+                        data_list.append(pd.DataFrame(df_data))
+                    for col in df.columns:
+                        if col == baseline_col:
+                            continue
+                        param_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
+                        shock = ('+' if '+' in col else '-') + shock
+                        base_values = self.model.base_predictor.predict_base(df[col], self.dm.scen_p0)
+                        df_data = {
+                            'test': 'Parameter Sensitivity Test',
+                            'scenario_name': scen_set,
+                            'severity': scen_name,
+                            'variable/parameter': param_name,
+                            'shock': shock,
+                            'date': base_values.index,
+                            'value_type': 'Base',
+                            'value': base_values.values,
+                            'frequency': 'monthly' if is_monthly else 'quarterly'
+                        }
+                        data_list.append(pd.DataFrame(df_data))
+
+            if is_monthly and hasattr(sens_test, 'param_shock_qtr_df'):
+                param_shock_qtr_df = sens_test.param_shock_qtr_df
+                for scen_set, scen_dict in param_shock_qtr_df.items():
+                    for scen_name, qtr_df in scen_dict.items():
+                        if qtr_df is None or qtr_df.empty:
+                            continue
+                        baseline_col = f"{scen_set}_{scen_name}"
+                        if baseline_col in qtr_df.columns:
+                            qtr_forecast = qtr_df[baseline_col].dropna()
+                            if not qtr_forecast.empty:
+                                base_values = self.model.base_predictor.predict_base(qtr_forecast, self.dm.scen_p0)
+                                df_data = {
+                                    'test': 'Parameter Sensitivity Test',
+                                    'scenario_name': scen_set,
+                                    'severity': scen_name,
+                                    'variable/parameter': 'no_shock',
+                                    'shock': 'baseline',
+                                    'date': base_values.index,
+                                    'value_type': 'Base',
+                                    'value': base_values.values,
+                                    'frequency': 'quarterly'
+                                }
+                                data_list.append(pd.DataFrame(df_data))
+                        for col in qtr_df.columns:
+                            if col == baseline_col:
+                                continue
+                            param_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
+                            shock = ('+' if '+' in col else '-') + shock
+                            qtr_forecast = qtr_df[col].dropna()
+                            if not qtr_forecast.empty:
+                                base_values = self.model.base_predictor.predict_base(qtr_forecast, self.dm.scen_p0)
+                                df_data = {
+                                    'test': 'Parameter Sensitivity Test',
+                                    'scenario_name': scen_set,
+                                    'severity': scen_name,
+                                    'variable/parameter': param_name,
+                                    'shock': shock,
+                                    'date': base_values.index,
+                                    'value_type': 'Base',
+                                    'value': base_values.values,
+                                    'frequency': 'quarterly'
+                                }
+                                data_list.append(pd.DataFrame(df_data))
+
+            # Input sensitivity base conversions
+            for scen_set, scen_dict in input_shock_df.items():
+                for scen_name, df in scen_dict.items():
+                    baseline_col = f"{scen_set}_{scen_name}"
+                    if baseline_col in df.columns:
+                        base_values = self.model.base_predictor.predict_base(df[baseline_col], self.dm.scen_p0)
+                        df_data = {
+                            'test': 'Input Sensitivity Test',
+                            'scenario_name': scen_set,
+                            'severity': scen_name,
+                            'variable/parameter': 'no_shock',
+                            'shock': 'baseline',
+                            'date': base_values.index,
+                            'value_type': 'Base',
+                            'value': base_values.values,
+                            'frequency': 'monthly' if is_monthly else 'quarterly'
+                        }
+                        data_list.append(pd.DataFrame(df_data))
+                    for col in df.columns:
+                        if col == baseline_col:
+                            continue
+                        var_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
+                        shock = ('+' if '+' in col else '-') + shock
+                        base_values = self.model.base_predictor.predict_base(df[col], self.dm.scen_p0)
+                        df_data = {
+                            'test': 'Input Sensitivity Test',
+                            'scenario_name': scen_set,
+                            'severity': scen_name,
+                            'variable/parameter': var_name,
+                            'shock': shock,
+                            'date': base_values.index,
+                            'value_type': 'Base',
+                            'value': base_values.values,
+                            'frequency': 'monthly' if is_monthly else 'quarterly'
+                        }
+                        data_list.append(pd.DataFrame(df_data))
+
+            if is_monthly and hasattr(sens_test, 'input_shock_qtr_df'):
+                input_shock_qtr_df = sens_test.input_shock_qtr_df
+                for scen_set, scen_dict in input_shock_qtr_df.items():
+                    for scen_name, qtr_df in scen_dict.items():
+                        if qtr_df is None or qtr_df.empty:
+                            continue
+                        baseline_col = f"{scen_set}_{scen_name}"
+                        if baseline_col in qtr_df.columns:
+                            qtr_forecast = qtr_df[baseline_col].dropna()
+                            if not qtr_forecast.empty:
+                                base_values = self.model.base_predictor.predict_base(qtr_forecast, self.dm.scen_p0)
+                                df_data = {
+                                    'test': 'Input Sensitivity Test',
+                                    'scenario_name': scen_set,
+                                    'severity': scen_name,
+                                    'variable/parameter': 'no_shock',
+                                    'shock': 'baseline',
+                                    'date': base_values.index,
+                                    'value_type': 'Base',
+                                    'value': base_values.values,
+                                    'frequency': 'quarterly'
+                                }
+                                data_list.append(pd.DataFrame(df_data))
+                        for col in qtr_df.columns:
+                            if col == baseline_col:
+                                continue
+                            var_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
+                            shock = ('+' if '+' in col else '-') + shock
+                            qtr_forecast = qtr_df[col].dropna()
+                            if not qtr_forecast.empty:
+                                base_values = self.model.base_predictor.predict_base(qtr_forecast, self.dm.scen_p0)
+                                df_data = {
+                                    'test': 'Input Sensitivity Test',
+                                    'scenario_name': scen_set,
+                                    'severity': scen_name,
+                                    'variable/parameter': var_name,
+                                    'shock': shock,
+                                    'date': base_values.index,
+                                    'value_type': 'Base',
+                                    'value': base_values.values,
+                                    'frequency': 'quarterly'
+                                }
+                                data_list.append(pd.DataFrame(df_data))
+
+        if not data_list:
+            return None
+
+        result = pd.concat(data_list, ignore_index=True)
+        return result[['test', 'scenario_name', 'severity', 'variable/parameter',
+                       'shock', 'date', 'frequency', 'value_type', 'value']]
+
     def plot_param_shock(self, scenario_set: str, scenario_name: str) -> None:
         """
         Plot parameter shock results for a specific scenario.
