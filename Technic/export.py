@@ -1083,9 +1083,28 @@ class OLSModelAdapter(ExportableModel):
         if model_freq is not None:
             model_freq = getattr(model_freq, 'freq', 'M')
         else:
-            model_freq = 'M'  # Default to monthly
-        
-        frequency_str = 'monthly' if model_freq == 'M' else 'quarterly'
+            model_freq = 'M'
+        is_monthly = model_freq == 'M'
+
+        qtr_method = getattr(self.model.scen_manager, 'qtr_method', 'mean')
+
+        def aggregate_to_quarterly(series: pd.Series) -> pd.Series:
+            series_copy = series.copy()
+            series_copy.index = pd.to_datetime(series_copy.index)
+            quarterly_grouped = series_copy.groupby(pd.Grouper(freq='Q'))
+            if qtr_method == 'mean':
+                result = quarterly_grouped.mean()
+            elif qtr_method == 'sum':
+                try:
+                    result = quarterly_grouped.sum(min_count=1)
+                except TypeError:
+                    result = quarterly_grouped.apply(lambda s: s.sum() if s.notna().any() else np.nan)
+            elif qtr_method == 'end':
+                result = quarterly_grouped.last()
+            else:
+                result = quarterly_grouped.mean()
+            result.index = result.index.to_period('Q').to_timestamp(how='end').normalize()
+            return result
         
         # Get target and base variable names for filtering
         target_var = getattr(self.model, 'target', None)
@@ -1093,62 +1112,84 @@ class OLSModelAdapter(ExportableModel):
         
         # === TARGET VARIABLE FORECASTS ===
         
-        # Add scen_p0 data to scenario results if available
+        # Add scen_p0 data if available
         if hasattr(self.model.scen_manager, 'scen_p0') and self.model.scen_manager.scen_p0 is not None:
             scen_p0_data = self.model.scen_manager.scen_p0
+            scen_p0_freq = 'monthly' if is_monthly else 'quarterly'
             for scen_set in scen_results.keys():
-                # Create scen_p0 entry for target variable
                 df_data = {
                     'category': CATEGORY_TARGET_FORECAST,
                     'model': model_id,
                     'scenario_name': scen_set,
                     'severity': 'p0',
                     'date': scen_p0_data.index,
-                    'frequency': 'monthly',
+                    'frequency': scen_p0_freq,
                     'value_type': VALUE_TYPE_TARGET_FORECAST,
                     'value': scen_p0_data.values
                 }
                 data_list.append(pd.DataFrame(df_data))
-        
-        # Process target variable forecasts (monthly)
+                if is_monthly:
+                    scen_p0_q = aggregate_to_quarterly(scen_p0_data)
+                    df_data_q = {
+                        'category': CATEGORY_TARGET_FORECAST,
+                        'model': model_id,
+                        'scenario_name': scen_set,
+                        'severity': 'p0',
+                        'date': scen_p0_q.index,
+                        'frequency': 'quarterly',
+                        'value_type': VALUE_TYPE_TARGET_FORECAST,
+                        'value': scen_p0_q.values
+                    }
+                    data_list.append(pd.DataFrame(df_data_q))
+
+        # Process target variable forecasts
         for scen_set, scenarios in scen_results.items():
             for scen_name, forecast in scenarios.items():
                 if forecast is not None and not forecast.empty:
-                    # Create DataFrame for target forecasts (monthly)
+                    freq_label = 'monthly' if is_monthly else 'quarterly'
                     df_data = {
                         'category': CATEGORY_TARGET_FORECAST,
                         'model': model_id,
                         'scenario_name': scen_set,
                         'severity': scen_name,
                         'date': forecast.index,
-                        'frequency': 'monthly',
+                        'frequency': freq_label,
                         'value_type': VALUE_TYPE_TARGET_FORECAST,
                         'value': forecast.values
                     }
                     data_list.append(pd.DataFrame(df_data))
+                    if is_monthly:
+                        qtr_forecast = aggregate_to_quarterly(forecast)
+                        df_data_q = {
+                            'category': CATEGORY_TARGET_FORECAST,
+                            'model': model_id,
+                            'scenario_name': scen_set,
+                            'severity': scen_name,
+                            'date': qtr_forecast.index,
+                            'frequency': 'quarterly',
+                            'value_type': VALUE_TYPE_TARGET_FORECAST,
+                            'value': qtr_forecast.values
+                        }
+                        data_list.append(pd.DataFrame(df_data_q))
 
-        # Add historical actuals (Target) monthly and quarterly (if applicable)
+        # Add historical actuals (Target)
         target_actual = getattr(self.model, 'y_full', None)
         if target_actual is not None and not target_actual.empty:
-            # Monthly actuals per scenario set
-            for scen_set in scen_results.keys():
-                df_data = {
-                    'category': CATEGORY_TARGET_FORECAST,
-                    'model': model_id,
-                    'scenario_name': scen_set,
-                    'severity': 'actual',
-                    'date': target_actual.index,
-                    'frequency': 'monthly',
-                    'value_type': VALUE_TYPE_TARGET_FORECAST,
-                    'value': target_actual.values
-                }
-                data_list.append(pd.DataFrame(df_data))
-            
-            # Quarterly actuals aggregated to quarter-end
-            actual_q = target_actual.copy()
-            actual_q.index = pd.to_datetime(actual_q.index)
-            actual_q = actual_q.groupby(pd.Grouper(freq='Q')).mean()
-            actual_q.index = actual_q.index.to_period('Q').to_timestamp(how='end').normalize()
+            if is_monthly:
+                for scen_set in scen_results.keys():
+                    df_data = {
+                        'category': CATEGORY_TARGET_FORECAST,
+                        'model': model_id,
+                        'scenario_name': scen_set,
+                        'severity': 'actual',
+                        'date': target_actual.index,
+                        'frequency': 'monthly',
+                        'value_type': VALUE_TYPE_TARGET_FORECAST,
+                        'value': target_actual.values
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
+            actual_q = aggregate_to_quarterly(target_actual)
             if not actual_q.empty:
                 for scen_set in scen_results.keys():
                     df_data = {
@@ -1164,19 +1205,18 @@ class OLSModelAdapter(ExportableModel):
                     data_list.append(pd.DataFrame(df_data))
 
         # === BASE VARIABLE FORECASTS ===
-        
-        # Process base variable forecasts (monthly) if available
-        if hasattr(self.model.scen_manager, 'y_base_scens'):
+
+        # Process base variable forecasts in original frequency if monthly
+        if is_monthly and hasattr(self.model.scen_manager, 'y_base_scens'):
             base_results = self.model.scen_manager.y_base_scens
-            
+
             # Add scen_p0 base data if available
             if hasattr(self.model, 'base_predictor') and self.model.base_predictor is not None:
                 if hasattr(self.model.scen_manager, 'scen_p0') and self.model.scen_manager.scen_p0 is not None:
                     scen_p0_data = self.model.scen_manager.scen_p0
                     base_p0_values = self.model.base_predictor.predict_base(scen_p0_data, scen_p0_data)
-                    
+
                     for scen_set in base_results.keys():
-                        # Create scen_p0 entry for base variable
                         df_data = {
                             'category': CATEGORY_BASE_FORECAST,
                             'model': model_id,
@@ -1188,11 +1228,24 @@ class OLSModelAdapter(ExportableModel):
                             'value': base_p0_values.values
                         }
                         data_list.append(pd.DataFrame(df_data))
-            
+
+                        # quarterly aggregate of p0
+                        base_p0_q = aggregate_to_quarterly(base_p0_values)
+                        df_data_q = {
+                            'category': CATEGORY_BASE_FORECAST,
+                            'model': model_id,
+                            'scenario_name': scen_set,
+                            'severity': 'p0',
+                            'date': base_p0_q.index,
+                            'frequency': 'quarterly',
+                            'value_type': VALUE_TYPE_BASE_FORECAST,
+                            'value': base_p0_q.values
+                        }
+                        data_list.append(pd.DataFrame(df_data_q))
+
             for scen_set, scenarios in base_results.items():
                 for scen_name, forecast in scenarios.items():
                     if forecast is not None and not forecast.empty:
-                        # Create DataFrame for base forecasts (monthly)
                         df_data = {
                             'category': CATEGORY_BASE_FORECAST,
                             'model': model_id,
@@ -1204,28 +1257,37 @@ class OLSModelAdapter(ExportableModel):
                             'value': forecast.values
                         }
                         data_list.append(pd.DataFrame(df_data))
+                        qtr_forecast = aggregate_to_quarterly(forecast)
+                        df_data_q = {
+                            'category': CATEGORY_BASE_FORECAST,
+                            'model': model_id,
+                            'scenario_name': scen_set,
+                            'severity': scen_name,
+                            'date': qtr_forecast.index,
+                            'frequency': 'quarterly',
+                            'value_type': VALUE_TYPE_BASE_FORECAST,
+                            'value': qtr_forecast.values
+                        }
+                        data_list.append(pd.DataFrame(df_data_q))
 
-        # Add historical actuals (Base) monthly and quarterly if base actuals exist on model
+        # Add historical actuals (Base)
         base_actual = getattr(self.model, 'y_base_full', None)
         if base_actual is not None and not base_actual.empty:
-            for scen_set in scen_results.keys():
-                df_data = {
-                    'category': CATEGORY_BASE_FORECAST,
-                    'model': model_id,
-                    'scenario_name': scen_set,
-                    'severity': 'actual',
-                    'date': base_actual.index,
-                    'frequency': 'monthly',
-                    'value_type': VALUE_TYPE_BASE_FORECAST,
-                    'value': base_actual.values
-                }
-                data_list.append(pd.DataFrame(df_data))
-            
-            # Quarterly aggregation
-            base_actual_q = base_actual.copy()
-            base_actual_q.index = pd.to_datetime(base_actual_q.index)
-            base_actual_q = base_actual_q.groupby(pd.Grouper(freq='Q')).mean()
-            base_actual_q.index = base_actual_q.index.to_period('Q').to_timestamp(how='end').normalize()
+            if is_monthly:
+                for scen_set in scen_results.keys():
+                    df_data = {
+                        'category': CATEGORY_BASE_FORECAST,
+                        'model': model_id,
+                        'scenario_name': scen_set,
+                        'severity': 'actual',
+                        'date': base_actual.index,
+                        'frequency': 'monthly',
+                        'value_type': VALUE_TYPE_BASE_FORECAST,
+                        'value': base_actual.values
+                    }
+                    data_list.append(pd.DataFrame(df_data))
+
+            base_actual_q = aggregate_to_quarterly(base_actual)
             if not base_actual_q.empty:
                 for scen_set in scen_results.keys():
                     df_data = {
@@ -1274,34 +1336,65 @@ class OLSModelAdapter(ExportableModel):
         model_drivers = get_model_driver_names(self.model)
         
         if model_drivers and hasattr(self.model, 'scen_manager') and self.model.scen_manager is not None:
-            # Process each scenario set that has target forecasts
             for scen_set in scen_results.keys():
-                # Get all scenarios for this scenario set from target forecasts
                 scenarios = scen_results[scen_set]
-                
+
                 for scen_name in scenarios.keys():
-                    # Get transformed driver data for this scenario (P0 to P12)
                     driver_data = get_scenario_driver_data(
-                        self.model, scen_set, scen_name, model_drivers, 
+                        self.model, scen_set, scen_name, model_drivers,
                         jump_off_date=None, periods=12
                     )
-                    
+
                     if driver_data is not None and not driver_data.empty:
-                        # Export each driver as a separate series
-                        for driver_name in driver_data.columns:
-                            driver_series = driver_data[driver_name].dropna()
-                            if not driver_series.empty:
-                                df_data = {
-                                    'category': CATEGORY_DRIVER_DATA,
-                                    'model': model_id,
-                                    'scenario_name': scen_set,
-                                    'severity': scen_name,
-                                    'date': driver_series.index,
-                                    'frequency': frequency_str,
-                                    'value_type': driver_name,
-                                    'value': driver_series.values
-                                }
-                                data_list.append(pd.DataFrame(df_data))
+                        if is_monthly:
+                            for driver_name in driver_data.columns:
+                                driver_series = driver_data[driver_name].dropna()
+                                if not driver_series.empty:
+                                    df_data = {
+                                        'category': CATEGORY_DRIVER_DATA,
+                                        'model': model_id,
+                                        'scenario_name': scen_set,
+                                        'severity': scen_name,
+                                        'date': driver_series.index,
+                                        'frequency': 'monthly',
+                                        'value_type': driver_name,
+                                        'value': driver_series.values
+                                    }
+                                    data_list.append(pd.DataFrame(df_data))
+
+                            driver_q = driver_data.copy()
+                            driver_q.index = pd.to_datetime(driver_q.index)
+                            driver_q = driver_q.groupby(pd.Grouper(freq='Q')).mean()
+                            driver_q.index = driver_q.index.to_period('Q').to_timestamp(how='end').normalize()
+                            for driver_name in driver_q.columns:
+                                driver_series = driver_q[driver_name].dropna()
+                                if not driver_series.empty:
+                                    df_data_q = {
+                                        'category': CATEGORY_DRIVER_DATA,
+                                        'model': model_id,
+                                        'scenario_name': scen_set,
+                                        'severity': scen_name,
+                                        'date': driver_series.index,
+                                        'frequency': 'quarterly',
+                                        'value_type': driver_name,
+                                        'value': driver_series.values
+                                    }
+                                    data_list.append(pd.DataFrame(df_data_q))
+                        else:
+                            for driver_name in driver_data.columns:
+                                driver_series = driver_data[driver_name].dropna()
+                                if not driver_series.empty:
+                                    df_data = {
+                                        'category': CATEGORY_DRIVER_DATA,
+                                        'model': model_id,
+                                        'scenario_name': scen_set,
+                                        'severity': scen_name,
+                                        'date': driver_series.index,
+                                        'frequency': 'quarterly',
+                                        'value_type': driver_name,
+                                        'value': driver_series.values
+                                    }
+                                    data_list.append(pd.DataFrame(df_data))
         
         if not data_list:
             return pd.DataFrame(columns=SCENARIO_COLUMNS)
@@ -1556,520 +1649,23 @@ class OLSModelAdapter(ExportableModel):
         return results
 
     def get_sensitivity_results(self) -> Optional[pd.DataFrame]:
-        """Return sensitivity testing results in long format.
-        
-        Returns a DataFrame with columns:
-        - model: string, model_id
-        - test: string ["Input Sensitivity Test", "Parameter Sensitivity Test"]
-        - scenario_name: string (e.g., 'EWST_2024')
-        - severity: string (e.g., 'base', 'adv', 'sev', 'p0')
-        - variable/parameter: string, variable or parameter name being tested (or 'baseline_p0' for scen_p0 data)
-        - shock: string, shock level ("-3std", "+1se", "baseline", etc)
-        - date: timestamp
-        - frequency: string ['monthly'/'quarterly']
-        - value_type: string ['Target'/'Base']
-        - value: numerical
-        """
-        if not hasattr(self.model, 'scen_manager') or self.model.scen_manager is None:
+        """Return sensitivity testing results in long format."""
+        if not hasattr(self.model, "scen_manager") or self.model.scen_manager is None:
             return None
 
-        # Get sensitivity test instance
         sens_test = self.model.scen_manager.sens_test
         if sens_test is None:
             return None
 
-        model_id = self._model_id
-        data_list = []
-
-        # Add scen_p0 baseline data for sensitivity tests if available
-        if hasattr(self.model.scen_manager, 'scen_p0') and self.model.scen_manager.scen_p0 is not None:
-            scen_p0_data = self.model.scen_manager.scen_p0
-            
-            # Get scenario sets from parameter sensitivity results
-            param_shock_df = sens_test.param_shock_df
-            for scen_set in param_shock_df.keys():
-                for scen_name in param_shock_df[scen_set].keys():
-                    # Add scen_p0 for parameter sensitivity baseline
-                    df_data = {
-                        'model': model_id,
-                        'test': 'Parameter Sensitivity Test',
-                        'scenario_name': scen_set,
-                        'severity': scen_name,
-                        'variable/parameter': 'baseline_p0',
-                        'shock': 'baseline',
-                        'date': scen_p0_data.index,
-                        'value_type': 'Target',
-                        'value': scen_p0_data.values,
-                        'frequency': 'monthly'
-                    }
-                    data_list.append(pd.DataFrame(df_data))
-            
-            # Get scenario sets from input sensitivity results
-            input_shock_df = sens_test.input_shock_df
-            for scen_set in input_shock_df.keys():
-                for scen_name in input_shock_df[scen_set].keys():
-                    # Add scen_p0 for input sensitivity baseline
-                    df_data = {
-                        'model': model_id,
-                        'test': 'Input Sensitivity Test',
-                        'scenario_name': scen_set,
-                        'severity': scen_name,
-                        'variable/parameter': 'baseline_p0',
-                        'shock': 'baseline',
-                        'date': scen_p0_data.index,
-                        'value_type': 'Target',
-                        'value': scen_p0_data.values,
-                        'frequency': 'monthly'
-                    }
-                    data_list.append(pd.DataFrame(df_data))
-            
-            # Add base variable scen_p0 data if base predictor is available
-            if hasattr(self.model, 'base_predictor') and self.model.base_predictor is not None:
-                base_p0_values = self.model.base_predictor.predict_base(scen_p0_data, scen_p0_data)
-                
-                # Add base p0 for parameter sensitivity
-                for scen_set in param_shock_df.keys():
-                    for scen_name in param_shock_df[scen_set].keys():
-                        df_data = {
-                            'model': model_id,
-                            'test': 'Parameter Sensitivity Test',
-                            'scenario_name': scen_set,
-                            'severity': scen_name,
-                            'variable/parameter': 'baseline_p0',
-                            'shock': 'baseline',
-                            'date': base_p0_values.index,
-                            'value_type': 'Base',
-                            'value': base_p0_values.values,
-                            'frequency': 'monthly'
-                        }
-                        data_list.append(pd.DataFrame(df_data))
-                
-                # Add base p0 for input sensitivity
-                for scen_set in input_shock_df.keys():
-                    for scen_name in input_shock_df[scen_set].keys():
-                        df_data = {
-                            'model': model_id,
-                            'test': 'Input Sensitivity Test',
-                            'scenario_name': scen_set,
-                            'severity': scen_name,
-                            'variable/parameter': 'baseline_p0',
-                            'shock': 'baseline',
-                            'date': base_p0_values.index,
-                            'value_type': 'Base',
-                            'value': base_p0_values.values,
-                            'frequency': 'monthly'
-                        }
-                        data_list.append(pd.DataFrame(df_data))
-
-        # Process parameter sensitivity results (monthly)
-        param_shock_df = sens_test.param_shock_df
-        for scen_set, scen_dict in param_shock_df.items():
-            for scen_name, df in scen_dict.items():
-                # Get baseline column name
-                baseline_col = f"{scen_set}_{scen_name}"
-                
-                # Include baseline (no shock) target series
-                if baseline_col in df.columns:
-                    df_data = {
-                        'model': model_id,
-                        'test': 'Parameter Sensitivity Test',
-                        'scenario_name': scen_set,
-                        'severity': scen_name,
-                        'variable/parameter': 'no_shock',
-                        'shock': 'baseline',
-                        'date': df.index,
-                        'value_type': 'Target',
-                        'value': df[baseline_col].values,
-                        'frequency': 'monthly'
-                    }
-                    data_list.append(pd.DataFrame(df_data))
-
-                # Process each parameter's shocks (monthly)
-                for col in df.columns:
-                    if col == baseline_col:
-                        continue
-                    
-                    # Extract parameter name and shock level
-                    param_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
-                    shock = ('+' if '+' in col else '-') + shock
-                    
-                    # Create DataFrame for target variable results (monthly)
-                    df_data = {
-                        'model': model_id,
-                        'test': 'Parameter Sensitivity Test',
-                        'scenario_name': scen_set,
-                        'severity': scen_name,
-                        'variable/parameter': param_name,
-                        'shock': shock,
-                        'date': df.index,
-                        'value_type': 'Target',
-                        'value': df[col].values,
-                        'frequency': 'monthly'
-                    }
-                    data_list.append(pd.DataFrame(df_data))
-
-        # Process parameter sensitivity quarterly results
-        if hasattr(sens_test, 'param_shock_qtr_df'):
-            param_shock_qtr_df = sens_test.param_shock_qtr_df
-            for scen_set, scen_dict in param_shock_qtr_df.items():
-                for scen_name, qtr_df in scen_dict.items():
-                    if qtr_df is not None and not qtr_df.empty:
-                        baseline_col = f"{scen_set}_{scen_name}"
-                        
-                        # Include baseline (no shock) quarterly target series
-                        if baseline_col in qtr_df.columns:
-                            qtr_forecast = qtr_df[baseline_col].dropna()
-                            if not qtr_forecast.empty:
-                                df_data = {
-                                    'model': model_id,
-                                    'test': 'Parameter Sensitivity Test',
-                                    'scenario_name': scen_set,
-                                    'severity': scen_name,
-                                    'variable/parameter': 'no_shock',
-                                    'shock': 'baseline',
-                                    'date': qtr_forecast.index,
-                                    'value_type': 'Target',
-                                    'value': qtr_forecast.values,
-                                    'frequency': 'quarterly'
-                                }
-                                data_list.append(pd.DataFrame(df_data))
-
-                        # Process each parameter's shocks (quarterly)
-                        for col in qtr_df.columns:
-                            if col == baseline_col:
-                                continue
-                            
-                            # Extract parameter name and shock level
-                            param_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
-                            shock = ('+' if '+' in col else '-') + shock
-                            
-                            qtr_forecast = qtr_df[col].dropna()
-                            if not qtr_forecast.empty:
-                                # Create DataFrame for quarterly target results
-                                df_data = {
-                                    'model': model_id,
-                                    'test': 'Parameter Sensitivity Test',
-                                    'scenario_name': scen_set,
-                                    'severity': scen_name,
-                                    'variable/parameter': param_name,
-                                    'shock': shock,
-                                    'date': qtr_forecast.index,
-                                    'value_type': 'Target',
-                                    'value': qtr_forecast.values,
-                                    'frequency': 'quarterly'
-                                }
-                                data_list.append(pd.DataFrame(df_data))
-
-        # Process input sensitivity results (monthly)
-        input_shock_df = sens_test.input_shock_df
-        for scen_set, scen_dict in input_shock_df.items():
-            for scen_name, df in scen_dict.items():
-                # Get baseline column name
-                baseline_col = f"{scen_set}_{scen_name}"
-                
-                # Include baseline (no shock) input series target
-                if baseline_col in df.columns:
-                    df_data = {
-                        'model': model_id,
-                        'test': 'Input Sensitivity Test',
-                        'scenario_name': scen_set,
-                        'severity': scen_name,
-                        'variable/parameter': 'no_shock',
-                        'shock': 'baseline',
-                        'date': df.index,
-                        'value_type': 'Target',
-                        'value': df[baseline_col].values,
-                        'frequency': 'monthly'
-                    }
-                    data_list.append(pd.DataFrame(df_data))
-
-                # Process each variable's shocks (monthly)
-                for col in df.columns:
-                    if col == baseline_col:
-                        continue
-                    
-                    # Extract variable name and shock level
-                    var_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
-                    shock = ('+' if '+' in col else '-') + shock
-                    
-                    # Create DataFrame for target variable results (monthly)
-                    df_data = {
-                        'model': model_id,
-                        'test': 'Input Sensitivity Test',
-                        'scenario_name': scen_set,
-                        'severity': scen_name,
-                        'variable/parameter': var_name,
-                        'shock': shock,
-                        'date': df.index,
-                        'value_type': 'Target',
-                        'value': df[col].values,
-                        'frequency': 'monthly'
-                    }
-                    data_list.append(pd.DataFrame(df_data))
-
-        # Process input sensitivity quarterly results
-        if hasattr(sens_test, 'input_shock_qtr_df'):
-            input_shock_qtr_df = sens_test.input_shock_qtr_df
-            for scen_set, scen_dict in input_shock_qtr_df.items():
-                for scen_name, qtr_df in scen_dict.items():
-                    if qtr_df is not None and not qtr_df.empty:
-                        baseline_col = f"{scen_set}_{scen_name}"
-                        
-                        # Include baseline (no shock) quarterly target series
-                        if baseline_col in qtr_df.columns:
-                            qtr_forecast = qtr_df[baseline_col].dropna()
-                            if not qtr_forecast.empty:
-                                df_data = {
-                                    'model': model_id,
-                                    'test': 'Input Sensitivity Test',
-                                    'scenario_name': scen_set,
-                                    'severity': scen_name,
-                                    'variable/parameter': 'no_shock',
-                                    'shock': 'baseline',
-                                    'date': qtr_forecast.index,
-                                    'value_type': 'Target',
-                                    'value': qtr_forecast.values,
-                                    'frequency': 'quarterly'
-                                }
-                                data_list.append(pd.DataFrame(df_data))
-
-                        # Process each variable's shocks (quarterly)
-                        for col in qtr_df.columns:
-                            if col == baseline_col:
-                                continue
-                            
-                            # Extract variable name and shock level
-                            var_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
-                            shock = ('+' if '+' in col else '-') + shock
-                            
-                            qtr_forecast = qtr_df[col].dropna()
-                            if not qtr_forecast.empty:
-                                # Create DataFrame for quarterly target results
-                                df_data = {
-                                    'model': model_id,
-                                    'test': 'Input Sensitivity Test',
-                                    'scenario_name': scen_set,
-                                    'severity': scen_name,
-                                    'variable/parameter': var_name,
-                                    'shock': shock,
-                                    'date': qtr_forecast.index,
-                                    'value_type': 'Target',
-                                    'value': qtr_forecast.values,
-                                    'frequency': 'quarterly'
-                                }
-                                data_list.append(pd.DataFrame(df_data))
-
-        # If model has base predictor, add base variable results
-        if hasattr(self.model, 'base_predictor') and self.model.base_predictor is not None:
-            # Process parameter sensitivity base results (monthly)
-            for scen_set, scen_dict in param_shock_df.items():
-                for scen_name, df in scen_dict.items():
-                    baseline_col = f"{scen_set}_{scen_name}"
-                    
-                    # Include baseline (no shock) base conversion for parameter sensitivity monthly
-                    if baseline_col in df.columns:
-                        base_values = self.model.base_predictor.predict_base(df[baseline_col], self.model.dm.scen_p0)
-                        df_data = {
-                            'model': model_id,
-                            'test': 'Parameter Sensitivity Test',
-                            'scenario_name': scen_set,
-                            'severity': scen_name,
-                            'variable/parameter': 'no_shock',
-                            'shock': 'baseline',
-                            'date': base_values.index,
-                            'value_type': 'Base',
-                            'value': base_values.values,
-                            'frequency': 'monthly'
-                        }
-                        data_list.append(pd.DataFrame(df_data))
-
-                    for col in df.columns:
-                        if col == baseline_col:
-                            continue
-                        
-                        param_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
-                        shock = ('+' if '+' in col else '-') + shock
-                        
-                        # Convert to base variable
-                        base_values = self.model.base_predictor.predict_base(df[col], self.model.dm.scen_p0)
-                        
-                        # Create DataFrame for base variable results (monthly)
-                        df_data = {
-                            'model': model_id,
-                            'test': 'Parameter Sensitivity Test',
-                            'scenario_name': scen_set,
-                            'severity': scen_name,
-                            'variable/parameter': param_name,
-                            'shock': shock,
-                            'date': base_values.index,
-                            'value_type': 'Base',
-                            'value': base_values.values,
-                            'frequency': 'monthly'
-                        }
-                        data_list.append(pd.DataFrame(df_data))
- 
-            # Process parameter sensitivity base quarterly results
-            if hasattr(sens_test, 'param_shock_qtr_df'):
-                param_shock_qtr_df = sens_test.param_shock_qtr_df
-                for scen_set, scen_dict in param_shock_qtr_df.items():
-                    for scen_name, qtr_df in scen_dict.items():
-                        if qtr_df is not None and not qtr_df.empty:
-                            baseline_col = f"{scen_set}_{scen_name}"
-                            
-                            # Include baseline (no shock) base conversion for quarterly
-                            if baseline_col in qtr_df.columns:
-                                qtr_forecast = qtr_df[baseline_col].dropna()
-                                if not qtr_forecast.empty:
-                                    base_values = self.model.base_predictor.predict_base(qtr_forecast, self.model.dm.scen_p0)
-                                    df_data = {
-                                        'model': model_id,
-                                        'test': 'Parameter Sensitivity Test',
-                                        'scenario_name': scen_set,
-                                        'severity': scen_name,
-                                        'variable/parameter': 'no_shock',
-                                        'shock': 'baseline',
-                                        'date': base_values.index,
-                                        'value_type': 'Base',
-                                        'value': base_values.values,
-                                        'frequency': 'quarterly'
-                                    }
-                                    data_list.append(pd.DataFrame(df_data))
-
-                            for col in qtr_df.columns:
-                                if col == baseline_col:
-                                    continue
-                                
-                                param_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
-                                shock = ('+' if '+' in col else '-') + shock
-                                
-                                qtr_forecast = qtr_df[col].dropna()
-                                if not qtr_forecast.empty:
-                                    # Convert to base variable
-                                    base_values = self.model.base_predictor.predict_base(qtr_forecast, self.model.dm.scen_p0)
-                                    
-                                    # Create DataFrame for quarterly base results
-                                    df_data = {
-                                        'model': model_id,
-                                        'test': 'Parameter Sensitivity Test',
-                                        'scenario_name': scen_set,
-                                        'severity': scen_name,
-                                        'variable/parameter': param_name,
-                                        'shock': shock,
-                                        'date': base_values.index,
-                                        'value_type': 'Base',
-                                        'value': base_values.values,
-                                        'frequency': 'quarterly'
-                                    }
-                                    data_list.append(pd.DataFrame(df_data))
- 
-            # Process input sensitivity base results (monthly)
-            for scen_set, scen_dict in input_shock_df.items():
-                for scen_name, df in scen_dict.items():
-                    baseline_col = f"{scen_set}_{scen_name}"
-                    
-                    # Include baseline (no shock) base conversion for input monthly
-                    if baseline_col in df.columns:
-                        base_values = self.model.base_predictor.predict_base(df[baseline_col], self.model.dm.scen_p0)
-                        df_data = {
-                            'model': model_id,
-                            'test': 'Input Sensitivity Test',
-                            'scenario_name': scen_set,
-                            'severity': scen_name,
-                            'variable/parameter': 'no_shock',
-                            'shock': 'baseline',
-                            'date': base_values.index,
-                            'value_type': 'Base',
-                            'value': base_values.values,
-                            'frequency': 'monthly'
-                        }
-                        data_list.append(pd.DataFrame(df_data))
-
-                    for col in df.columns:
-                        if col == baseline_col:
-                            continue
-                        
-                        var_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
-                        shock = ('+' if '+' in col else '-') + shock
-                        
-                        # Convert to base variable
-                        base_values = self.model.base_predictor.predict_base(df[col], self.model.dm.scen_p0)
-                        
-                        # Create DataFrame for base variable results (monthly)
-                        df_data = {
-                            'model': model_id,
-                            'test': 'Input Sensitivity Test',
-                            'scenario_name': scen_set,
-                            'severity': scen_name,
-                            'variable/parameter': var_name,
-                            'shock': shock,
-                            'date': base_values.index,
-                            'value_type': 'Base',
-                            'value': base_values.values,
-                            'frequency': 'monthly'
-                        }
-                        data_list.append(pd.DataFrame(df_data))
- 
-            # Process input sensitivity base quarterly results
-            if hasattr(sens_test, 'input_shock_qtr_df'):
-                input_shock_qtr_df = sens_test.input_shock_qtr_df
-                for scen_set, scen_dict in input_shock_qtr_df.items():
-                    for scen_name, qtr_df in scen_dict.items():
-                        if qtr_df is not None and not qtr_df.empty:
-                            baseline_col = f"{scen_set}_{scen_name}"
-                            
-                            # Include baseline (no shock) base conversion for input quarterly
-                            if baseline_col in qtr_df.columns:
-                                qtr_forecast = qtr_df[baseline_col].dropna()
-                                if not qtr_forecast.empty:
-                                    base_values = self.model.base_predictor.predict_base(qtr_forecast, self.model.dm.scen_p0)
-                                    df_data = {
-                                        'model': model_id,
-                                        'test': 'Input Sensitivity Test',
-                                        'scenario_name': scen_set,
-                                        'severity': scen_name,
-                                        'variable/parameter': 'no_shock',
-                                        'shock': 'baseline',
-                                        'date': base_values.index,
-                                        'value_type': 'Base',
-                                        'value': base_values.values,
-                                        'frequency': 'quarterly'
-                                    }
-                                    data_list.append(pd.DataFrame(df_data))
-
-                            for col in qtr_df.columns:
-                                if col == baseline_col:
-                                    continue
-                                
-                                var_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
-                                shock = ('+' if '+' in col else '-') + shock
-                                
-                                qtr_forecast = qtr_df[col].dropna()
-                                if not qtr_forecast.empty:
-                                    # Convert to base variable
-                                    base_values = self.model.base_predictor.predict_base(qtr_forecast, self.model.dm.scen_p0)
-                                    
-                                    # Create DataFrame for quarterly base results
-                                    df_data = {
-                                        'model': model_id,
-                                        'test': 'Input Sensitivity Test',
-                                        'scenario_name': scen_set,
-                                        'severity': scen_name,
-                                        'variable/parameter': var_name,
-                                        'shock': shock,
-                                        'date': base_values.index,
-                                        'value_type': 'Base',
-                                        'value': base_values.values,
-                                        'frequency': 'quarterly'
-                                    }
-                                    data_list.append(pd.DataFrame(df_data))
-
-        if not data_list:
+        results_df = getattr(sens_test, "results_df", None)
+        if results_df is None or results_df.empty:
             return None
 
-        # Combine all data and ensure column order
-        result = pd.concat(data_list, ignore_index=True)
-        return result[['model', 'test', 'scenario_name', 'severity', 'variable/parameter', 
-                      'shock', 'date', 'frequency', 'value_type', 'value']] 
+        df = results_df.copy()
+        df.insert(0, "model", self._model_id)
+        return df[["model", "test", "scenario_name", "severity", "variable/parameter",
+                   "shock", "date", "frequency", "value_type", "value"]]
+
 
     # Helper to build a standardized time series DataFrame row block
     def _build_ts_block(self, index, model_id: str, series_type: str, value_type: str, values) -> pd.DataFrame:
@@ -2294,225 +1890,17 @@ class OLSModelAdapter(ExportableModel):
         return pd.DataFrame(stats_list)
 
     def get_scenario_stats_results(self) -> Optional[pd.DataFrame]:
-        """Return scenario testing statistical metrics for base variables.
-        
-        Returns a DataFrame with columns:
-        - model: model id
-        - scenario_name: scenario set name (e.g., 'EWST_2024')
-        - metric: metric type (P0, P1, P2, ..., P12, 4Q_CAGR, 9Q_CAGR, 12Q_CAGR, 9Q_Change, 9Q_%Change, %Change_from_Base(at_P9))
-        - severity: severity level for the metric (e.g., 'base', 'adv', 'sev')
-        - value: numerical value
-        
-        Calculates quarterly statistics for base variables only:
-        1. 12-quarter forecast values (P0 to P12)
-        2. 4, 9, 12 Quarter CAGR using P0 as starting point
-        3. 9 Quarter Change = value at P9 - value at P0
-        4. 9 Quarter %Change = 9 Quarter Change / value at P0 - 1
-        5. %Change from Base(at P9) = stress scenario P9 / baseline scenario P9 - 1
-        """
+        """Return scenario testing statistical metrics for base variables."""
         if not hasattr(self.model, 'scen_manager') or self.model.scen_manager is None:
             return None
-        
-        # Only process base variable quarterly forecasts
-        if not hasattr(self.model.scen_manager, 'forecast_y_base_qtr_df'):
+
+        stats_df = getattr(self.model.scen_manager, 'scenario_stats_df', None)
+        if stats_df is None or stats_df.empty:
             return None
-            
-        base_qtr_forecasts = self.model.scen_manager.forecast_y_base_qtr_df
-        if not base_qtr_forecasts:
-            return None
-        
-        model_id = self._model_id
-        stats_list = []
-        
-        for scen_set, qtr_df in base_qtr_forecasts.items():
-            if qtr_df is None or qtr_df.empty:
-                continue
-                
-            # Get scenarios for this scenario set
-            if hasattr(self.model.scen_manager, 'y_base_scens'):
-                base_scenarios = self.model.scen_manager.y_base_scens.get(scen_set, {})
-                
-                # Collect data for each severity level 
-                # P0 from historical actual at jump-off date, P1-P12 from scenario forecasts
-                severity_data = {}
-                
-                # Get P0 base variable value (same approach as get_scenario_results)
-                p0_base_value = None
-                p0_quarter_date = None
-                
-                # Get base actual quarterly data at jump-off date
-                base_actual = getattr(self.model, 'y_base_full', None)
-                if base_actual is not None and not base_actual.empty:
-                    # Convert to quarterly (same pattern as get_scenario_results)
-                    base_actual_q = base_actual.copy()
-                    base_actual_q.index = pd.to_datetime(base_actual_q.index)
-                    base_actual_q = base_actual_q.groupby(pd.Grouper(freq='Q')).mean()
-                    base_actual_q.index = base_actual_q.index.to_period('Q').to_timestamp(how='end').normalize()
-                    
-                    # Get the jump-off date from scenario manager
-                    if hasattr(self.model.scen_manager, 'P0') and self.model.scen_manager.P0 is not None:
-                        jump_off_date = self.model.scen_manager.P0
-                        # Convert to quarter-end to match base_actual_q index
-                        jump_off_q_end = pd.Timestamp(jump_off_date.year, jump_off_date.month, 1) + pd.offsets.QuarterEnd(0)
-                        
-                        # Get the base actual value at jump-off quarter
-                        if jump_off_q_end in base_actual_q.index:
-                            p0_base_value = base_actual_q.loc[jump_off_q_end]
-                            p0_quarter_date = jump_off_q_end
-                
-                for scen_name in base_scenarios.keys():
-                    # Check if this scenario has quarterly forecast data (P1-P12)
-                    col_name = scen_name if scen_name in qtr_df.columns else f"{scen_set}_{scen_name}"
-                    if col_name in qtr_df.columns:
-                        qtr_forecast = qtr_df[col_name].dropna()
-                        if not qtr_forecast.empty and len(qtr_forecast) >= 12:  # Need P1-P12 (12 quarters)
-                            # Combine P0 (historical actual) with P1-P12 (forecasts)
-                            if p0_base_value is not None and p0_quarter_date is not None:
-                                # Create combined series: P0 (historical) + P1-P12 (forecasts)
-                                combined_values = np.concatenate([[p0_base_value], qtr_forecast.values])
-                                combined_index = [p0_quarter_date] + list(qtr_forecast.index)
-                                combined_series = pd.Series(combined_values, index=combined_index)
-                                severity_data[scen_name] = combined_series
-                            else:
-                                # Fallback: use forecast data as-is if no P0 data available
-                                severity_data[scen_name] = qtr_forecast
-                
-                if not severity_data:
-                    continue
-                
-                # SECTION 1: 13-Quarter Forecast Values (P0 to P12)
-                # P0 = historical actual at jump-off, P1-P12 = scenario forecasts
-                # Order: P0, P1, P2, ..., P9, P10, P11, P12 (not P1, P10, P11, P12, P2, ...)
-                for period_idx in range(13):  # P0 to P12
-                    period_name = f"P{period_idx}"
-                    
-                    for severity, data in severity_data.items():
-                        if len(data) > period_idx:
-                            stats_list.append({
-                                'model': model_id,
-                                'scenario_name': scen_set,
-                                'metric': period_name,
-                                'severity': severity,
-                                'value': float(data.iloc[period_idx])
-                            })
-                
-                # SECTION 2: CAGR Calculations (4Q, 9Q, 12Q) using P0 as starting point
-                for severity, data in severity_data.items():
-                    data_values = data.values
-                    p0_value = data_values[0]  # P0 as starting point
-                    
-                    # Calculate CAGR for different periods using P0 as base
-                    for quarters in [4, 9, 12]:
-                        if len(data_values) > quarters and p0_value > 0:  # P0 to P{quarters}
-                            end_val = data_values[quarters]  # P{quarters} value
-                            
-                            if end_val > 0:
-                                # CAGR = (P{quarters}/P0)^(1/(quarters/4)) - 1 (annualized)
-                                cagr = (end_val / p0_value) ** (4.0 / quarters) - 1
-                                
-                                stats_list.append({
-                                    'model': model_id,
-                                    'scenario_name': scen_set,
-                                    'metric': f'{quarters}Q_CAGR',
-                                    'severity': severity,
-                                    'value': float(cagr)
-                                })
-                
-                # SECTION 3: 9Q Change and %Change calculations
-                for severity, data in severity_data.items():
-                    data_values = data.values
-                    
-                    if len(data_values) > 9:  # Need P0 to P9
-                        p0_value = data_values[0]  # P0
-                        p9_value = data_values[9]  # P9
-                        
-                        # 9 Quarter Change = P9 - P0
-                        q9_change = p9_value - p0_value
-                        stats_list.append({
-                            'model': model_id,
-                            'scenario_name': scen_set,
-                            'metric': '9Q_Change',
-                            'severity': severity,
-                            'value': float(q9_change)
-                        })
-                        
-                        # 9 Quarter %Change = P9/P0 - 1
-                        if p0_value != 0:
-                            q9_pct_change = (p9_value / p0_value) - 1
-                            stats_list.append({
-                                'model': model_id,
-                                'scenario_name': scen_set,
-                                'metric': '9Q_%Change',
-                                'severity': severity,
-                                'value': float(q9_pct_change)
-                            })
-                
-                # SECTION 4: %Change from Base (at P9) - stress scenarios vs baseline
-                # Find base scenario with flexible pattern matching
-                base_data = None
-                base_severity_name = None
-                
-                for severity_name in severity_data.keys():
-                    severity_lower = severity_name.lower()
-                    if 'base' in severity_lower:
-                        base_data = severity_data[severity_name]
-                        base_severity_name = severity_name
-                        break
-                
-                # Calculate %Change from Base for stress scenarios
-                if base_data is not None and len(base_data) > 9:
-                    base_p9_value = base_data.iloc[9]  # Baseline P9 value
-                    
-                    if base_p9_value != 0:
-                        for stress_severity, stress_data in severity_data.items():
-                            # Only compare non-base scenarios
-                            stress_lower = stress_severity.lower()
-                            if (stress_severity != base_severity_name and 
-                                'base' not in stress_lower and
-                                len(stress_data) > 9):
-                                
-                                stress_p9_value = stress_data.iloc[9]  # Stress scenario P9 value
-                                
-                                # %Change from Base = stress_P9 / baseline_P9
-                                pct_change_from_base = stress_p9_value / base_p9_value - 1
-                                
-                                stats_list.append({
-                                    'model': model_id,
-                                    'scenario_name': scen_set,
-                                    'metric': '%Change_from_Base(at_P9)',
-                                    'severity': stress_severity,
-                                    'value': float(pct_change_from_base)
-                                })
-        
-        if not stats_list:
-            return None
-        
-        # Create DataFrame and sort to ensure proper ordering
-        df = pd.DataFrame(stats_list)
-        
-        # Define custom ordering for metrics
-        metric_order = []
-        
-        # 1. First: P0 to P12 forecast values (in numerical order)
-        for i in range(13):
-            metric_order.append(f'P{i}')
-        
-        # 2. Then: CAGR metrics
-        metric_order.extend(['4Q_CAGR', '9Q_CAGR', '12Q_CAGR'])
-        
-        # 3. Finally: Change metrics
-        metric_order.extend(['9Q_Change', '9Q_%Change', '%Change_from_Base(at_P9)'])
-        
-        # Create categorical ordering for proper sorting
-        df['metric'] = pd.Categorical(df['metric'], categories=metric_order, ordered=True)
-        
-        # Sort by scenario_name, metric (in custom order), then severity
-        df_sorted = df.sort_values(['scenario_name', 'metric', 'severity']).reset_index(drop=True)
-        
-        # Convert metric back to string for output
-        df_sorted['metric'] = df_sorted['metric'].astype(str)
-        
-        return df_sorted 
+
+        df = stats_df.copy()
+        df.insert(0, 'model', self._model_id)
+        return df[['model', 'scenario_name', 'metric', 'severity', 'value']]
 
 # =============================================================================
 # Helper functions for driver scenario data export

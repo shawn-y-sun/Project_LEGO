@@ -437,6 +437,156 @@ class ScenManager:
         
         return results
 
+    @property
+    def scenario_stats_df(self) -> Optional[pd.DataFrame]:
+        """Calculate scenario testing statistics for base variables.
+
+        Returns
+        -------
+        pd.DataFrame or None
+            DataFrame with columns ['scenario_name', 'metric', 'severity', 'value']
+            containing quarterly statistics such as P0-P12 values, CAGR metrics
+            and percentage changes. Returns None if required data is missing.
+        """
+        # Only process if quarterly base forecasts are available
+        base_qtr_forecasts = getattr(self, 'forecast_y_base_qtr_df', {})
+        if not base_qtr_forecasts:
+            return None
+
+        stats_list = []
+
+        for scen_set, qtr_df in base_qtr_forecasts.items():
+            if qtr_df is None or qtr_df.empty:
+                continue
+
+            # Get scenarios for this scenario set
+            base_scenarios = getattr(self, 'y_base_scens', {}).get(scen_set, {})
+
+            # Collect data for each severity level
+            severity_data = {}
+
+            # Determine P0 base value from historical actuals
+            p0_base_value = None
+            p0_quarter_date = None
+
+            base_actual = getattr(self.model, 'y_base_full', None)
+            if base_actual is not None and not base_actual.empty:
+                base_actual_q = base_actual.copy()
+                base_actual_q.index = pd.to_datetime(base_actual_q.index)
+                base_actual_q = base_actual_q.groupby(pd.Grouper(freq='Q')).mean()
+                base_actual_q.index = base_actual_q.index.to_period('Q').to_timestamp(how='end').normalize()
+
+                jump_off_date = getattr(self, 'P0', None)
+                if jump_off_date is not None:
+                    jump_off_q_end = pd.Timestamp(jump_off_date.year, jump_off_date.month, 1) + pd.offsets.QuarterEnd(0)
+                    if jump_off_q_end in base_actual_q.index:
+                        p0_base_value = base_actual_q.loc[jump_off_q_end]
+                        p0_quarter_date = jump_off_q_end
+
+            for scen_name in base_scenarios.keys():
+                col_name = scen_name if scen_name in qtr_df.columns else f"{scen_set}_{scen_name}"
+                if col_name in qtr_df.columns:
+                    qtr_forecast = qtr_df[col_name].dropna()
+                    if not qtr_forecast.empty:
+                        if p0_base_value is not None and p0_quarter_date is not None:
+                            combined_values = np.concatenate([[p0_base_value], qtr_forecast.values])
+                            combined_index = [p0_quarter_date] + list(qtr_forecast.index)
+                            combined_series = pd.Series(combined_values, index=combined_index)
+                            severity_data[scen_name] = combined_series
+                        else:
+                            severity_data[scen_name] = qtr_forecast
+
+            if not severity_data:
+                continue
+
+            # Section 1: 13-quarter forecast values P0-P12
+            for period_idx in range(13):
+                period_name = f"P{period_idx}"
+                for severity, data in severity_data.items():
+                    if len(data) > period_idx:
+                        stats_list.append({
+                            'scenario_name': scen_set,
+                            'metric': period_name,
+                            'severity': severity,
+                            'value': float(data.iloc[period_idx])
+                        })
+
+            # Section 2: CAGR metrics
+            for severity, data in severity_data.items():
+                data_values = data.values
+                p0_value = data_values[0]
+                for quarters in [4, 9, 12]:
+                    if len(data_values) > quarters and p0_value > 0:
+                        end_val = data_values[quarters]
+                        if end_val > 0:
+                            cagr = (end_val / p0_value) ** (4.0 / quarters) - 1
+                            stats_list.append({
+                                'scenario_name': scen_set,
+                                'metric': f'{quarters}Q_CAGR',
+                                'severity': severity,
+                                'value': float(cagr)
+                            })
+
+            # Section 3: 9Q Change and %Change
+            for severity, data in severity_data.items():
+                data_values = data.values
+                if len(data_values) > 9:
+                    p0_value = data_values[0]
+                    p9_value = data_values[9]
+                    q9_change = p9_value - p0_value
+                    stats_list.append({
+                        'scenario_name': scen_set,
+                        'metric': '9Q_Change',
+                        'severity': severity,
+                        'value': float(q9_change)
+                    })
+                    if p0_value != 0:
+                        q9_pct_change = (p9_value / p0_value) - 1
+                        stats_list.append({
+                            'scenario_name': scen_set,
+                            'metric': '9Q_%Change',
+                            'severity': severity,
+                            'value': float(q9_pct_change)
+                        })
+
+            # Section 4: %Change from Base at P9
+            base_data = None
+            base_severity_name = None
+            for severity_name in severity_data.keys():
+                if 'base' in severity_name.lower():
+                    base_data = severity_data[severity_name]
+                    base_severity_name = severity_name
+                    break
+
+            if base_data is not None and len(base_data) > 9:
+                base_p9_value = base_data.iloc[9]
+                if base_p9_value != 0:
+                    for stress_severity, stress_data in severity_data.items():
+                        stress_lower = stress_severity.lower()
+                        if (stress_severity != base_severity_name and 'base' not in stress_lower and len(stress_data) > 9):
+                            stress_p9_value = stress_data.iloc[9]
+                            pct_change_from_base = stress_p9_value / base_p9_value - 1
+                            stats_list.append({
+                                'scenario_name': scen_set,
+                                'metric': '%Change_from_Base(at_P9)',
+                                'severity': stress_severity,
+                                'value': float(pct_change_from_base)
+                            })
+
+        if not stats_list:
+            return None
+
+        df = pd.DataFrame(stats_list)
+
+        # Define metric ordering
+        metric_order = [f'P{i}' for i in range(13)]
+        metric_order.extend(['4Q_CAGR', '9Q_CAGR', '12Q_CAGR', '9Q_Change', '9Q_%Change', '%Change_from_Base(at_P9)'])
+
+        df['metric'] = pd.Categorical(df['metric'], categories=metric_order, ordered=True)
+        df = df.sort_values(['scenario_name', 'metric', 'severity']).reset_index(drop=True)
+        df['metric'] = df['metric'].astype(str)
+        return df
+
     
 
     @property
