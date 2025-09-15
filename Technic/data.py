@@ -1,15 +1,12 @@
 # =============================================================================
 # module: data.py
 # Purpose: Manage and combine internal and MEV data for modeling
-# Dependencies: pandas, typing, DataLoader, MEVLoader, TSFM, CondVar, DumVar
+# Key Types/Classes: DataManager
+# Key Functions: build_features, _interpolate_df
+# Dependencies: pandas, numpy, scipy, typing, DataLoader, MEVLoader, TSFM, CondVar, DumVar
 # =============================================================================
-import os
-from pathlib import Path
 import pandas as pd
 import warnings
-import yaml
-import math
-import matplotlib.pyplot as plt
 from typing import Any, Dict, List, Optional, Callable, Union, Tuple
 import numpy as np
 from scipy.interpolate import CubicSpline
@@ -1111,181 +1108,186 @@ class DataManager:
             var_df_map[var] = self.build_features(tsfms)
         return var_df_map
     
-    @staticmethod
-    def _interpolate_df(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Interpolate quarterly MEV DataFrames to match monthly frequency using cubic spline.
-        The interpolation ensures that quarterly averages of the monthly values match
-        the original quarterly values. For valid series, quarterly values are first shifted
-        to the middle month of each quarter before interpolation.
+    def _interpolate_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Convert quarterly MEV data to a monthly frequency.
 
-        The process:
-        1. Forward fills any NA values in the quarterly series
-        2. For valid series:
-           - Shifts quarterly values to mid-quarter dates
-           - Extends the series by 4 quarters
-           - Performs cubic spline interpolation
-           - Scales interpolated values to preserve quarterly averages
-        3. Returns only the original date range
+        The interpolation respects how each MEV is aggregated within the
+        quarter, as specified by ``var_map[col]['aggregation']``. When this
+        metadata is absent, the series is treated as a quarterly average.
+        Supported aggregation types are:
+
+        ``average`` or ``mean``
+            1. Shift each quarterly observation to the middle month of the
+               quarter.
+            2. Extend the series with four additional mid-quarter points using
+               the last observed value to stabilize spline edges.
+            3. Fit a cubic spline and evaluate it at each month within the
+               valid range.
+            4. Scale the interpolated months within each quarter so that their
+               average equals the observed quarterly value.
+
+        ``sum`` or ``total``
+            Follows the same steps as ``average``/``mean`` but divides the
+            resulting monthly values by ``3`` so that summing the months within
+            a quarter reproduces the original quarterly total.
+
+        ``end``
+            1. Keep quarterly values at quarter-end dates (no shifting).
+            2. Extend the series with four additional quarter ends to stabilize
+               the spline.
+            3. Fit a cubic spline and evaluate it at monthly dates between the
+               first and last valid quarters.
+            4. No scaling is applied; interpolated monthly values naturally
+               converge to the quarter-end observation in the final month.
 
         Parameters
         ----------
         df : pd.DataFrame
-            Input DataFrame with datetime index. If not quarterly, returns original data.
+            Input DataFrame indexed by quarter-end timestamps.
 
         Returns
         -------
         pd.DataFrame
-            If input is quarterly: Interpolated monthly DataFrame with scaled values
-            If input is not quarterly: Original DataFrame
+            Monthly interpolated DataFrame. Non-quarterly inputs are returned
+            unchanged.
 
-        Notes
-        -----
-        - Uses scipy's CubicSpline with natural boundary conditions
-        - Shifts quarterly values to mid-quarter for better interpolation
-        - Scales interpolated values to preserve quarterly averages
-        - Handles missing values by preserving them in output
-        - Normalizes all dates to midnight UTC
-        - For quarterly data, creates a monthly date range from first quarter start to last quarter end
+        Examples
+        --------
+        >>> q_df = pd.DataFrame({"GDP": [1.0, 2.0]},
+        ...                     index=pd.to_datetime(["2020-03-31", "2020-06-30"]))
+        >>> dm._interpolate_df(q_df).head()
+                   GDP
+        2020-01-31  NaN
+        2020-02-29  NaN
+        2020-03-31  1.0
+        2020-04-30  1.3
+        2020-05-31  1.6
         """
         if df.empty:
             return df
 
-        # Normalize index to midnight UTC
         df2 = df.copy()
         df2.index = pd.DatetimeIndex(pd.to_datetime(df2.index)).normalize()
+        # Infer frequency to determine if quarterly interpolation is needed.
         freq_mev = pd.infer_freq(df2.index)
-        
-        # Only interpolate Q -> M
+
         if freq_mev and freq_mev.startswith('Q'):
-            # Get the first and last quarters for complete coverage
             first_qtr = pd.Period(df2.index[0], freq='Q')
             last_qtr = pd.Period(df2.index[-1], freq='Q')
-            
-            # Create monthly index from first month of first quarter to last month of last quarter
             start_month = first_qtr.start_time
             end_month = last_qtr.end_time
+            # Build a complete monthly index spanning the quarterly range.
             monthly_index = pd.date_range(start=start_month, end=end_month, freq='M')
-            
-            # Initialize result DataFrame with NaN
             monthly_df = pd.DataFrame(index=monthly_index)
-            
-            # Process each column separately
+
+            # Access the MEV metadata directly from the loader to avoid
+            # triggering DataManager.var_map, which depends on model_mev and
+            # can cause recursion during the initial interpolation.
+            var_map = self._mev_loader.mev_map
             for col in df2.columns:
                 q_series = df2[col]
-                
-                # Skip if all values are NA
                 if q_series.isnull().all():
                     monthly_df[col] = np.nan
                     continue
-                
-                # Find continuous non-NA segments
+
                 non_na_mask = ~q_series.isnull()
                 valid_indices = q_series.index[non_na_mask]
-                
                 if len(valid_indices) == 0:
                     monthly_df[col] = np.nan
                     continue
-                
-                # Get the first and last non-NA indices
+
                 first_valid_idx = valid_indices[0]
                 last_valid_idx = valid_indices[-1]
-                
-                # Get the non-NA segment
                 valid_series = q_series.loc[first_valid_idx:last_valid_idx].dropna()
-                
-                if len(valid_series) < 4:  # Need at least 4 points for cubic spline
-                    # Use linear interpolation for short segments
-                    valid_series = valid_series.reindex(monthly_index, method='linear')
-                    monthly_df[col] = valid_series
-                    continue
-                
-                # Shift quarterly values to mid-quarter dates
-                mid_quarter_series = pd.Series(index=pd.DatetimeIndex([]), dtype=float)
-                for idx, val in valid_series.items():
-                    qtr = pd.Period(idx, freq='Q')
-                    # Calculate middle month of the quarter (2nd month)
-                    mid_month = qtr.asfreq('M', how='s') + 1
-                    mid_quarter_date = mid_month.to_timestamp()
-                    mid_quarter_series[mid_quarter_date] = val
-                
-                # Extend the series by 4 quarters
-                last_value = mid_quarter_series.iloc[-1]
-                last_qtr = pd.Period(mid_quarter_series.index[-1], freq='Q')
-                extended_qtrs = []
-                for i in range(1, 5):  # 4 additional quarters
-                    next_qtr = last_qtr + i
-                    mid_month = next_qtr.asfreq('M', how='s') + 1
-                    extended_qtrs.append(mid_month.to_timestamp())
-                extended_data = pd.Series([last_value] * 4, index=extended_qtrs)
-                extended_series = pd.concat([mid_quarter_series, extended_data])
-                
-                # Convert dates to numeric for spline interpolation
-                x = extended_series.index.map(pd.Timestamp.toordinal)
-                y = extended_series.values
-                
-                # Fit cubic spline
-                spline = CubicSpline(x, y, bc_type='not-a-knot')
-                
-                # Get monthly points within the valid range
-                valid_start = pd.Period(valid_series.index[0], freq='Q').start_time
-                valid_end = pd.Period(valid_series.index[-1], freq='Q').end_time
-                valid_months = pd.date_range(start=valid_start, end=valid_end, freq='M')
-                
-                # Evaluate spline at monthly points
-                monthly_x = valid_months.map(pd.Timestamp.toordinal)
-                monthly_y = spline(monthly_x)
-                
-                # Create initial monthly series
-                m_series = pd.Series(monthly_y, index=valid_months)
-                
-                # Scale values to preserve quarterly averages
-                scaled_series = m_series.copy()
-                
-                # Map months to corresponding quarter ends for scaling
-                # Ensure all dates are normalized to midnight UTC
-                month_to_qtr = pd.PeriodIndex(valid_months, freq='Q').end_time.normalize()
-                
-                # Apply scaling for each quarter
-                for qtr_end in valid_series.index:
-                    # Normalize quarter end date to midnight UTC
-                    qtr_end_normalized = pd.Timestamp(qtr_end).normalize()
-                    mask = month_to_qtr == qtr_end_normalized
-                    
-                    if not mask.any():
-                        print(f"Warning: No matching months found for quarter {qtr_end}")
-                        print(f"Quarter end: {qtr_end_normalized}")
-                        print(f"Available quarter ends: {sorted(set(month_to_qtr))}")
-                        continue
-                    
-                    interpolated_avg = m_series[mask].mean()
-                    observed_value = valid_series.loc[qtr_end]
-                    
-                    # Handle zero or near-zero averages
-                    if np.isclose(interpolated_avg, 0):
-                        scale_factor = 1.0
+                agg = (var_map.get(col, {}).get('aggregation') or 'average').lower()
+                # Default to quarterly average when aggregation metadata is missing
+
+                if len(valid_series) < 4:
+                    # Linear interpolation suffices when fewer than four quarters
+                    # are available; still adjust sums if needed.
+                    monthly_series = valid_series.reindex(monthly_index).interpolate(method='linear')
+                    if agg in {'sum', 'total'}:
+                        monthly_series = monthly_series / 3.0
+                else:
+                    if agg == 'end':
+                        # Quarter-end series: keep values at quarter ends.
+                        base_series = valid_series
+                        last_value = base_series.iloc[-1]
+                        last_qtr = pd.Period(base_series.index[-1], freq='Q')
+                        # Extend with four future quarter ends to stabilize spline.
+                        extended_qtrs = []
+                        for i in range(1, 5):
+                            next_qtr = last_qtr + i
+                            extended_qtrs.append(next_qtr.end_time)
+                        extended_data = pd.Series([last_value] * 4, index=extended_qtrs)
+                        extended_series = pd.concat([base_series, extended_data])
                     else:
-                        scale_factor = observed_value / interpolated_avg
-                    
-                    scaled_series.loc[mask] = m_series.loc[mask] * scale_factor
-                    
-                
-                # Assign the scaled values to the result DataFrame
-                monthly_df[col] = scaled_series
-                
-                # Preserve original NA values
+                        # Average/sum series: move each value to mid-quarter.
+                        mid_quarter_series = pd.Series(index=pd.DatetimeIndex([]), dtype=float)
+                        for idx, val in valid_series.items():
+                            qtr = pd.Period(idx, freq='Q')
+                            mid_month = qtr.asfreq('M', how='s') + 1
+                            mid_quarter_series[mid_month.to_timestamp()] = val
+                        last_value = mid_quarter_series.iloc[-1]
+                        last_qtr = pd.Period(mid_quarter_series.index[-1], freq='Q')
+                        # Extend with four future mid-quarter points to avoid edge effects.
+                        extended_qtrs = []
+                        for i in range(1, 5):
+                            next_qtr = last_qtr + i
+                            mid_month = next_qtr.asfreq('M', how='s') + 1
+                            extended_qtrs.append(mid_month.to_timestamp())
+                        extended_data = pd.Series([last_value] * 4, index=extended_qtrs)
+                        extended_series = pd.concat([mid_quarter_series, extended_data])
+
+                    x = extended_series.index.map(pd.Timestamp.toordinal)
+                    y = extended_series.values
+                    spline = CubicSpline(x, y, bc_type='not-a-knot')
+
+                    valid_start = pd.Period(valid_series.index[0], freq='Q').start_time
+                    valid_end = pd.Period(valid_series.index[-1], freq='Q').end_time
+                    valid_months = pd.date_range(start=valid_start, end=valid_end, freq='M')
+                    monthly_x = valid_months.map(pd.Timestamp.toordinal)
+                    monthly_y = spline(monthly_x)
+                    m_series = pd.Series(monthly_y, index=valid_months)
+
+                    if agg == 'end':
+                        # Quarter-end series do not require scaling.
+                        monthly_series = m_series
+                    else:
+                        # Scale months so that the mean/sum matches the observed
+                        # quarterly value.
+                        scaled_series = m_series.copy()
+                        month_to_qtr = pd.PeriodIndex(valid_months, freq='Q').end_time.normalize()
+                        for qtr_end in valid_series.index:
+                            qtr_end_normalized = pd.Timestamp(qtr_end).normalize()
+                            mask = month_to_qtr == qtr_end_normalized
+                            if not mask.any():
+                                continue
+                            interpolated_avg = m_series[mask].mean()
+                            observed_value = valid_series.loc[qtr_end]
+                            if np.isclose(interpolated_avg, 0):
+                                scale_factor = 1.0
+                            else:
+                                scale_factor = observed_value / interpolated_avg
+                            scaled_series.loc[mask] = m_series.loc[mask] * scale_factor
+                        monthly_series = scaled_series
+                        if agg in {'sum', 'total'}:
+                            monthly_series = monthly_series / 3.0
+
+                monthly_df[col] = monthly_series
+
                 na_qtrs = q_series[q_series.isnull()].index
                 for qtr in na_qtrs:
+                    # Remove interpolated values for quarters that were NaN in the
+                    # original data to avoid introducing spurious information.
                     qtr_period = pd.Period(qtr, freq='Q')
                     qtr_start = qtr_period.start_time
                     qtr_end = qtr_period.end_time
                     na_months = monthly_df.loc[qtr_start:qtr_end].index
                     monthly_df.loc[na_months, col] = np.nan
-            
-            # Add month and quarter indicators
+
             monthly_df['M'] = pd.DatetimeIndex(monthly_df.index).month
             monthly_df['Q'] = pd.DatetimeIndex(monthly_df.index).quarter
-            
             return monthly_df
 
         return df
@@ -1403,8 +1405,10 @@ class DataManager:
         Returns
         -------
         Dict[str, Dict[str, str]]
-            Dictionary mapping variable codes to their type and description information.
-            Includes codes that exist in either model_mev columns or internal_data columns.
+            Dictionary mapping variable codes to their metadata such as type,
+            description, and any available category or aggregation details.
+            Includes codes that exist in either model_mev columns or
+            internal_data columns.
 
         Example
         -------
@@ -1430,8 +1434,65 @@ class DataManager:
             code: info for code, info in full_var_map.items()
             if code in all_available_codes
         }
-        
+
         return filtered_map
+
+    def interpolated_vars(self, variables: List[Union[str, TSFM]]) -> Optional[pd.DataFrame]:
+        """Identify interpolated variables within ``model_mev``.
+
+        Parameters
+        ----------
+        variables : List[Union[str, TSFM]]
+            Variable names or :class:`TSFM` objects to inspect.
+
+        Returns
+        -------
+        Optional[pandas.DataFrame]
+            DataFrame listing interpolated variable names and their aggregation
+            methods. Returns ``None`` if none of the provided variables are
+            interpolated or if the internal data frequency is quarterly.
+
+        Notes
+        -----
+        The method prints a warning reminding users to verify aggregation
+        methods for interpolated series before returning the DataFrame.
+        """
+
+        # Accept both raw variable names and TSFM objects
+        var_names: List[str] = []
+        for v in variables:
+            if isinstance(v, TSFM):
+                var_names.append(v.var)
+            elif isinstance(v, str):
+                var_names.append(v)
+            else:
+                raise TypeError("Variables must be provided as str or TSFM objects.")
+
+        # Interpolation only occurs for monthly frequency
+        if self.freq != "M":
+            return None
+
+        qtr_cols = set(self._mev_loader.model_mev_qtr.columns)
+        mth_cols = set(self._mev_loader.model_mev_mth.columns)
+        interpolated_cols = {
+            col if col not in mth_cols else f"{col}_Q" for col in qtr_cols
+        }
+        # Retrieve aggregation information from the existing variable map
+        var_map = self.var_map
+        results: List[Dict[str, Any]] = []
+        for name in var_names:
+            if name in interpolated_cols and name in self.model_mev.columns:
+                base = name[:-2] if name.endswith(("_Q", "_M")) else name
+                agg = var_map.get(base, {}).get("aggregation")
+                results.append({"variable": name, "aggregation": agg})
+
+        if results:
+            print("⚠️"
+                "Please review the aggregation method for interpolated variables below. "
+                "Revise the aggregation column in the mev_type.xlsx under folder Technic/support if necessary."
+            )
+            return pd.DataFrame(results)
+        return None
 
     @property
     def in_sample_end(self) -> Optional[pd.Timestamp]:

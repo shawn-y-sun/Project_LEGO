@@ -657,7 +657,23 @@ class ModelSearch:
               f"Test update func: {test_update_func}\n"
               f"Outlier idx     : {outlier_idx}\n")
         print("==================================\n")
+        
+        # Warn about interpolated MEV variables within the candidate pool
+        def _flatten(items: Any) -> List[Union[str, TSFM]]:
+            flat: List[Union[str, TSFM]] = []
+            for it in items:
+                if isinstance(it, (str, TSFM)):
+                    flat.append(it)
+                elif isinstance(it, (list, tuple, set)):
+                    flat.extend(_flatten(it))
+            return flat
 
+        vars_to_check = _flatten(forced + desired_pool)
+        interp_df = self.dm.interpolated_vars(vars_to_check)
+        if interp_df is not None:
+            print(interp_df.to_string(index=False))
+            print("")
+            
         # 2. Build specs
         combos = self.build_spec_combos(forced, desired_pool, max_var_num, max_lag, max_periods, category_limit, exp_sign_map)
         print(f"Built {len(combos)} spec combinations.\n")
