@@ -589,7 +589,181 @@ class WalkForwardTest(ModelStabilityTest):
         }
         
         return pd.DataFrame(perf_data)
-    
+
+    @property
+    def results_df(self) -> Optional[pd.DataFrame]:
+        """Assemble walk-forward stability testing time series in long format.
+
+        Returns
+        -------
+        pd.DataFrame or None
+            DataFrame with columns ['date', 'test_period', 'value_type', 'value']
+            containing actual, in-sample fitted and out-of-sample predicted
+            values for each walk-forward trial. Returns None if no results are
+            available.
+        """
+        wf_models = getattr(self, 'wf_models', None)
+        if not isinstance(wf_models, dict) or len(wf_models) == 0:
+            return None
+
+        def _format_month(dt: pd.Timestamp) -> str:
+            return dt.strftime('%b%Y')
+
+        def _format_period_label(wf_idx: int, wf_model) -> str:
+            is_start = getattr(wf_model.dm._internal_loader, 'in_sample_start', None)
+            is_end = getattr(wf_model.dm, 'in_sample_end', None)
+            if is_start is None or is_end is None:
+                return f"WF{wf_idx}"
+            is_start = pd.to_datetime(is_start)
+            is_end = pd.to_datetime(is_end)
+            freq = getattr(wf_model.dm, 'freq', 'M')
+            if freq == 'M':
+                return f"WF{wf_idx}: {_format_month(is_start)}-{_format_month(is_end)}"
+            elif freq == 'Q':
+                q_start = f"{is_start.year}-Q{(is_start.month - 1)//3 + 1}"
+                q_end = f"{is_end.year}-Q{(is_end.month - 1)//3 + 1}"
+                return f"WF{wf_idx}: {q_start}-{q_end}"
+            return f"WF{wf_idx}: {is_start.date()}-{is_end.date()}"
+
+        blocks: List[pd.DataFrame] = []
+        for i, (wf_name, wf_model) in enumerate(wf_models.items(), start=1):
+            try:
+                label = _format_period_label(i, wf_model)
+
+                actual_series = wf_model.dm.internal_data[wf_model.target]
+                oos_end = wf_model.dm.out_sample_idx.max() if len(getattr(wf_model.dm, 'out_sample_idx', [])) > 0 else wf_model.dm.in_sample_end
+                is_start = getattr(wf_model.dm._internal_loader, 'in_sample_start', None)
+                if is_start is None:
+                    is_start = actual_series.index.min()
+                is_start = pd.to_datetime(is_start)
+                oos_end = pd.to_datetime(oos_end)
+                actual_slice = actual_series[(actual_series.index >= is_start) & (actual_series.index <= oos_end)]
+                if not actual_slice.empty:
+                    blocks.append(pd.DataFrame({
+                        'date': actual_slice.index,
+                        'test_period': label,
+                        'value_type': 'Actual',
+                        'value': actual_slice.values
+                    }))
+
+                y_fitted_in = getattr(wf_model, 'y_fitted_in', pd.Series(dtype=float))
+                if isinstance(y_fitted_in, pd.Series) and not y_fitted_in.empty:
+                    blocks.append(pd.DataFrame({
+                        'date': y_fitted_in.index,
+                        'test_period': label,
+                        'value_type': 'In-Sample',
+                        'value': y_fitted_in.values
+                    }))
+
+                X_out = getattr(wf_model, 'X_out', pd.DataFrame())
+                if isinstance(X_out, pd.DataFrame) and not X_out.empty:
+                    y_pred_out = getattr(wf_model, 'y_pred_out', pd.Series(dtype=float))
+                    if isinstance(y_pred_out, pd.Series) and not y_pred_out.empty:
+                        blocks.append(pd.DataFrame({
+                            'date': y_pred_out.index,
+                            'test_period': label,
+                            'value_type': 'Out-of-Sample',
+                            'value': y_pred_out.values
+                        }))
+            except Exception:
+                continue
+
+        if not blocks:
+            return None
+
+        return pd.concat(blocks, ignore_index=True)
+
+    @property
+    def stats_df(self) -> Optional[pd.DataFrame]:
+        """Compile walk-forward stability testing statistical metrics.
+
+        Returns
+        -------
+        pd.DataFrame or None
+            DataFrame with columns ['trial', 'category', 'value_type', 'value']
+            containing coefficient values, p-values, coefficient percentage changes,
+            adjusted R-squared and RMSE metrics for each walk-forward trial. Returns
+            None if no statistics are available.
+        """
+        wf_models = getattr(self, 'wf_models', None)
+        final_model = getattr(self, 'final_model', None)
+        if not isinstance(wf_models, dict) or len(wf_models) == 0 or final_model is None:
+            return None
+
+        stats_list = []
+        final_params = final_model.params
+
+        for trial_name, wf_model in wf_models.items():
+            try:
+                if hasattr(wf_model, 'params') and wf_model.params is not None:
+                    for var_name, coef_value in wf_model.params.items():
+                        if pd.notnull(coef_value):
+                            stats_list.append({
+                                'trial': trial_name,
+                                'category': 'Coefficient',
+                                'value_type': var_name,
+                                'value': float(coef_value)
+                            })
+
+                if hasattr(wf_model, 'pvalues') and wf_model.pvalues is not None:
+                    for var_name, p_value in wf_model.pvalues.items():
+                        if pd.notnull(p_value):
+                            stats_list.append({
+                                'trial': trial_name,
+                                'category': 'P-value',
+                                'value_type': var_name,
+                                'value': float(p_value)
+                            })
+
+                if hasattr(wf_model, 'params') and wf_model.params is not None:
+                    for var_name, wf_coef in wf_model.params.items():
+                        if var_name in final_params and pd.notnull(wf_coef) and pd.notnull(final_params[var_name]):
+                            final_coef = final_params[var_name]
+                            if final_coef != 0:
+                                pct_change = (wf_coef - final_coef) / final_coef
+                                stats_list.append({
+                                    'trial': trial_name,
+                                    'category': 'Coefficient %Change',
+                                    'value_type': var_name,
+                                    'value': float(pct_change)
+                                })
+
+                if hasattr(wf_model, 'rsquared_adj') and pd.notnull(wf_model.rsquared_adj):
+                    stats_list.append({
+                        'trial': trial_name,
+                        'category': 'adj R-squared',
+                        'value_type': 'In-Sample',
+                        'value': float(wf_model.rsquared_adj)
+                    })
+
+                if hasattr(wf_model, 'in_perf_measures'):
+                    in_measures = wf_model.in_perf_measures
+                    if isinstance(in_measures, pd.Series) and 'RMSE' in in_measures:
+                        stats_list.append({
+                            'trial': trial_name,
+                            'category': 'RMSE',
+                            'value_type': 'In-Sample',
+                            'value': float(in_measures['RMSE'])
+                        })
+
+                if hasattr(wf_model, 'out_perf_measures'):
+                    out_measures = wf_model.out_perf_measures
+                    if isinstance(out_measures, pd.Series) and 'RMSE' in out_measures:
+                        stats_list.append({
+                            'trial': trial_name,
+                            'category': 'RMSE',
+                            'value_type': 'Out-of-Sample',
+                            'value': float(out_measures['RMSE'])
+                        })
+
+            except Exception:
+                continue
+
+        if not stats_list:
+            return None
+
+        return pd.DataFrame(stats_list)
+
     def plot(self, figsize: tuple = (15, 10), save_path: str = None, show: bool = True) -> None:
         """
         Plot model performance for each Walk Forward model.
