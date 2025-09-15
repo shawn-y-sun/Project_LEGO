@@ -106,7 +106,7 @@ def ols_model_perf_plot(
         # Find expected frequency from the original data
         if len(y.index) > 1:
             # Infer frequency from original data
-            freq = pd.infer_freq(y.index)
+            freq = None
             if freq is None:
                 # Fallback: calculate median difference
                 diffs = y.index.to_series().diff().dropna()
@@ -394,7 +394,7 @@ def ols_plot_perf_set(
         if len(y_in) > 0:
             fitted_idx_sorted = y_in.index.sort_values()
             if len(rpt.model.y.index) > 1:
-                freq = pd.infer_freq(rpt.model.y.index)
+                freq = None
                 if freq is None:
                     diffs = rpt.model.y.index.to_series().diff().dropna()
                     if len(diffs) > 0:
