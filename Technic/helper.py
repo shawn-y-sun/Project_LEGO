@@ -71,7 +71,11 @@ def het_white(resid, exog):
     i0, i1 = np.triu_indices(nvars0)
     exog = x[:, i0] * x[:, i1]
     nobs, nvars = exog.shape
-    assert nvars == nvars0 * (nvars0 - 1) / 2. + nvars0
+    # Using integer arithmetic to avoid potential floating point precision issues
+    # when verifying the number of generated exogenous variables.  The expected
+    # number of columns equals nvars0 * (nvars0 + 1) / 2 (including squares and
+    # interaction terms).
+    assert nvars == nvars0 * (nvars0 + 1) // 2
     resols = OLS(y ** 2, exog).fit()
     fval = resols.fvalue
     fpval = resols.f_pvalue
