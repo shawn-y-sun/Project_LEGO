@@ -1,6 +1,8 @@
 # =============================================================================
 # module: modeltype.py
 # Purpose: Model type classes for handling different modeling approaches and conversions
+# Key Types/Classes: ModelType, TimeModelType, Growth, Change, RateLevel, BalanceLevel, Ratio
+# Key Functions: None
 # Dependencies: pandas, numpy, abc
 # =============================================================================
 
@@ -110,7 +112,8 @@ class TimeModelType(ModelType):
     def predict_base(
         self,
         y_pred: pd.Series,
-        p0: pd.Timestamp
+        p0: pd.Timestamp,
+        anchor: bool = False
     ) -> pd.Series:
         """
         Convert predicted target values back to base variable of interest.
@@ -121,6 +124,9 @@ class TimeModelType(ModelType):
             Series of predicted target values from the model
         p0 : pd.Timestamp
             Date index to use as the starting point for conversion
+        anchor : bool, default False
+            If True, use the actual base from the previous period for each
+            prediction rather than the recursively predicted base.
             
         Returns
         -------
@@ -199,7 +205,8 @@ class Growth(TimeModelType):
     def predict_base(
         self,
         y_pred: pd.Series,
-        p0: pd.Timestamp
+        p0: pd.Timestamp,
+        anchor: bool = False
     ) -> pd.Series:
         """
         Convert growth rate predictions to level predictions using compound growth.
@@ -210,12 +217,20 @@ class Growth(TimeModelType):
             Series of predicted growth rates
         p0 : pd.Timestamp
             Starting date for conversion (uses level at this date)
+        anchor : bool, default False
+            If True, use the actual base from the previous period for each
+            prediction rather than recursively compounding from predictions.
             
         Returns
         -------
         pd.Series
             Series of predicted levels for the base variable
-            
+
+        Notes
+        -----
+        When ``anchor=True``, the predicted base for period ``t`` equals the
+        actual base at ``t-1`` multiplied by ``(1 + y_pred[t])``.
+
         Example
         -------
         >>> # Growth rates: 2%, 2.5%, 3%
@@ -227,23 +242,35 @@ class Growth(TimeModelType):
         """
         if y_pred.empty:
             return pd.Series([], name=self.target_base)
-            
-        # Get the jumpoff level from base variable
+
+        # Get base variable data
         base_data = self.dm.internal_data[self.target_base]
-        
+
+        if anchor:
+            # Use actual base from previous period for each prediction
+            prev_actual = base_data.shift(1).reindex(y_pred.index)
+            if prev_actual.isna().any():
+                missing = prev_actual[prev_actual.isna()].index
+                raise ValueError(
+                    f"Actual base variable '{self.target_base}' missing for dates: {missing}"
+                )
+            result = prev_actual * (1 + y_pred)
+            result.name = self.target_base
+            return result
+
         if p0 not in base_data.index:
             raise ValueError(f"P0 date {p0} not found in base variable data")
-            
+
         jumpoff_level = base_data.loc[p0]
-        
+
         # Apply compound growth formula
         result = pd.Series(index=y_pred.index, name=self.target_base, dtype=float)
         current_level = jumpoff_level
-        
+
         for date in y_pred.index:
             current_level = current_level * (1 + y_pred.loc[date])
             result.loc[date] = current_level
-            
+
         return result
 
 
@@ -301,7 +328,8 @@ class Change(TimeModelType):
     def predict_base(
         self,
         y_pred: pd.Series,
-        p0: pd.Timestamp
+        p0: pd.Timestamp,
+        anchor: bool = False
     ) -> pd.Series:
         """
         Convert change predictions to level predictions using cumulative addition.
@@ -312,12 +340,20 @@ class Change(TimeModelType):
             Series of predicted changes
         p0 : pd.Timestamp
             Starting date for conversion (uses level at this date)
+        anchor : bool, default False
+            If True, use the actual base from the previous period for each
+            prediction rather than recursively summing from predictions.
             
         Returns
         -------
         pd.Series
             Series of predicted levels for the base variable
-            
+
+        Notes
+        -----
+        When ``anchor=True``, the predicted base for period ``t`` equals the
+        actual base at ``t-1`` plus ``y_pred[t]``.
+
         Example
         -------
         >>> # Changes: +100, +150, -50
@@ -329,23 +365,34 @@ class Change(TimeModelType):
         """
         if y_pred.empty:
             return pd.Series([], name=self.target_base)
-            
-        # Get the jumpoff level from base variable
+
+        # Get base variable data
         base_data = self.dm.internal_data[self.target_base]
-        
+
+        if anchor:
+            prev_actual = base_data.shift(1).reindex(y_pred.index)
+            if prev_actual.isna().any():
+                missing = prev_actual[prev_actual.isna()].index
+                raise ValueError(
+                    f"Actual base variable '{self.target_base}' missing for dates: {missing}"
+                )
+            result = prev_actual + y_pred
+            result.name = self.target_base
+            return result
+
         if p0 not in base_data.index:
             raise ValueError(f"P0 date {p0} not found in base variable data")
-            
+
         jumpoff_level = base_data.loc[p0]
-        
+
         # Apply cumulative change formula
         result = pd.Series(index=y_pred.index, name=self.target_base, dtype=float)
         current_level = jumpoff_level
-        
+
         for date in y_pred.index:
             current_level = current_level + y_pred.loc[date]
             result.loc[date] = current_level
-            
+
         return result
 
 
@@ -398,7 +445,8 @@ class RateLevel(TimeModelType):
     def predict_base(
         self,
         y_pred: pd.Series,
-        p0: pd.Timestamp
+        p0: pd.Timestamp,
+        anchor: bool = False
     ) -> pd.Series:
         """
         Convert rate predictions using difference approach for comparability.
@@ -409,6 +457,8 @@ class RateLevel(TimeModelType):
             Series of predicted rates
         p0 : pd.Timestamp
             Starting date for conversion (uses rate at this date)
+        anchor : bool, default False
+            Present for interface consistency; not used for RateLevel models.
             
         Returns
         -------
@@ -504,7 +554,8 @@ class BalanceLevel(TimeModelType):
     def predict_base(
         self,
         y_pred: pd.Series,
-        p0: pd.Timestamp
+        p0: pd.Timestamp,
+        anchor: bool = False
     ) -> pd.Series:
         """
         Convert balance predictions using growth rate approach for comparability.
@@ -515,6 +566,8 @@ class BalanceLevel(TimeModelType):
             Series of predicted balances
         p0 : pd.Timestamp
             Starting date for conversion (uses balance at this date)
+        anchor : bool, default False
+            Present for interface consistency; not used for BalanceLevel models.
             
         Returns
         -------
@@ -629,7 +682,8 @@ class Ratio(TimeModelType):
     def predict_base(
         self,
         y_pred: pd.Series,
-        p0: pd.Timestamp
+        p0: pd.Timestamp,
+        anchor: bool = False
     ) -> pd.Series:
         """
         Convert ratio predictions to level predictions using exposure variable.
@@ -641,6 +695,8 @@ class Ratio(TimeModelType):
         p0 : pd.Timestamp
             Starting date for conversion (not directly used for jumpoff,
             but used to validate date availability)
+        anchor : bool, default False
+            Present for interface consistency; not used for Ratio models.
             
         Returns
         -------
