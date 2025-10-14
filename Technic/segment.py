@@ -610,8 +610,8 @@ class Segment:
             date_range=date_range
         )
         
-        # Adjust max_periods for quarterly data if needed
-        if self.dm.freq == 'Q' and max_periods <= 4:
+        # Adjust max_periods for quarterly data when user requests excessive periods
+        if self.dm.freq == 'Q' and max_periods > 4:
             max_periods = 4
         
         # Generate all possible transformations for each variable
