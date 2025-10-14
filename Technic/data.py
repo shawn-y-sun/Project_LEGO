@@ -1379,13 +1379,27 @@ class DataManager:
         for scen_set, scen_mev_map in scen_mevs_dict.items():
             for scen_name, scen_mev in scen_mev_map.items():
                 scen_internal = scen_internal_dict.get(scen_set, {}).get(scen_name)
-                if scen_internal is None:
+                missing_internal = scen_internal is None
+
+                # Provide a fallback so MEV-only feature functions still execute.
+                if missing_internal:
                     warnings.warn(
-                        f"apply_to_all(): No scenario internal data for {scen_set}/{scen_name}; skipping this scenario.",
+                        (
+                            "apply_to_all(): No scenario internal data for "
+                            f"{scen_set}/{scen_name}; using main internal data as context. "
+                            "Internal scenario updates will be skipped."
+                        ),
                         UserWarning
                     )
-                    continue
-                scen_ret = fn(scen_mev.copy(), scen_internal.copy())
+                    internal_for_fn = main_internal_df
+                else:
+                    internal_for_fn = scen_internal
+
+                if internal_for_fn is None:
+                    # Create an empty placeholder DataFrame to satisfy function signature.
+                    internal_for_fn = pd.DataFrame(index=scen_mev.index)
+
+                scen_ret = fn(scen_mev.copy(), internal_for_fn.copy())
                 if not (isinstance(scen_ret, tuple) and len(scen_ret) == 2 and isinstance(scen_ret[0], pd.DataFrame) and isinstance(scen_ret[1], pd.DataFrame)):
                     raise TypeError(
                         f"apply_to_all(): fn must return (mev_df, internal_df) for scenarios as well; got {type(scen_ret)}"
@@ -1393,6 +1407,16 @@ class DataManager:
                 scen_mev_ret, scen_in_ret = scen_ret
                 # Replace caches for scenario data
                 self._scen_mevs_cache[scen_set][scen_name] = scen_mev_ret.copy()
+                if missing_internal:
+                    if not scen_in_ret.empty:
+                        warnings.warn(
+                            (
+                                "apply_to_all(): Scenario internal data for "
+                                f"{scen_set}/{scen_name} is unavailable; returned internal updates were ignored."
+                            ),
+                            UserWarning
+                        )
+                    continue
                 self._scen_internal_data_cache[scen_set][scen_name] = scen_in_ret.copy()
 
     @property
