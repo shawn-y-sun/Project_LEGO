@@ -1,6 +1,8 @@
 # =============================================================================
 # module: model.py
 # Purpose: Define base and OLS regression models with testing and reporting hooks
+# Key Types/Classes: ModelBase, OLS, FixedOLS
+# Key Functions: train, predict, y_base_fitted_in, y_base_pred_out
 # Dependencies: pandas, numpy, statsmodels, typing, .testset.TestSet, .report.OLS_ModelReport
 # =============================================================================
 
@@ -686,7 +688,7 @@ class ModelBase(ABC):
         Get in-sample fitted base predictions.
         
         For level models (RateLevel, BalanceLevel), directly returns y_fitted_in.
-        For other models, uses the base predictor with ``reset=True`` to convert
+        For other models, uses the base predictor with ``anchor=True`` to convert
         predictions using actual base values from the previous period.
         
         Returns
@@ -715,7 +717,7 @@ class ModelBase(ABC):
         
         try:
             base_predictions = self.base_predictor.predict_base(
-                self.y_fitted_in, self.dm.p0, reset=True
+                self.y_fitted_in, self.dm.p0, anchor=True
             )
             # Exclude p0 from the result
             if self.dm.p0 in base_predictions.index:
@@ -731,7 +733,7 @@ class ModelBase(ABC):
         Get out-of-sample base predictions.
         
         For level models (RateLevel, BalanceLevel), directly returns y_pred_out.
-        For other models, uses the base predictor with ``reset=True`` to convert
+        For other models, uses the base predictor with ``anchor=True`` to convert
         predictions using actual base values from the previous period.
         
         Returns
@@ -763,7 +765,7 @@ class ModelBase(ABC):
         
         try:
             base_predictions = self.base_predictor.predict_base(
-                y_pred_out, self.dm.out_p0, reset=True
+                y_pred_out, self.dm.out_p0, anchor=True
             )
             # Exclude out_p0 from the result
             if self.dm.out_p0 in base_predictions.index:
