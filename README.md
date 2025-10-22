@@ -5,7 +5,7 @@
 ![Project LEGO](https://img.shields.io/badge/Project-LEGO-blue)
 ![Python](https://img.shields.io/badge/Python-3.7%2B-blue)
 ![License](https://img.shields.io/badge/License-Proprietary-black)
-![Version](https://img.shields.io/badge/Version-Beta%20v2.0-orange)
+![Version](https://img.shields.io/badge/Version-Beta%20v2.3-orange)
 
 **Build models like LEGO: a modular Python framework for automated search, rigorous evaluation, and scenario forecasting**
 
