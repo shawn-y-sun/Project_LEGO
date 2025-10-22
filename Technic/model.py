@@ -682,36 +682,73 @@ class ModelBase(ABC):
         
         return y_exposure_full
 
+    def _align_predictions_with_outliers(
+        self,
+        predictions: pd.Series,
+        target_index: pd.Index
+    ) -> pd.Series:
+        """
+        Align predictions to a target index and mark outliers as missing.
+
+        Parameters
+        ----------
+        predictions : pd.Series
+            Base prediction series generated from fitted values.
+        target_index : pd.Index
+            Index that the predictions should align to (e.g., in-sample dates).
+
+        Returns
+        -------
+        pd.Series
+            Predictions aligned to ``target_index`` with ``NaN`` inserted for
+            indices flagged as outliers.
+        """
+        if predictions.empty:
+            return pd.Series(dtype=float)
+
+        aligned_predictions = predictions.reindex(target_index)
+
+        if self.outlier_idx:
+            # Only set NaN for outlier indices that exist in the aligned index.
+            existing_outliers = [idx for idx in self.outlier_idx if idx in aligned_predictions.index]
+            if existing_outliers:
+                aligned_predictions.loc[existing_outliers] = np.nan
+
+        return aligned_predictions
+
     @property
-    def y_base_fitted_in(self) -> Optional[pd.Series]:
+    def y_base_fitted_in(self) -> pd.Series:
         """
         Get in-sample fitted base predictions.
-        
+
         For level models (RateLevel, BalanceLevel), directly returns y_fitted_in.
         For other models, uses the base predictor with ``anchor=True`` to convert
         predictions using actual base values from the previous period.
         
         Returns
         -------
-        Optional[pd.Series]
-            In-sample fitted base predictions excluding p0, None if there are outliers 
-            or no base predictor available.
+        pd.Series
+            In-sample fitted base predictions aligned to ``dm.in_sample_idx`` with
+            ``NaN`` values at ``outlier_idx`` positions. Returns an empty Series if
+            predictions are not available.
         """
-        # Return None if there are outliers (outlier_idx is not None and not empty)
-        if self.outlier_idx:
-            return None
-            
         # For level models (RateLevel, BalanceLevel), return fitted values directly
         if self.model_type is not None:
             if self.model_type in {RateLevel, BalanceLevel}:
                 if not hasattr(self, 'y_fitted_in') or self.y_fitted_in is None:
                     return pd.Series(dtype=float)
-                return self.y_fitted_in
-        
+                y_fitted_in = self.y_fitted_in
+                if y_fitted_in.empty:
+                    return pd.Series(dtype=float)
+                return self._align_predictions_with_outliers(
+                    y_fitted_in,
+                    self.dm.in_sample_idx
+                )
+
         # For other models, use base predictor
         if self.base_predictor is None or not hasattr(self, 'y_fitted_in') or self.y_fitted_in is None:
             return pd.Series(dtype=float)
-        
+
         if self.dm.p0 is None:
             return pd.Series(dtype=float)
         
@@ -722,42 +759,47 @@ class ModelBase(ABC):
             # Exclude p0 from the result
             if self.dm.p0 in base_predictions.index:
                 base_predictions = base_predictions.drop(self.dm.p0)
-            return base_predictions
+            if base_predictions.empty:
+                return pd.Series(dtype=float)
+            return self._align_predictions_with_outliers(
+                base_predictions,
+                self.dm.in_sample_idx
+            )
         except Exception:
             # Return empty series if conversion fails
             return pd.Series(dtype=float)
 
-    @property 
-    def y_base_pred_out(self) -> Optional[pd.Series]:
+    @property
+    def y_base_pred_out(self) -> pd.Series:
         """
         Get out-of-sample base predictions.
-        
+
         For level models (RateLevel, BalanceLevel), directly returns y_pred_out.
         For other models, uses the base predictor with ``anchor=True`` to convert
         predictions using actual base values from the previous period.
         
         Returns
         -------
-        Optional[pd.Series]
-            Out-of-sample base predictions excluding out_p0, None if there are outliers
-            or no base predictor available.
+        pd.Series
+            Out-of-sample base predictions aligned to ``dm.out_sample_idx`` with
+            ``NaN`` values at ``outlier_idx`` positions. Returns an empty Series if
+            predictions are not available.
         """
-        # Return None if there are outliers (outlier_idx is not None and not empty)
-        if self.outlier_idx:
-            return None
-            
         # For level models (RateLevel, BalanceLevel), return predicted values directly
         if self.model_type is not None:
             if self.model_type in {RateLevel, BalanceLevel}:
                 y_pred_out = self.y_pred_out
                 if y_pred_out.empty:
                     return pd.Series(dtype=float)
-                return y_pred_out
-        
+                return self._align_predictions_with_outliers(
+                    y_pred_out,
+                    self.dm.out_sample_idx
+                )
+
         # For other models, use base predictor
         if self.base_predictor is None or self.dm.out_p0 is None:
             return pd.Series(dtype=float)
-        
+
         # Get out-of-sample predictions
         y_pred_out = self.y_pred_out
         if y_pred_out.empty:
@@ -770,7 +812,12 @@ class ModelBase(ABC):
             # Exclude out_p0 from the result
             if self.dm.out_p0 in base_predictions.index:
                 base_predictions = base_predictions.drop(self.dm.out_p0)
-            return base_predictions
+            if base_predictions.empty:
+                return pd.Series(dtype=float)
+            return self._align_predictions_with_outliers(
+                base_predictions,
+                self.dm.out_sample_idx
+            )
         except Exception:
             # Return empty series if conversion fails
             return pd.Series(dtype=float)
