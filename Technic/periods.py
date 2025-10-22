@@ -85,7 +85,8 @@ def resolve_periods_argument(
     TypeError
         If provided sequences contain non-integers or unsupported types.
     ValueError
-        If any provided integer is less than one.
+        If ``periods`` and ``legacy_max_periods`` are provided together or if
+        any provided integer is less than one.
 
     Examples
     --------
@@ -94,6 +95,10 @@ def resolve_periods_argument(
     >>> resolve_periods_argument('Q', None)
     >>> resolve_periods_argument('Q', None, legacy_max_periods=2, ensure_quarterly_floor=True)
     [1, 2, 3, 4]
+    >>> resolve_periods_argument('M', [1], legacy_max_periods=3)
+    Traceback (most recent call last):
+    ...
+    ValueError: Cannot supply both 'periods' and deprecated 'max_periods'.
     """
 
     use_legacy = legacy_max_periods is not None
