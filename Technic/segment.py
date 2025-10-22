@@ -126,7 +126,7 @@ class Segment:
         self,
         cm_id: str,
         specs: Any,
-        sample: str = 'both'
+        sample: str = 'in'
     ) -> CM:
         """
         Instantiate and fit a Candidate Model (CM) with given specifications.
@@ -145,11 +145,11 @@ class Segment:
             - List of variable names
             - Transformation specifications
             - Lag specifications
-        sample : str, default 'both'
+        sample : str, default 'in'
             Which sample to build the model on:
-            - 'in': in-sample only
+            - 'in': in-sample only (default)
             - 'full': full sample
-            - 'both': both in-sample and full sample (default)
+            - 'both': both in-sample and full sample
 
         Returns
         -------
@@ -161,8 +161,7 @@ class Segment:
         >>> # Build a simple model with two variables
         >>> cm = segment.build_cm(
         ...     cm_id="model_1",
-        ...     specs=["gdp_lag1", "inflation"],
-        ...     sample="both"
+        ...     specs=["gdp_lag1", "inflation"]
         ... )
         >>> 
         >>> # Build a model with transformations
