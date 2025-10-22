@@ -244,26 +244,27 @@ class ModelBase(ABC):
     @property
     def y_full(self) -> pd.Series:
         """
-        Get full-sample target, extracting from DataManager if not cached.
-        
+        Get full-sample target, masking configured outliers with ``NaN``.
+
         Returns
         -------
         pd.Series
-            Full-sample target series.
+            Full-sample target series with outlier periods set to ``NaN`` so they can
+            be visualised as gaps.
         """
         if self._y_cache is not None:
-            return self._y_cache
-        
+            return self._apply_outlier_handling(self._y_cache, strict=True, drop=False)
+
         # Get the union of in-sample and out-of-sample indices
         idx = self.dm.in_sample_idx.union(self.dm.out_sample_idx)
-        
+
         # Extract target
         y_full = self.dm.internal_data[self.target].copy()
-        
+
         # Align to index
         y_full = y_full.reindex(idx).astype(float)
-        
-        return y_full
+
+        return self._apply_outlier_handling(y_full, strict=True, drop=False)
 
     @property
     def X_in(self) -> pd.DataFrame:
@@ -276,54 +277,28 @@ class ModelBase(ABC):
             In-sample feature matrix with outliers removed.
         """
         X_in = self.X_full.loc[self.dm.in_sample_idx].copy()
-        
+
         # Remove outliers if specified
         if self.outlier_idx:
-            # Convert outlier_idx to match X_in.index dtype
-            if is_datetime64_any_dtype(X_in.index):
-                converted_idx = pd.to_datetime(self.outlier_idx)
-            else:
-                converted_idx = self.outlier_idx
+            outliers = self._normalize_outlier_index(X_in.index, strict=True)
+            if outliers:
+                X_in = X_in.drop(index=outliers)
 
-            # Check whether every converted index exists in X_in.index
-            missing = [i for i in converted_idx if i not in X_in.index]
-            if missing:
-                raise ValueError(f"Outlier indices {missing} not in in-sample period.")
-
-            # Drop those rows from X_in
-            X_in = X_in.drop(index=converted_idx)
-        
         return X_in
 
     @property
     def y_in(self) -> pd.Series:
         """
         Get in-sample target with outliers removed.
-        
+
         Returns
         -------
         pd.Series
             In-sample target series with outliers removed.
         """
         y_in = self.y_full.loc[self.dm.in_sample_idx].copy()
-        
-        # Remove outliers if specified
-        if self.outlier_idx:
-            # Convert outlier_idx to match y_in.index dtype
-            if is_datetime64_any_dtype(y_in.index):
-                converted_idx = pd.to_datetime(self.outlier_idx)
-            else:
-                converted_idx = self.outlier_idx
 
-            # Check whether every converted index exists in y_in.index
-            missing = [i for i in converted_idx if i not in y_in.index]
-            if missing:
-                raise ValueError(f"Outlier indices {missing} not in in-sample period.")
-
-            # Drop those rows from y_in
-            y_in = y_in.drop(index=converted_idx)
-        
-        return y_in
+        return self._apply_outlier_handling(y_in, strict=True, drop=True)
 
     @property
     def X_out(self) -> pd.DataFrame:
@@ -360,47 +335,64 @@ class ModelBase(ABC):
     @property
     def y_out(self) -> pd.Series:
         """
-        Get out-of-sample target.
-        
+        Get out-of-sample target with outliers masked if present.
+
         Returns
         -------
         pd.Series
-            Out-of-sample target series.
+            Out-of-sample target series with any shared outlier periods set to
+            ``NaN``.
         """
         if self._y_out_cache is not None:
-            return self._y_out_cache
-        
-        return self.y_full.loc[self.dm.out_sample_idx].copy()
+            return self._apply_outlier_handling(self._y_out_cache, strict=False, drop=False)
+
+        y_out = self.y_full.loc[self.dm.out_sample_idx].copy()
+
+        return self._apply_outlier_handling(y_out, strict=False, drop=False)
 
     @property
     def X(self) -> pd.DataFrame:
         """
         Get features based on sample setting.
-        
+
         Returns
         -------
         pd.DataFrame
-            Feature matrix for the specified sample.
+            Feature matrix for the specified sample. When ``sample='full'``, any
+            configured outlier rows are removed to keep the design matrix aligned
+            with the target series used for fitting.
         """
         if self.sample == 'in':
             return self.X_in
-        else:  # sample == 'full'
-            return self.X_full
+
+        X_full = self.X_full
+        if self.outlier_idx:
+            outliers = self._normalize_outlier_index(X_full.index, strict=True)
+            if outliers:
+                X_full = X_full.drop(index=outliers)
+
+        return X_full
 
     @property
     def y(self) -> pd.Series:
         """
         Get target based on sample setting.
-        
+
         Returns
         -------
         pd.Series
-            Target series for the specified sample.
+            Target series for the specified sample. When ``sample='full'``, outlier
+            indices are dropped from the returned data used for estimation while the
+            public ``y_full`` accessor retains ``NaN`` placeholders for plotting.
         """
         if self.sample == 'in':
             return self.y_in
-        else:  # sample == 'full'
-            return self.y_full
+
+        y_full = self.y_full
+        if self.outlier_idx:
+            return self._apply_outlier_handling(y_full, strict=True, drop=True)
+
+        return y_full
 
     @abstractmethod
     def fit(self) -> 'ModelBase':
@@ -567,7 +559,7 @@ class ModelBase(ABC):
     def y_pred_out(self) -> pd.Series:
         """
         Out-of-sample predictions generated by calling predict on X_out.
-        
+
         When has_lookback_var is True, uses rolling_predict to generate predictions
         that account for conditional variable effects.
 
@@ -575,12 +567,12 @@ class ModelBase(ABC):
         """
         if self.X_out.empty:
             return pd.Series(dtype=float)
-        
+
         # If model has lookback variables, use rolling_predict
         if self.has_lookback_var:
             # Get out-of-sample time frame
             oos_time_frame = (str(self.dm.out_sample_idx.min()), str(self.dm.out_sample_idx.max()))
-            
+
             # Use rolling_predict to get predictions
             y_pred, _ = self.rolling_predict(
                 df_internal=self.dm.internal_data,
@@ -589,22 +581,121 @@ class ModelBase(ABC):
                 time_frame=oos_time_frame
             )
             return y_pred
-        
+
         return self.predict(self.X_out)
+
+    def _normalize_outlier_index(self, target_index: pd.Index, *, strict: bool = True) -> List[Any]:
+        """
+        Convert configured outlier labels so they align with ``target_index``.
+
+        Parameters
+        ----------
+        target_index : pd.Index
+            Index whose dtype governs how ``outlier_idx`` should be interpreted.
+        strict : bool, default True
+            If ``True``, raise a :class:`ValueError` when an outlier label is missing
+            from ``target_index``. When ``False``, silently ignore missing labels.
+
+        Returns
+        -------
+        List[Any]
+            Converted outlier labels that are present in ``target_index``.
+
+        Raises
+        ------
+        ValueError
+            If ``strict`` is ``True`` and an outlier label cannot be located in
+            ``target_index``.
+
+        Examples
+        --------
+        >>> idx = pd.Index(pd.date_range("2020-01-01", periods=3, freq="M"))
+        >>> self.outlier_idx = ["2020-02-29"]
+        >>> self._normalize_outlier_index(idx)
+        [Timestamp('2020-02-29 00:00:00')]
+        """
+        if not self.outlier_idx:
+            return []
+
+        if is_datetime64_any_dtype(target_index):
+            converted_idx = pd.to_datetime(self.outlier_idx).tolist()
+        else:
+            converted_idx = list(self.outlier_idx)
+
+        existing_outliers = [idx for idx in converted_idx if idx in target_index]
+
+        if strict:
+            missing = [idx for idx in converted_idx if idx not in target_index]
+            if missing:
+                raise ValueError(f"Outlier indices {missing} not in the provided index.")
+
+        return existing_outliers
+
+    def _apply_outlier_handling(
+        self,
+        series: pd.Series,
+        *,
+        strict: bool,
+        drop: bool = False
+    ) -> pd.Series:
+        """
+        Remove or mask configured outliers within a series.
+
+        Parameters
+        ----------
+        series : pd.Series
+            Series to adjust for stored ``outlier_idx`` values.
+        strict : bool
+            If ``True``, missing outlier labels raise :class:`ValueError`.
+        drop : bool, default False
+            When ``True`` observations are removed; otherwise they are set to
+            ``NaN`` to preserve alignment (useful for plotting gaps).
+
+        Returns
+        -------
+        pd.Series
+            Adjusted series reflecting the configured outlier treatment.
+
+        Examples
+        --------
+        >>> s = pd.Series([1.0, 2.0, 3.0], index=pd.date_range("2020-01-01", periods=3, freq="M"))
+        >>> self.outlier_idx = ["2020-02-29"]
+        >>> self._apply_outlier_handling(s, strict=True)
+        2020-01-31    1.0
+        2020-02-29    NaN
+        2020-03-31    3.0
+        dtype: float64
+        """
+        if series.empty or not self.outlier_idx:
+            return series
+
+        target_index = series.index
+        outliers = self._normalize_outlier_index(target_index, strict=strict)
+
+        if not outliers:
+            return series
+
+        if drop:
+            return series.drop(index=outliers)
+
+        adjusted = series.copy()
+        adjusted.loc[outliers] = np.nan
+        return adjusted
 
     @property
     def y_base_full(self) -> pd.Series:
         """
-        Get full-sample target base series.
-        
+        Get full-sample target base series with outliers masked.
+
         Returns
         -------
         pd.Series
-            Full-sample target base series including p0, in-sample, and out-sample indices.
+            Full-sample target base series including p0, in-sample, and out-sample
+            indices with outlier positions set to ``NaN``.
         """
         if self.target_base is None:
             return pd.Series(dtype=float)
-        
+
         # Get the union of p0, in-sample and out-of-sample indices
         idx = self.dm.in_sample_idx.union(self.dm.out_sample_idx)
         if self.dm.p0 is not None:
@@ -612,11 +703,11 @@ class ModelBase(ABC):
         
         # Extract target base
         y_base_full = self.dm.internal_data[self.target_base].copy()
-        
+
         # Align to index
         y_base_full = y_base_full.reindex(idx).astype(float)
-        
-        return y_base_full
+
+        return self._apply_outlier_handling(y_base_full, strict=True, drop=False)
 
     @property
     def y_base_in(self) -> pd.Series:
@@ -661,26 +752,27 @@ class ModelBase(ABC):
     @property
     def y_exposure_full(self) -> pd.Series:
         """
-        Get full-sample target exposure series.
-        
+        Get full-sample target exposure series with outliers masked.
+
         Returns
         -------
         pd.Series
-            Full-sample target exposure series for in-sample and out-sample indices.
+            Full-sample target exposure series for in-sample and out-sample indices
+            with outlier periods set to ``NaN``.
         """
         if self.target_exposure is None:
             return pd.Series(dtype=float)
-        
+
         # Get the union of in-sample and out-of-sample indices
         idx = self.dm.in_sample_idx.union(self.dm.out_sample_idx)
         
         # Extract target exposure
         y_exposure_full = self.dm.internal_data[self.target_exposure].copy()
-        
+
         # Align to index
         y_exposure_full = y_exposure_full.reindex(idx).astype(float)
-        
-        return y_exposure_full
+
+        return self._apply_outlier_handling(y_exposure_full, strict=True, drop=False)
 
     def _align_predictions_with_outliers(
         self,
