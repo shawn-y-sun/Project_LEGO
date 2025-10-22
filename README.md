@@ -194,7 +194,7 @@ exp_sign_map = {'CAGOV12M': 1, 'CAONR': -1}
 seg.search_cms(
     desired_pool=desired_pool,
     max_var_num=3,
-    max_periods=2,
+    periods=[1, 2],
     exp_sign_map=exp_sign_map,
     top_n=10
 )
