@@ -8,53 +8,152 @@
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, List
 import matplotlib.pyplot as plt
 import statsmodels.api as sm
 from statsmodels.stats.stattools import jarque_bera
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 
-def _infer_typical_gap(sorted_index: pd.Index) -> Union[pd.Timedelta, float]:
+def _split_series_by_nan(series: Optional[pd.Series]) -> List[pd.Series]:
     """
-    Estimate the typical spacing between consecutive index values.
+    Break a series into contiguous non-``NaN`` segments.
 
     Parameters
     ----------
-    sorted_index : pd.Index
-        Index values sorted in ascending order.
+    series : pd.Series, optional
+        Series potentially containing ``NaN`` values that signal breaks.
 
     Returns
     -------
-    Union[pd.Timedelta, float]
-        Median difference between consecutive index entries. Time-based indexes
-        yield ``pd.Timedelta`` values, whereas numeric indexes return floats.
+    list of pd.Series
+        Ordered list of contiguous segments with missing values removed. The
+        return value is empty when ``series`` is ``None`` or contains only
+        ``NaN`` values.
+
+    Examples
+    --------
+    >>> s = pd.Series([1.0, np.nan, 2.0])
+    >>> [seg.tolist() for seg in _split_series_by_nan(s)]
+    [[1.0], [2.0]]
     """
-    if len(sorted_index) <= 1:
-        if isinstance(sorted_index, pd.DatetimeIndex):
-            return pd.Timedelta(days=30)
-        return 1.0
+    if series is None:
+        return []
 
-    diffs = sorted_index.to_series().diff().dropna()
-    if diffs.empty:
-        if isinstance(sorted_index, pd.DatetimeIndex):
-            return pd.Timedelta(days=30)
-        return 1.0
+    if series.empty:
+        return []
 
-    median_diff = diffs.median()
-    if pd.isna(median_diff):
-        if isinstance(sorted_index, pd.DatetimeIndex):
-            return pd.Timedelta(days=30)
-        return 1.0
+    sorted_series = series.sort_index()
+    segments: List[pd.Series] = []
+    current_index: List[Any] = []
 
-    if isinstance(median_diff, np.timedelta64):
-        return pd.to_timedelta(median_diff)
+    for idx, value in sorted_series.items():
+        if pd.isna(value):
+            if current_index:
+                segments.append(sorted_series.loc[current_index])
+                current_index = []
+            continue
 
-    if isinstance(median_diff, pd.Timedelta):
-        return median_diff
+        current_index.append(idx)
 
-    return float(median_diff)
+    if current_index:
+        segments.append(sorted_series.loc[current_index])
 
+    return segments
+
+
+def _plot_segmented_series(
+    ax: plt.Axes,
+    series: Optional[pd.Series],
+    *,
+    color: str,
+    label: Optional[str] = None,
+    linewidth: float = 2.0,
+    marker: str = "o",
+    markersize: Optional[float] = None,
+    zorder: Optional[int] = None,
+    line_kwargs: Optional[Dict[str, Any]] = None,
+    marker_kwargs: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Plot a series while respecting gaps induced by ``NaN`` values.
+
+    Single-point segments are rendered as markers so they remain visible even
+    when surrounded by outlier-induced gaps. Multi-point segments retain the
+    standard line appearance and reuse the supplied linewidth.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Target axis for rendering the series.
+    series : pd.Series, optional
+        Series to plot. ``NaN`` values delimit gaps.
+    color : str
+        Line and marker color to apply.
+    label : str, optional
+        Legend label for the first contiguous segment.
+    linewidth : float, default 2.0
+        Width applied to line segments and marker edges.
+    marker : str, default 'o'
+        Matplotlib marker style for single-point segments.
+    markersize : float, optional
+        Marker size override. Defaults to ``max(6.0, linewidth * 2.5)``.
+    zorder : int, optional
+        Matplotlib z-order to control drawing order.
+    line_kwargs : dict, optional
+        Additional keyword arguments forwarded to line segment ``plot`` calls.
+    marker_kwargs : dict, optional
+        Additional keyword arguments forwarded to marker-only ``plot`` calls.
+
+    Examples
+    --------
+    >>> ax = plt.gca()
+    >>> s = pd.Series([1.0, np.nan, 2.0], index=[0, 1, 2])
+    >>> _plot_segmented_series(ax, s, color='C0', label='Example')
+    """
+    if series is None or (hasattr(series, "empty") and series.empty):
+        return
+
+    segments = _split_series_by_nan(series)
+    if not segments:
+        return
+
+    effective_markersize = markersize if markersize is not None else max(6.0, linewidth * 2.5)
+    line_kwargs = dict(line_kwargs or {})
+    marker_kwargs = dict(marker_kwargs or {})
+
+    for idx, segment in enumerate(segments):
+        segment_label = label if idx == 0 else None
+
+        if len(segment) == 1:
+            # Render isolated points as markers so they remain visible.
+            plot_args: Dict[str, Any] = {
+                "linestyle": "None",
+                "marker": marker,
+                "markersize": effective_markersize,
+                "markerfacecolor": color,
+                "markeredgecolor": color,
+                "markeredgewidth": linewidth,
+                "linewidth": linewidth,
+                "color": color,
+                "label": segment_label,
+            }
+            if zorder is not None:
+                plot_args["zorder"] = zorder
+            plot_args.update(marker_kwargs)
+            ax.plot(segment.index, segment.values, **plot_args)
+            continue
+
+        plot_args = {
+            "linestyle": "-",
+            "linewidth": linewidth,
+            "color": color,
+            "label": segment_label,
+        }
+        if zorder is not None:
+            plot_args["zorder"] = zorder
+        plot_args.update(line_kwargs)
+        ax.plot(segment.index, segment.values, **plot_args)
 
 def ols_model_perf_plot(
     model: Optional['OLS'] = None,
@@ -175,30 +274,23 @@ def ols_model_perf_plot(
     fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(figsize[0]*2, figsize[1]), **kwargs)
     
     # Left plot: Target variable (original functionality)
-    # Plot actual values
-    ax1.plot(y_full.index, y_full, label="Actual", color="black", linewidth=2)
+    # Plot actual values with gaps surfaced as standalone markers when needed.
+    _plot_segmented_series(
+        ax1,
+        y_full,
+        color="black",
+        linewidth=2,
+        label="Actual",
+    )
 
     # Plot fitted values while preserving gaps created by NaN placeholders.
-    fitted_valid = y_fitted_aligned.dropna()
-    if not fitted_valid.empty:
-        if len(fitted_valid) == 1:
-            ax1.plot(
-                fitted_valid.index,
-                fitted_valid.values,
-                marker='o',
-                markersize=2,
-                color="tab:blue",
-                label="Fitted (IS)",
-                linestyle='None'
-            )
-        else:
-            ax1.plot(
-                y_fitted_aligned.index,
-                y_fitted_aligned,
-                label="Fitted (IS)",
-                color="tab:blue",
-                linewidth=2
-            )
+    _plot_segmented_series(
+        ax1,
+        y_fitted_aligned,
+        color="tab:blue",
+        linewidth=2,
+        label="Fitted (IS)",
+    )
     
     # Plot out-of-sample predictions
     if not y_pred.empty:
@@ -250,77 +342,43 @@ def ols_model_perf_plot(
         y_base_fitted_in = model.y_base_fitted_in if hasattr(model, 'y_base_fitted_in') else None
         y_base_pred_out = model.y_base_pred_out if hasattr(model, 'y_base_pred_out') else None
         
-        # Plot actual base values
-        ax3.plot(y_base_full.index, y_base_full, label="Actual", color="black", linewidth=2)
-        
+        # Plot actual base values, surfacing single-value segments as markers.
+        _plot_segmented_series(
+            ax3,
+            y_base_full,
+            color="black",
+            linewidth=2,
+            label="Actual",
+        )
+
         # Combine fitted and predicted base values
-        y_base_pred_full = pd.Series(dtype=float)
+        y_base_pred_components = []
+
         if y_base_fitted_in is not None and not y_base_fitted_in.empty:
-            y_base_pred_full = pd.concat([y_base_pred_full, y_base_fitted_in])
+            y_base_pred_components.append(y_base_fitted_in)
+            _plot_segmented_series(
+                ax3,
+                y_base_fitted_in,
+                color="tab:orange",
+                linewidth=2,
+                label="Fitted (IS)",
+            )
+
         if y_base_pred_out is not None and not y_base_pred_out.empty:
-            y_base_pred_full = pd.concat([y_base_pred_full, y_base_pred_out])
-        
-        # Plot base predictions with gap handling (similar to target variable)
-        if not y_base_pred_full.empty:
-            y_base_pred_full = y_base_pred_full.sort_index()
-            
-            # Check for gaps in base fitted data
-            if y_base_fitted_in is not None and not y_base_fitted_in.empty:
-                fitted_base_idx_sorted = y_base_fitted_in.index.sort_values()
+            y_base_pred_components.append(y_base_pred_out)
+            ax3.plot(
+                y_base_pred_out.index,
+                y_base_pred_out,
+                linestyle="--",
+                label="Predicted (OOS)",
+                color="tab:orange",
+                linewidth=2,
+            )
 
-                # Infer the typical spacing to spot discontinuities created by outliers.
-                typical_diff_td = _infer_typical_gap(fitted_base_idx_sorted)
-
-                # Find gaps in base fitted data (similar logic to target)
-                base_segments = []
-                if len(fitted_base_idx_sorted) > 0:
-                    current_base_segment = [fitted_base_idx_sorted[0]]
-
-                    for i in range(1, len(fitted_base_idx_sorted)):
-                        prev_idx = fitted_base_idx_sorted[i-1]
-                        curr_idx = fitted_base_idx_sorted[i]
-
-                        # Check if there's a gap larger than expected
-                        time_gap = curr_idx - prev_idx
-
-                        if time_gap > typical_diff_td * 1.5:  # Allow some tolerance
-                            # Gap detected, finish current segment and start new one
-                            base_segments.append(current_base_segment)
-                            current_base_segment = [curr_idx]
-                        else:
-                            # No gap, continue current segment
-                            current_base_segment.append(curr_idx)
-
-                    # Add the last segment
-                    if current_base_segment:
-                        base_segments.append(current_base_segment)
-
-                    # Plot each segment separately
-                    for i, segment in enumerate(base_segments):
-                        if len(segment) > 0:
-                            segment_data = y_base_fitted_in.loc[segment]
-                            label = "Fitted (IS)" if i == 0 else None  # Only label first segment
-
-                            if len(segment) == 1:
-                                # Single point - plot as marker
-                                ax3.plot(segment_data.index, segment_data.values,
-                                        marker='o', markersize=2, color="tab:orange",
-                                        label=label, linestyle='None')
-                            else:
-                                # Multiple points - plot as line
-                                ax3.plot(segment_data.index, segment_data.values,
-                                        label=label, color="tab:orange", linewidth=2)
-            
-            # Plot out-of-sample base predictions
-            if y_base_pred_out is not None and not y_base_pred_out.empty:
-                ax3.plot(
-                    y_base_pred_out.index,
-                    y_base_pred_out,
-                    linestyle="--",
-                    label="Predicted (OOS)",
-                    color="tab:orange",
-                    linewidth=2,
-                )
+        if y_base_pred_components:
+            y_base_pred_full = pd.concat(y_base_pred_components).sort_index()
+        else:
+            y_base_pred_full = pd.Series(dtype=float)
         
         # Calculate and plot absolute errors for base variable
         if not y_base_pred_full.empty:
@@ -460,11 +518,17 @@ def ols_plot_perf_set(
     fig, (ax, ax_base) = plt.subplots(2, 1, figsize=(figsize[0], figsize[1]*2), sharex=False, **kwargs)
 
     # --- Top row: Target variable performance (as before) ---
-    ax.plot(actual.index, actual, label='Actual', color='black', linewidth=2)
+    _plot_segmented_series(
+        ax,
+        actual,
+        color='black',
+        linewidth=2,
+        label='Actual',
+    )
     colors = plt.rcParams['axes.prop_cycle'].by_key().get('color', [])
 
     for idx, (mid, rpt) in enumerate(reports.items()):
-        color = colors[idx % len(colors)] if colors else None
+        color = colors[idx % len(colors)] if colors else f'C{idx}'
         y_in = rpt.model.y_fitted_in.sort_index()
         if (
             hasattr(rpt.model, 'dm')
@@ -475,28 +539,13 @@ def ols_plot_perf_set(
             in_idx = pd.Index(y_in.index).sort_values()
 
         y_in_aligned = y_in.reindex(in_idx)
-        y_in_valid = y_in_aligned.dropna()
-        if not y_in_valid.empty:
-            label = f"{mid} (IS)"
-            if len(y_in_valid) == 1:
-                ax.plot(
-                    y_in_valid.index,
-                    y_in_valid.values,
-                    marker='o',
-                    markersize=2,
-                    color=color,
-                    label=label,
-                    linestyle='None'
-                )
-            else:
-                ax.plot(
-                    y_in_aligned.index,
-                    y_in_aligned,
-                    linestyle='-',
-                    label=label,
-                    color=color,
-                    linewidth=2
-                )
+        _plot_segmented_series(
+            ax,
+            y_in_aligned,
+            color=color,
+            linewidth=2,
+            label=f"{mid} (IS)",
+        )
         # Out-of-sample predicted
         if (
             not full
@@ -521,65 +570,30 @@ def ols_plot_perf_set(
     # Plot actual base variable (if available) and predictions for each model
     base_plotted = False
     for idx, (mid, rpt) in enumerate(reports.items()):
-        color = colors[idx % len(colors)] if colors else None
+        color = colors[idx % len(colors)] if colors else f'C{idx}'
         model = rpt.model
         if hasattr(model, 'y_base_full') and model.y_base_full is not None and not model.y_base_full.empty:
             y_base_full = model.y_base_full.sort_index()
             if not base_plotted:
-                ax_base.plot(
-                    y_base_full.index,
+                _plot_segmented_series(
+                    ax_base,
                     y_base_full,
-                    label='Actual',
                     color='black',
-                    linewidth=2
+                    linewidth=2,
+                    label='Actual',
                 )
                 base_plotted = True
             # Fitted and predicted base
             y_base_fitted_in = getattr(model, 'y_base_fitted_in', None)
             y_base_pred_out = getattr(model, 'y_base_pred_out', None)
-            y_base_pred_full = pd.Series(dtype=float)
             if y_base_fitted_in is not None and not y_base_fitted_in.empty:
-                y_base_pred_full = pd.concat([y_base_pred_full, y_base_fitted_in])
-            if y_base_pred_out is not None and not y_base_pred_out.empty:
-                y_base_pred_full = pd.concat([y_base_pred_full, y_base_pred_out])
-            y_base_pred_full = y_base_pred_full.sort_index()
-            # Gap handling for in-sample fitted base
-            if y_base_fitted_in is not None and not y_base_fitted_in.empty:
-                fitted_base_idx_sorted = y_base_fitted_in.index.sort_values()
-                typical_diff = _infer_typical_gap(fitted_base_idx_sorted)
-                base_segments = []
-                current_base_segment = [fitted_base_idx_sorted[0]]
-                for i in range(1, len(fitted_base_idx_sorted)):
-                    prev_idx = fitted_base_idx_sorted[i-1]
-                    curr_idx = fitted_base_idx_sorted[i]
-                    time_gap = curr_idx - prev_idx
-                    if time_gap > typical_diff * 1.5:
-                        base_segments.append(current_base_segment)
-                        current_base_segment = [curr_idx]
-                    else:
-                        current_base_segment.append(curr_idx)
-                if current_base_segment:
-                    base_segments.append(current_base_segment)
-                for i, segment in enumerate(base_segments):
-                    if len(segment) > 0:
-                        segment_data = y_base_fitted_in.loc[segment]
-                        label = f"{mid} (IS)" if i == 0 else None
-                        if len(segment) == 1:
-                            ax_base.plot(
-                                segment_data.index,
-                                segment_data.values,
-                                marker='o', markersize=2, color=color,
-                                label=label, linestyle='None'
-                            )
-                        else:
-                            ax_base.plot(
-                                segment_data.index,
-                                segment_data.values,
-                                linestyle='-',
-                                label=label,
-                                color=color,
-                                linewidth=2
-                            )
+                _plot_segmented_series(
+                    ax_base,
+                    y_base_fitted_in,
+                    color=color,
+                    linewidth=2,
+                    label=f"{mid} (IS)",
+                )
             # Out-of-sample predicted base
             if y_base_pred_out is not None and not y_base_pred_out.empty:
                 ax_base.plot(
