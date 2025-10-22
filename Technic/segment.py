@@ -127,13 +127,14 @@ class Segment:
         self,
         cm_id: str,
         specs: Any,
-        sample: str = 'in'
+        sample: str = 'in',
+        outlier_idx: Optional[Sequence[Any]] = None
     ) -> CM:
         """
-        Instantiate and fit a Candidate Model (CM) with given specifications.
+        Build and fit a Candidate Model (CM) for this segment.
 
-        This method creates a new CM instance, fits it to the data according to the
-        provided specifications, and stores it in the segment's collection.
+        The method creates a CM, fits it with the supplied specifications, and
+        keeps the fitted model in the segment registry.
 
         Parameters
         ----------
@@ -151,6 +152,14 @@ class Segment:
             - 'in': in-sample only (default)
             - 'full': full sample
             - 'both': both in-sample and full sample
+        outlier_idx : Sequence[Any], optional
+            Collection of row labels to skip when fitting the in-sample model.
+
+        Raises
+        ------
+        TypeError
+            If ``outlier_idx`` is given as a string or any value that cannot be
+            iterated over.
 
         Returns
         -------
@@ -173,7 +182,31 @@ class Segment:
         ...         "transforms": ["diff", "pct_change"]
         ...     }
         ... )
+        >>>
+        >>> # Build a model while excluding specific outlier observations
+        >>> cm = segment.build_cm(
+        ...     cm_id="model_3",
+        ...     specs=["gdp", "cpi"],
+        ...     outlier_idx=["2020-03-31", "2020-04-30"]
+        ... )
         """
+        if isinstance(outlier_idx, (str, bytes)):
+            raise TypeError(
+                "outlier_idx must be a list (or other iterable) of index labels. "
+                "Use ['label'] if you need to skip a single observation."
+            )
+
+        normalized_outliers: Optional[List[Any]] = None
+        if outlier_idx is not None:
+            try:
+                normalized_outliers = list(outlier_idx)
+            except TypeError as exc:
+                raise TypeError(
+                    "outlier_idx must be a list (or other iterable) of index "
+                    "labels. Use ['label'] if you need to skip a single "
+                    "observation."
+                ) from exc
+
         cm = CM(
             model_id=cm_id,
             target=self.target,
@@ -185,7 +218,7 @@ class Segment:
             scen_cls=self.scen_cls,
             qtr_method=self.qtr_method,
         )
-        cm.build(specs, sample=sample)
+        cm.build(specs, sample=sample, outlier_idx=normalized_outliers)
         self.cms[cm_id] = cm
         return cm
     
