@@ -1,11 +1,60 @@
-# TECHNIC/plot.py
+# =============================================================================
+# module: plot.py
+# Purpose: Visualization helpers for OLS diagnostics and performance reporting.
+# Key Types/Classes: None
+# Key Functions: ols_model_perf_plot, ols_model_test_plot, ols_plot_perf_set
+# Dependencies: numpy, pandas, matplotlib.pyplot, statsmodels.api, statsmodels.stats
+# =============================================================================
+
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
 import matplotlib.pyplot as plt
 import statsmodels.api as sm
 from statsmodels.stats.stattools import jarque_bera
 from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+
+def _infer_typical_gap(sorted_index: pd.Index) -> Union[pd.Timedelta, float]:
+    """
+    Estimate the typical spacing between consecutive index values.
+
+    Parameters
+    ----------
+    sorted_index : pd.Index
+        Index values sorted in ascending order.
+
+    Returns
+    -------
+    Union[pd.Timedelta, float]
+        Median difference between consecutive index entries. Time-based indexes
+        yield ``pd.Timedelta`` values, whereas numeric indexes return floats.
+    """
+    if len(sorted_index) <= 1:
+        if isinstance(sorted_index, pd.DatetimeIndex):
+            return pd.Timedelta(days=30)
+        return 1.0
+
+    diffs = sorted_index.to_series().diff().dropna()
+    if diffs.empty:
+        if isinstance(sorted_index, pd.DatetimeIndex):
+            return pd.Timedelta(days=30)
+        return 1.0
+
+    median_diff = diffs.median()
+    if pd.isna(median_diff):
+        if isinstance(sorted_index, pd.DatetimeIndex):
+            return pd.Timedelta(days=30)
+        return 1.0
+
+    if isinstance(median_diff, np.timedelta64):
+        return pd.to_timedelta(median_diff)
+
+    if isinstance(median_diff, pd.Timedelta):
+        return median_diff
+
+    return float(median_diff)
+
 
 def ols_model_perf_plot(
     model: Optional['OLS'] = None,
@@ -43,6 +92,16 @@ def ols_model_perf_plot(
         Figure size.
     **kwargs
         Additional kwargs passed to plt.subplots().
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Matplotlib figure with target and base variable performance plots.
+
+    Raises
+    ------
+    ValueError
+        If the supplied model is not fitted or required data arrays are missing.
     """
     # Extract data from model if provided
     if model is not None:
@@ -208,19 +267,22 @@ def ols_model_perf_plot(
             # Check for gaps in base fitted data
             if y_base_fitted_in is not None and not y_base_fitted_in.empty:
                 fitted_base_idx_sorted = y_base_fitted_in.index.sort_values()
-                
+
+                # Infer the typical spacing to spot discontinuities created by outliers.
+                typical_diff_td = _infer_typical_gap(fitted_base_idx_sorted)
+
                 # Find gaps in base fitted data (similar logic to target)
                 base_segments = []
                 if len(fitted_base_idx_sorted) > 0:
                     current_base_segment = [fitted_base_idx_sorted[0]]
-                    
+
                     for i in range(1, len(fitted_base_idx_sorted)):
                         prev_idx = fitted_base_idx_sorted[i-1]
                         curr_idx = fitted_base_idx_sorted[i]
-                        
+
                         # Check if there's a gap larger than expected
                         time_gap = curr_idx - prev_idx
-                        
+
                         if time_gap > typical_diff_td * 1.5:  # Allow some tolerance
                             # Gap detected, finish current segment and start new one
                             base_segments.append(current_base_segment)
@@ -228,25 +290,25 @@ def ols_model_perf_plot(
                         else:
                             # No gap, continue current segment
                             current_base_segment.append(curr_idx)
-                    
+
                     # Add the last segment
                     if current_base_segment:
                         base_segments.append(current_base_segment)
-                    
+
                     # Plot each segment separately
                     for i, segment in enumerate(base_segments):
                         if len(segment) > 0:
                             segment_data = y_base_fitted_in.loc[segment]
                             label = "Fitted (IS)" if i == 0 else None  # Only label first segment
-                            
+
                             if len(segment) == 1:
                                 # Single point - plot as marker
-                                ax3.plot(segment_data.index, segment_data.values, 
-                                        marker='o', markersize=2, color="tab:orange", 
+                                ax3.plot(segment_data.index, segment_data.values,
+                                        marker='o', markersize=2, color="tab:orange",
                                         label=label, linestyle='None')
                             else:
                                 # Multiple points - plot as line
-                                ax3.plot(segment_data.index, segment_data.values, 
+                                ax3.plot(segment_data.index, segment_data.values,
                                         label=label, color="tab:orange", linewidth=2)
             
             # Plot out-of-sample base predictions
@@ -303,7 +365,34 @@ def ols_model_perf_plot(
     return fig
 
 
-def ols_model_test_plot(model, X, y, figsize=(6,4), **kwargs):
+def ols_model_test_plot(
+    model: Any,
+    X: pd.DataFrame,
+    y: pd.Series,
+    figsize: tuple = (6, 4),
+    **kwargs
+) -> plt.Figure:
+    """
+    Plot residuals against fitted values for a fitted regression model.
+
+    Parameters
+    ----------
+    model : Any
+        Statsmodels OLS result instance containing ``fittedvalues`` and ``resid``.
+    X : pd.DataFrame
+        Feature matrix (unused; kept for compatibility with existing calls).
+    y : pd.Series
+        Target series (unused; kept for compatibility with existing calls).
+    figsize : tuple, optional
+        Size of the matplotlib figure in inches.
+    **kwargs
+        Additional keyword arguments forwarded to ``plt.subplots``.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Scatter plot figure showing residuals versus fitted values.
+    """
     fig, ax = plt.subplots(figsize=figsize, **kwargs)
     ax.scatter(model.fittedvalues, model.resid)
     ax.axhline(0, color='grey', linewidth=1)
@@ -334,6 +423,11 @@ def ols_plot_perf_set(
         Figure size.
     **kwargs
         Passed to plt.subplots().
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Figure containing target and base variable performance comparisons.
     """
     # Determine the actual series for the target variable (top row)
     first_report = next(iter(reports.values()))
@@ -452,11 +546,7 @@ def ols_plot_perf_set(
             # Gap handling for in-sample fitted base
             if y_base_fitted_in is not None and not y_base_fitted_in.empty:
                 fitted_base_idx_sorted = y_base_fitted_in.index.sort_values()
-                if len(fitted_base_idx_sorted) > 1:
-                    diffs = fitted_base_idx_sorted.to_series().diff().dropna()
-                    typical_diff = diffs.median() if len(diffs) > 0 else pd.Timedelta(days=30)
-                else:
-                    typical_diff = pd.Timedelta(days=30)
+                typical_diff = _infer_typical_gap(fitted_base_idx_sorted)
                 base_segments = []
                 current_base_segment = [fitted_base_idx_sorted[0]]
                 for i in range(1, len(fitted_base_idx_sorted)):
