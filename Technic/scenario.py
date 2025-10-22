@@ -1,3 +1,11 @@
+# =============================================================================
+# module: scenario.py
+# Purpose: Provide scenario management, forecasting, and visualization utilities for fitted models.
+# Key Types/Classes: ScenManager
+# Key Functions: (properties) forecast_y_df, forecast_y_base_df, forecast_y_base_qtr_df
+# Dependencies: pandas, numpy, matplotlib, typing, os, warnings, internal loaders/models
+# =============================================================================
+
 import pandas as pd
 import numpy as np
 from typing import Any, Dict, List, Optional, Union, Tuple
@@ -698,10 +706,16 @@ class ScenManager:
                 all_dates = pd.Index([])
                 if fitted_values is not None:
                     all_dates = all_dates.union(fitted_values.index)
+                # Include actual target history so the DataFrame spans the full evaluation window
+                if actual_values is not None:
+                    all_dates = all_dates.union(actual_values.index)
                 for scen_series in scen_dict.values():
                     # Normalize scenario series index
                     scen_series.index = pd.to_datetime(scen_series.index).normalize()
                     all_dates = all_dates.union(scen_series.index)
+                # Ensure early OOS predictions (before P0) are retained even when scenarios start later
+                if pred_oos is not None and not pred_oos.empty:
+                    all_dates = all_dates.union(pred_oos.index)
                 all_dates = all_dates.sort_values()
                 
                 # Create DataFrame with DatetimeIndex
@@ -833,38 +847,54 @@ class ScenManager:
         
         results: Dict[str, pd.DataFrame] = {}
         for scen_set, scen_dict in base_scen_results.items():
+            # Capture raw actuals and OOS predictions once per scenario set
+            y_base_full_raw = getattr(self.model, 'y_base_full', None)
+            y_base_pred_out_raw = getattr(self.model, 'y_base_pred_out', None)
+
             # Start with an empty DataFrame
             if isinstance(self.dm._internal_loader, TimeSeriesLoader):
                 # For time series, get all unique dates
                 all_dates = pd.Index([])
                 if fitted_base_values is not None:
                     all_dates = all_dates.union(fitted_base_values.index)
+
+                # Track actual base history and OOS forecasts for full coverage
+                y_base_full = None
+                if y_base_full_raw is not None and not y_base_full_raw.empty:
+                    y_base_full = y_base_full_raw.copy()
+                    y_base_full.index = pd.to_datetime(y_base_full.index).normalize()
+                    all_dates = all_dates.union(y_base_full.index)
+
+                y_base_pred_out = None
+                if y_base_pred_out_raw is not None and not y_base_pred_out_raw.empty:
+                    y_base_pred_out = y_base_pred_out_raw.copy()
+                    y_base_pred_out.index = pd.to_datetime(y_base_pred_out.index).normalize()
+                    # Include dates prior to P0 to avoid losing early OOS predictions
+                    all_dates = all_dates.union(y_base_pred_out.index)
+
                 for scen_series in scen_dict.values():
                     # Normalize scenario series index
                     scen_series.index = pd.to_datetime(scen_series.index).normalize()
                     all_dates = all_dates.union(scen_series.index)
                 all_dates = all_dates.sort_values()
-                
+
                 # Create DataFrame with DatetimeIndex
                 df = pd.DataFrame(index=all_dates)
-                
+
                 # Get P0 quarter-end date
                 p0_quarter_end = get_quarter_end(self.P0)
-                
+
                 # Add Period indicator
                 df['Period'] = df.index.map(lambda x: assign_period(x, p0_quarter_end))
-                
+
                 # Add fitted/actual/pred_oos if available
                 if fitted_base_values is not None:
                     df['Fitted_IS'] = fitted_base_values
-                # Actual base if available from model (y_base_full), else omit
-                y_base_full = getattr(self.model, 'y_base_full', None)
-                if y_base_full is not None and not y_base_full.empty:
+                if y_base_full is not None:
                     df['Actual'] = y_base_full.reindex(df.index)
-                y_base_pred_out = getattr(self.model, 'y_base_pred_out', None)
-                if y_base_pred_out is not None and not y_base_pred_out.empty:
+                if y_base_pred_out is not None:
                     df['Pred_OOS'] = y_base_pred_out.reindex(df.index)
-                
+
                 # Add scenario base forecasts
                 for scen_name, scen_series in scen_dict.items():
                     df[scen_name] = scen_series
@@ -873,18 +903,43 @@ class ScenManager:
                 # For panel data, get all unique entity-date combinations
                 entity_col = self.dm._internal_loader.entity_col
                 date_col = self.dm._internal_loader.date_col
-                
+
                 # Collect all entity-date pairs
                 all_pairs = set()
                 if fitted_base_values is not None:
                     all_pairs.update(zip(fitted_base_values.index.get_level_values(entity_col),
                                       fitted_base_values.index.get_level_values(date_col).normalize()))
+                y_base_full = None
+                if y_base_full_raw is not None and not y_base_full_raw.empty:
+                    y_base_full = y_base_full_raw.copy()
+                    if isinstance(y_base_full.index, pd.MultiIndex):
+                        normalized_dates = pd.to_datetime(
+                            y_base_full.index.get_level_values(date_col)
+                        ).normalize()
+                        entities = y_base_full.index.get_level_values(entity_col)
+                        y_base_full.index = pd.MultiIndex.from_arrays(
+                            [entities, normalized_dates], names=[entity_col, date_col]
+                        )
+                        all_pairs.update(zip(entities, normalized_dates))
+                y_base_pred_out = None
+                if y_base_pred_out_raw is not None and not y_base_pred_out_raw.empty:
+                    y_base_pred_out = y_base_pred_out_raw.copy()
+                    if isinstance(y_base_pred_out.index, pd.MultiIndex):
+                        normalized_dates = pd.to_datetime(
+                            y_base_pred_out.index.get_level_values(date_col)
+                        ).normalize()
+                        entities = y_base_pred_out.index.get_level_values(entity_col)
+                        y_base_pred_out.index = pd.MultiIndex.from_arrays(
+                            [entities, normalized_dates], names=[entity_col, date_col]
+                        )
+                        # Include early OOS predictions to avoid truncation when P0 is later
+                        all_pairs.update(zip(entities, normalized_dates))
                 for scen_series in scen_dict.values():
                     # Normalize dates in the index
                     dates = scen_series.index.get_level_values(date_col).normalize()
                     entities = scen_series.index.get_level_values(entity_col)
                     all_pairs.update(zip(entities, dates))
-                
+
                 # Create MultiIndex DataFrame
                 entities, dates = zip(*sorted(all_pairs))
                 idx = pd.MultiIndex.from_tuples(list(zip(entities, dates)),
@@ -901,11 +956,9 @@ class ScenManager:
                 # Add fitted/actual/pred_oos if available
                 if fitted_base_values is not None:
                     df['Fitted_IS'] = fitted_base_values
-                y_base_full = getattr(self.model, 'y_base_full', None)
-                if y_base_full is not None and not y_base_full.empty:
+                if y_base_full is not None:
                     df['Actual'] = y_base_full
-                y_base_pred_out = getattr(self.model, 'y_base_pred_out', None)
-                if y_base_pred_out is not None and not y_base_pred_out.empty:
+                if y_base_pred_out is not None:
                     df['Pred_OOS'] = y_base_pred_out
                 
                 # Add scenario base forecasts
