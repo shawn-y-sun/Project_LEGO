@@ -105,18 +105,12 @@ def ols_model_perf_plot(
         
         # Find expected frequency from the original data
         if len(y.index) > 1:
-            # Infer frequency from original data
-            freq = None
-            if freq is None:
-                # Fallback: calculate median difference
-                diffs = y.index.to_series().diff().dropna()
-                if len(diffs) > 0:
-                    typical_diff = diffs.median()
-                else:
-                    typical_diff = pd.Timedelta(days=30)  # Default fallback
+            # Infer a representative cadence directly from consecutive index differences
+            diffs = y.index.to_series().diff().dropna()
+            if len(diffs) > 0:
+                typical_diff = diffs.median()
             else:
-                # Convert frequency to offset object
-                typical_diff = pd.tseries.frequencies.to_offset(freq)
+                typical_diff = pd.Timedelta(days=30)  # Default fallback
         else:
             typical_diff = pd.Timedelta(days=30)  # Default fallback
         
@@ -394,15 +388,11 @@ def ols_plot_perf_set(
         if len(y_in) > 0:
             fitted_idx_sorted = y_in.index.sort_values()
             if len(rpt.model.y.index) > 1:
-                freq = None
-                if freq is None:
-                    diffs = rpt.model.y.index.to_series().diff().dropna()
-                    if len(diffs) > 0:
-                        typical_diff = diffs.median()
-                    else:
-                        typical_diff = pd.Timedelta(days=30)
+                diffs = rpt.model.y.index.to_series().diff().dropna()
+                if len(diffs) > 0:
+                    typical_diff = diffs.median()
                 else:
-                    typical_diff = pd.tseries.frequencies.to_offset(freq)
+                    typical_diff = pd.Timedelta(days=30)
             else:
                 typical_diff = pd.Timedelta(days=30)
             segments = []
