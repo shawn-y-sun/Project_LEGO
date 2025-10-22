@@ -91,77 +91,116 @@ class ScenManager:
             raise ValueError(f"qtr_method must be one of {valid_qtr_methods}")
         self.qtr_method = qtr_method
         
-        # Get P0 from DataManager's internal loader
+        # Capture default and scenario-specific jumpoff dates
         self.P0 = self.dm.scen_p0
-        if self.P0 is None:
-            raise ValueError("Internal data loader must have scen_p0 set for scenario analysis.")
-            
-        # Calculate horizon end date (P0 + horizon quarters)
-        self.horizon_end = self.P0 + pd.offsets.QuarterEnd(self.horizon)
+        self._scenario_p0_overrides = self.dm.scen_p0_map
+        if self.P0 is None and not self._scenario_p0_overrides:
+            raise ValueError(
+                "Internal data loader must have scen_p0 set for scenario analysis or "
+                "provide per-set overrides via MEVLoader.load_scens(..., p0=...)."
+            )
 
     @property
     def horizon_frame(self) -> Tuple[pd.Timestamp, pd.Timestamp]:
         """
-        Get the prediction horizon time frame as a tuple of start and end dates.
-        
-        The start date is the first available date after P0 from scenario MEV data,
-        and the end date is the cutoff date after enough quarters are included 
-        as specified by self.horizon.
-        
+        Get the prediction horizon time frame using the default scenario set.
+
         Returns
         -------
         Tuple[pd.Timestamp, pd.Timestamp]
-            (start_date, end_date) where:
-            - start_date: First available date after P0 from scenario data
-            - end_date: Cutoff date after horizon quarters from P0
+            ``(start_date, end_date)`` derived from the first available scenario set.
+
+        Notes
+        -----
+        Use :meth:`get_horizon_frame_for_set` to retrieve the horizon frame for a
+        specific scenario set when multiple jumpoff dates are defined.
         """
-        # Get the first scenario MEV dataframe to determine available date range
+        default_set = self._get_default_scen_set()
+        return self.get_horizon_frame_for_set(default_set)
+
+    def _get_default_scen_set(self) -> str:
+        """Return the first available scenario set name."""
         if not self.dm.scen_mevs:
             raise ValueError("No scenario MEV data available to determine horizon frame.")
-        
-        # Get the first scenario set and first scenario
-        first_scen_set = list(self.dm.scen_mevs.keys())[0]
-        first_scen_name = list(self.dm.scen_mevs[first_scen_set].keys())[0]
-        first_mev_df = self.dm.scen_mevs[first_scen_set][first_scen_name]
-        
-        # Determine start date based on data structure
+        return next(iter(self.dm.scen_mevs))
+
+    def _get_p0_for_set(self, scen_set: str) -> pd.Timestamp:
+        """Resolve the P0 date for a specific scenario set."""
+        overrides = self.dm.scen_p0_map
+        if scen_set in overrides:
+            return overrides[scen_set]
+        if self.P0 is not None:
+            return self.P0
+        raise ValueError(f"No P0 configured for scenario set '{scen_set}'.")
+
+    def get_horizon_frame_for_set(self, scen_set: str) -> Tuple[pd.Timestamp, pd.Timestamp]:
+        """
+        Compute the prediction horizon for a given scenario set.
+
+        Parameters
+        ----------
+        scen_set : str
+            Name of the scenario set whose horizon frame should be computed.
+
+        Returns
+        -------
+        Tuple[pd.Timestamp, pd.Timestamp]
+            ``(start_date, end_date)`` representing the available forecast window
+            after the scenario set's jumpoff date.
+
+        Raises
+        ------
+        ValueError
+            If the scenario set is unknown or lacks dates after the jumpoff.
+        """
+        scen_mevs = self.dm.scen_mevs
+        if scen_set not in scen_mevs or not scen_mevs[scen_set]:
+            raise ValueError(f"Scenario set '{scen_set}' not found in scenario MEV data.")
+
+        first_scen_name = next(iter(scen_mevs[scen_set]))
+        first_mev_df = scen_mevs[scen_set][first_scen_name]
+
+        p0 = self._get_p0_for_set(scen_set)
+        horizon_end = p0 + pd.offsets.QuarterEnd(self.horizon)
+
         if isinstance(self.dm._internal_loader, PanelLoader):
-            # For panel data, get dates from date column
             date_col = self.dm._internal_loader.date_col
             if date_col in first_mev_df.columns:
-                available_dates = pd.to_datetime(first_mev_df[date_col])
+                available_dates = pd.to_datetime(first_mev_df[date_col]).normalize()
             else:
-                # Fallback to theoretical calculation
-                start_date = self.P0 + pd.Timedelta(days=1)
-                end_date = self.horizon_end
-                return (start_date, end_date)
-        else:  # TimeSeriesLoader
-            # For time series, get dates from index
+                start_date = p0 + pd.Timedelta(days=1)
+                return (start_date, horizon_end)
+        else:
             if isinstance(first_mev_df.index, pd.DatetimeIndex):
-                available_dates = first_mev_df.index
+                available_dates = pd.to_datetime(first_mev_df.index).normalize()
             else:
-                # Fallback to theoretical calculation
-                start_date = self.P0 + pd.Timedelta(days=1)
-                end_date = self.horizon_end
-                return (start_date, end_date)
-        
-        # Filter to dates after P0
-        dates_after_p0 = available_dates[available_dates > self.P0]
-        
+                start_date = p0 + pd.Timedelta(days=1)
+                return (start_date, horizon_end)
+
+        dates_after_p0 = available_dates[available_dates > p0]
         if dates_after_p0.empty:
-            raise ValueError(f"No dates after P0 ({self.P0}) found in scenario data.")
-        
-        # Start date is the first available date after P0
+            raise ValueError(
+                f"No dates after P0 ({p0.date()}) found in scenario data for set '{scen_set}'."
+            )
+
         start_date = dates_after_p0.min()
-        
-        # End date is the horizon end date (theoretical calculation)
-        end_date = self.horizon_end
-        
-        # Ensure end date doesn't exceed available data
+        end_date = horizon_end
         if dates_after_p0.max() < end_date:
             end_date = dates_after_p0.max()
-        
+
         return (start_date, end_date)
+
+    @property
+    def scenario_p0_map(self) -> Dict[str, pd.Timestamp]:
+        """
+        Mapping of scenario sets to their configured jumpoff dates.
+
+        Returns
+        -------
+        Dict[str, pd.Timestamp]
+            Dictionary containing overrides defined through the MEV loader.
+        """
+        return self.dm.scen_p0_map
 
     @property
     def sens_test(self):
@@ -239,11 +278,12 @@ class ScenManager:
                         internal_df = pd.DataFrame()
                     
                     # Use rolling_predict to get features for models with lookback variables
+                    horizon_start, horizon_end = self.get_horizon_frame_for_set(scen_set)
                     _, X_features = self.model.rolling_predict(
                         df_internal=internal_df,
                         df_mev=df_mev,
                         y=self.model.y_full,
-                        time_frame=self.horizon_frame
+                        time_frame=(str(horizon_start), str(horizon_end))
                     )
                     
                     X_scens[scen_set][scen_name] = X_features.astype(float)
@@ -295,8 +335,8 @@ class ScenManager:
                                 "Please ensure all required internal variables are available in the scenario data."
                             ) from e
                     
-                    # Filter to forecast period using horizon_frame
-                    start_date, end_date = self.horizon_frame
+                    # Filter to forecast period using scenario-specific horizon frame
+                    start_date, end_date = self.get_horizon_frame_for_set(scen_set)
                     
                     if isinstance(self.dm._internal_loader, PanelLoader):
                         # For panel data, filter based on date column
@@ -324,11 +364,12 @@ class ScenManager:
 
     def forecast(
         self,
-        X: pd.DataFrame
+        X: pd.DataFrame,
+        scen_set: Optional[str] = None
     ) -> pd.Series:
         """
         Forecast a single scenario using the model's prediction methods.
-        
+
         This method leverages the model's .predict() and .rolling_predict() methods
         based on whether the model has lookback variables.
 
@@ -336,41 +377,54 @@ class ScenManager:
         ----------
         X : pd.DataFrame
             Feature DataFrame for the scenario
+        scen_set : str, optional
+            Name of the scenario set corresponding to ``X``. When omitted, the
+            first available scenario set is used to determine the forecast
+            horizon.
 
         Returns
         -------
         pd.Series
-            Series of predictions indexed like X, filtered to horizon_frame
+            Series of predictions indexed like X, filtered to the scenario-specific
+            horizon frame
         """
+        target_set = scen_set
+
         # Check if model has lookback variables
         if hasattr(self.model, 'has_lookback_var') and self.model.has_lookback_var:
             # Use rolling_predict for models with lookback variables
             # Get scenario internal data and MEV data
             scen_internal = None
             scen_mev = None
-            
+
             # Find the scenario data that corresponds to this X
-            for scen_set, scen_dict in self.dm.scen_mevs.items():
+            for set_name, scen_dict in self.dm.scen_mevs.items():
                 for scen_name, mev_df in scen_dict.items():
                     # Check if this MEV data corresponds to the X we're forecasting
                     # This is a simplified check - in practice, you might need more sophisticated matching
                     if hasattr(self.dm, 'scen_internal_data') and self.dm.scen_internal_data:
-                        if scen_set in self.dm.scen_internal_data and scen_name in self.dm.scen_internal_data[scen_set]:
-                            scen_internal = self.dm.scen_internal_data[scen_set][scen_name]
+                        if set_name in self.dm.scen_internal_data and scen_name in self.dm.scen_internal_data[set_name]:
+                            scen_internal = self.dm.scen_internal_data[set_name][scen_name]
                             scen_mev = mev_df
+                            target_set = set_name
                             break
                 if scen_internal is not None:
                     break
-            
+
             if scen_internal is None:
                 # Fallback: use internal data and first available MEV
                 scen_internal = self.dm.internal_data
-                scen_mev = list(self.dm.scen_mevs.values())[0][list(self.dm.scen_mevs.values())[0].keys()][0]
-            
+                default_set = self._get_default_scen_set()
+                default_scen_name = next(iter(self.dm.scen_mevs[default_set]))
+                scen_mev = self.dm.scen_mevs[default_set][default_scen_name]
+                target_set = default_set
+
             # Get time frame as string tuple for rolling_predict
-            start_date, end_date = self.horizon_frame
-            time_frame = (str(start_date), str(end_date))
-            
+            if target_set is None:
+                target_set = self._get_default_scen_set()
+            horizon_start, horizon_end = self.get_horizon_frame_for_set(target_set)
+            time_frame = (str(horizon_start), str(horizon_end))
+
             # Use rolling_predict
             predictions, _ = self.model.rolling_predict(
                 df_internal=scen_internal,
@@ -378,28 +432,30 @@ class ScenManager:
                 y=self.dm.internal_data[self.target],
                 time_frame=time_frame
             )
-            
+
             return predictions
-            
+
         else:
             # Use standard predict for models without lookback variables
             predictions = self.model.predict(X)
-            
+
             # Filter to forecast period using horizon_frame
-            start_date, end_date = self.horizon_frame
-            
+            if target_set is None:
+                target_set = self._get_default_scen_set()
+            horizon_start, horizon_end = self.get_horizon_frame_for_set(target_set)
+
             if isinstance(self.dm._internal_loader, PanelLoader):
                 # For panel data, filter based on date column
                 date_col = self.dm._internal_loader.date_col
                 if date_col in X.columns:
                     # Get the indices where dates are within horizon_frame
-                    valid_idx = X[(X[date_col] >= start_date) & (X[date_col] <= end_date)].index
+                    valid_idx = X[(X[date_col] >= horizon_start) & (X[date_col] <= horizon_end)].index
                     predictions = predictions[valid_idx]
             else:  # TimeSeriesLoader
                 # For time series, filter based on DatetimeIndex
                 if isinstance(predictions.index, pd.DatetimeIndex):
-                    predictions = predictions[(predictions.index >= start_date) & (predictions.index <= end_date)]
-                
+                    predictions = predictions[(predictions.index >= horizon_start) & (predictions.index <= horizon_end)]
+
             return predictions
 
     @property
@@ -437,7 +493,8 @@ class ScenManager:
                     
                 try:
                     # Use scen_p0 as the jumpoff date for base prediction
-                    base_pred = self.model.base_predictor.predict_base(y_pred, self.P0)
+                    p0_for_set = self._get_p0_for_set(scen_set)
+                    base_pred = self.model.base_predictor.predict_base(y_pred, p0_for_set)
                     results[scen_set][scen_name] = base_pred
                 except Exception:
                     # Return empty series if conversion fails
@@ -484,12 +541,11 @@ class ScenManager:
                 base_actual_q = base_actual_q.groupby(pd.Grouper(freq='Q')).mean()
                 base_actual_q.index = base_actual_q.index.to_period('Q').to_timestamp(how='end').normalize()
 
-                jump_off_date = getattr(self, 'P0', None)
-                if jump_off_date is not None:
-                    jump_off_q_end = pd.Timestamp(jump_off_date.year, jump_off_date.month, 1) + pd.offsets.QuarterEnd(0)
-                    if jump_off_q_end in base_actual_q.index:
-                        p0_base_value = base_actual_q.loc[jump_off_q_end]
-                        p0_quarter_date = jump_off_q_end
+                jump_off_date = self._get_p0_for_set(scen_set)
+                jump_off_q_end = pd.Timestamp(jump_off_date.year, jump_off_date.month, 1) + pd.offsets.QuarterEnd(0)
+                if jump_off_q_end in base_actual_q.index:
+                    p0_base_value = base_actual_q.loc[jump_off_q_end]
+                    p0_quarter_date = jump_off_q_end
 
             for scen_name in base_scenarios.keys():
                 col_name = scen_name if scen_name in qtr_df.columns else f"{scen_set}_{scen_name}"
@@ -619,7 +675,7 @@ class ScenManager:
             results[scen_set] = {}
             for scen_name, X in scen_dict.items():
                 # Use the simplified forecast method
-                results[scen_set][scen_name] = self.forecast(X)
+                results[scen_set][scen_name] = self.forecast(X, scen_set=scen_set)
         return results
 
     @property
@@ -700,6 +756,8 @@ class ScenManager:
         
         results: Dict[str, pd.DataFrame] = {}
         for scen_set, scen_dict in scen_results.items():
+            p0_for_set = self._get_p0_for_set(scen_set)
+            p0_quarter_end = get_quarter_end(p0_for_set)
             # Start with an empty DataFrame
             if isinstance(self.dm._internal_loader, TimeSeriesLoader):
                 # For time series, get all unique dates
@@ -720,9 +778,6 @@ class ScenManager:
                 
                 # Create DataFrame with DatetimeIndex
                 df = pd.DataFrame(index=all_dates)
-                
-                # Get P0 quarter-end date
-                p0_quarter_end = get_quarter_end(self.P0)
                 
                 # Add Period indicator
                 df['Period'] = df.index.map(lambda x: assign_period(x, p0_quarter_end))
@@ -763,9 +818,6 @@ class ScenManager:
                 idx = pd.MultiIndex.from_tuples(list(zip(entities, dates)),
                                               names=[entity_col, date_col])
                 df = pd.DataFrame(index=idx)
-                
-                # Get P0 quarter-end date
-                p0_quarter_end = get_quarter_end(self.P0)
                 
                 # Add Period indicator
                 date_series = pd.Series(dates, index=idx)
@@ -847,6 +899,8 @@ class ScenManager:
         
         results: Dict[str, pd.DataFrame] = {}
         for scen_set, scen_dict in base_scen_results.items():
+            p0_for_set = self._get_p0_for_set(scen_set)
+            p0_quarter_end = get_quarter_end(p0_for_set)
             # Capture raw actuals and OOS predictions once per scenario set
             y_base_full_raw = getattr(self.model, 'y_base_full', None)
             y_base_pred_out_raw = getattr(self.model, 'y_base_pred_out', None)
@@ -880,9 +934,6 @@ class ScenManager:
 
                 # Create DataFrame with DatetimeIndex
                 df = pd.DataFrame(index=all_dates)
-
-                # Get P0 quarter-end date
-                p0_quarter_end = get_quarter_end(self.P0)
 
                 # Add Period indicator
                 df['Period'] = df.index.map(lambda x: assign_period(x, p0_quarter_end))
@@ -945,10 +996,7 @@ class ScenManager:
                 idx = pd.MultiIndex.from_tuples(list(zip(entities, dates)),
                                               names=[entity_col, date_col])
                 df = pd.DataFrame(index=idx)
-                
-                # Get P0 quarter-end date
-                p0_quarter_end = get_quarter_end(self.P0)
-                
+
                 # Add Period indicator
                 date_series = pd.Series(dates, index=idx)
                 df['Period'] = date_series.map(lambda x: assign_period(x, p0_quarter_end))
@@ -1070,6 +1118,8 @@ class ScenManager:
         
         results: Dict[str, pd.DataFrame] = {}
         for scen_set, scen_dict in base_scen_results.items():
+            p0_for_set = self._get_p0_for_set(scen_set)
+            p0_quarter_end = get_quarter_end(p0_for_set)
             # Collect all data first
             all_data = {}
             
@@ -1132,9 +1182,6 @@ class ScenManager:
             # Add scenario series
             for col_name, series in all_data.items():
                 df[col_name] = pd.to_numeric(series, errors='coerce')
-            
-            # Get P0 quarter-end date
-            p0_quarter_end = get_quarter_end(self.P0)
             
             # Create period labels as a column; keep index as actual dates
             df['Period'] = [assign_period_label(date, p0_quarter_end) for date in df.index]
@@ -1431,6 +1478,7 @@ class ScenManager:
         scenarios = sorted(scen_dict.keys())
         
         # Plot each variable
+        p0_for_set = self._get_p0_for_set(scen_set)
         for i, var in enumerate(non_dummy_vars):
             ax = axes[i]
             
@@ -1443,7 +1491,7 @@ class ScenManager:
                     # For panel data, filter based on date column
                     date_col = self.dm._internal_loader.date_col
                     if date_col in X_scenario.columns:
-                        mask = X_scenario[date_col] >= self.P0
+                        mask = X_scenario[date_col] >= p0_for_set
                         X_filtered = X_scenario[mask]
                         if var in X_filtered.columns:
                             dates = pd.to_datetime(X_filtered[date_col]).normalize()
@@ -1456,7 +1504,7 @@ class ScenManager:
                         continue
                 else:  # TimeSeriesLoader
                     # For time series, filter based on index
-                    mask = X_scenario.index >= self.P0
+                    mask = X_scenario.index >= p0_for_set
                     X_filtered = X_scenario[mask]
                     if var in X_filtered.columns:
                         data_series = X_filtered[var]
@@ -1471,7 +1519,7 @@ class ScenManager:
                            color=color, linestyle='-', label=scenario, linewidth=2)
             
             # Add vertical line at P0
-            ax.axvline(x=self.P0, color='gray', linestyle='--', alpha=0.5)
+            ax.axvline(x=p0_for_set, color='gray', linestyle='--', alpha=0.5)
             
             # Customize subplot
             ax.set_title(f'{var}', fontsize=10, pad=15)

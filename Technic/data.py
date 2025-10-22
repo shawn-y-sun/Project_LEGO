@@ -1568,6 +1568,40 @@ class DataManager:
         return self._internal_loader.scen_p0
 
     @property
+    def scen_p0_map(self) -> Dict[str, pd.Timestamp]:
+        """
+        Get scenario-set-specific jumpoff overrides supplied via the MEV loader.
+
+        Returns
+        -------
+        Dict[str, pd.Timestamp]
+            Mapping of scenario set names to normalized month-end P0 timestamps.
+            Returns an empty dictionary when no overrides are defined.
+        """
+        overrides = getattr(self._mev_loader, 'scen_p0_overrides', {})
+        return dict(overrides)
+
+    def get_scen_p0(self, scen_set: str) -> Optional[pd.Timestamp]:
+        """
+        Resolve the effective jumpoff date for a specific scenario set.
+
+        Parameters
+        ----------
+        scen_set : str
+            Name of the scenario set whose P0 should be retrieved.
+
+        Returns
+        -------
+        Optional[pd.Timestamp]
+            The override defined for the scenario set, or the default
+            :meth:`scen_p0` value from the internal loader when no override exists.
+        """
+        overrides = self.scen_p0_map
+        if scen_set in overrides:
+            return overrides[scen_set]
+        return self.scen_p0
+
+    @property
     def p0(self) -> Optional[pd.Timestamp]:
         """
         Get the p0 date from the internal loader.
