@@ -692,6 +692,7 @@ class ModelSearch:
         self.error_log = errors
         # Early exit if nothing passed
         if not self.passed_cms:
+            print(f"Passed {len(passed)} combos; Failed {len(failed)} combos; {len(errors)} errors.\n")
             print("\n⚠️  No candidate models passed the filter tests. Search terminated.\n")
             return
         print(f"Passed {len(passed)} combos; Failed {len(failed)} combos; {len(errors)} errors.\n")
