@@ -1,4 +1,4 @@
-from typing import List, Union, Tuple, Type, Any, Optional, Callable, Dict
+from typing import List, Union, Tuple, Type, Any, Optional, Callable, Dict, Sequence
 import itertools
 import time
 import datetime
@@ -17,6 +17,7 @@ from .feature import Feature, DumVar
 from .transform import TSFM
 from .model import ModelBase
 from .cm import CM
+from .periods import default_periods_for_freq, resolve_periods_argument
 
 
 def _sort_specs_with_dummies_first(spec_list: List[Any]) -> List[Any]:
@@ -104,9 +105,10 @@ class ModelSearch:
         desired_pool: List[Union[str, TSFM, Feature, Tuple[Any, ...], set]],
         max_var_num: int,
         max_lag: int = 3,
-        max_periods: int = 3,
+        periods: Optional[Sequence[int]] = None,
         category_limit: int = 1,
-        exp_sign_map: Optional[Dict[str, int]] = None
+        exp_sign_map: Optional[Dict[str, int]] = None,
+        **legacy_kwargs: Any
     ) -> List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]]:
         """
         Build all valid feature-spec combos:
@@ -129,11 +131,17 @@ class ModelSearch:
             Max total specs per combo.
         max_lag : int
             Max lag for string TSFM expansion.
-        max_periods : int
-            Max periods for string TSFM expansion.
+        periods : Sequence[int], optional
+            Period configuration forwarded to :meth:`DataManager.build_tsfm_specs`.
+            Provide a list of positive integers to explicitly control
+            period-based transforms. Recommended choices include
+            ``[1, 2, 3, 6, 9, 12]`` for monthly data and ``[1, 2, 3, 4]`` for
+            quarterly data. When ``None`` (default), frequency-aware defaults
+            are applied automatically. The deprecated ``max_periods`` keyword is
+            still accepted for backward compatibility.
         category_limit : int, default 1
-            Max variables from each MEV category per combo. Only applies to 
-            top-level strings and TSFM instances in desired_pool; other Feature 
+            Max variables from each MEV category per combo. Only applies to
+            top-level strings and TSFM instances in desired_pool; other Feature
             instances or items in nested structures are not subject to this constraint.
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
@@ -248,28 +256,25 @@ class ModelSearch:
         # Gather unique strings to expand
         top_strings = {spec for combo in combos for spec in combo if isinstance(spec, str)}
         
-        # Apply special period logic for monthly data
-        # When internal_data is monthly, periods > 3 should only include multiples of 3
-        effective_max_periods = max_periods
-        if hasattr(self.dm, 'internal_data') and hasattr(self.dm.internal_data, 'index'):
-            try:
-                freq = pd.infer_freq(self.dm.internal_data.index)
-                if freq and freq.startswith('M'):  # Monthly frequency (M, MS, etc.)
-                    if max_periods > 3:
-                        # Create periods list: (1, 2, 3, 6, 9, 12, ...) up to max_periods
-                        periods_list = [1, 2, 3]
-                        for p in range(6, max_periods + 1, 3):  # multiples of 3 starting from 6
-                            periods_list.append(p)
-                        effective_max_periods = periods_list
-            except (AttributeError, TypeError):
-                # If frequency detection fails, use original max_periods
-                pass
-        
+        legacy_max_periods = legacy_kwargs.pop("max_periods", None)
+        if legacy_kwargs:
+            unexpected = ", ".join(sorted(legacy_kwargs.keys()))
+            raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+
+        freq = getattr(self.dm, "freq", None)
+        resolved_periods = resolve_periods_argument(
+            freq,
+            periods,
+            legacy_max_periods=legacy_max_periods
+        )
+
         # Suppress warnings during TSFM spec building
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             tsfm_map = self.dm.build_tsfm_specs(
-                list(top_strings), max_lag=max_lag, max_periods=effective_max_periods,
+                list(top_strings),
+                max_lag=max_lag,
+                periods=resolved_periods,
                 exp_sign_map=exp_sign_map
             )
 
@@ -588,12 +593,13 @@ class ModelSearch:
         sample: str = 'in',
         max_var_num: int = 10,
         max_lag: int = 3,
-        max_periods: int = 3,
+        periods: Optional[Sequence[int]] = None,
         category_limit: int = 1,
         exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
-        outlier_idx: Optional[List[Any]] = None
+        outlier_idx: Optional[List[Any]] = None,
+        **legacy_kwargs: Any
     ) -> List[CM]:
         """
         Execute full search pipeline: build specs, filter, rank, and select top_n models.
@@ -620,8 +626,14 @@ class ModelSearch:
             Maximum number of features allowed in each model.
         max_lag : int, default 3
             Maximum lag to consider in transformation specifications.
-        max_periods : int, default 3
-            Maximum number of periods to consider in transformations.
+        periods : Sequence[int], optional
+            Period configuration forwarded to :meth:`DataManager.build_tsfm_specs`.
+            Provide a list of positive integers to explicitly control
+            period-based transforms. Recommended choices include
+            ``[1, 2, 3, 6, 9, 12]`` for monthly data and ``[1, 2, 3, 4]`` for
+            quarterly data. When ``None`` (default), frequency-aware defaults
+            are applied automatically. The deprecated ``max_periods`` keyword is
+            still accepted for backward compatibility.
         category_limit : int, default 1
             Maximum number of variables from each MEV category per combo.
         exp_sign_map : Optional[Dict[str, int]], default=None
@@ -640,6 +652,23 @@ class ModelSearch:
             The top_n CM instances sorted by composite score.
         """
         forced = forced_in or []
+
+        legacy_max_periods = legacy_kwargs.pop("max_periods", None)
+        if legacy_kwargs:
+            unexpected = ", ".join(sorted(legacy_kwargs.keys()))
+            raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+
+        freq = getattr(self.dm, "freq", None)
+        resolved_periods = resolve_periods_argument(
+            freq,
+            periods,
+            legacy_max_periods=legacy_max_periods
+        )
+        if resolved_periods is None:
+            periods_summary = default_periods_for_freq(freq)
+        else:
+            periods_summary = resolved_periods
+
         # 1. Configuration
         print("=== ModelSearch Configuration ===")
         print(f"Target          : {self.target}")
@@ -649,7 +678,7 @@ class ModelSearch:
         print(f"Sample          : {sample}\n"
               f"Max var num     : {max_var_num}\n"
               f"Max lag         : {max_lag}\n"
-              f"Max periods     : {max_periods}\n"
+              f"Periods         : {periods_summary}\n"
               f"Category limit  : {category_limit}\n"
               f"Exp sign map    : {exp_sign_map}\n"
               f"Top N           : {top_n}\n"
@@ -675,7 +704,15 @@ class ModelSearch:
             print("")
             
         # 2. Build specs
-        combos = self.build_spec_combos(forced, desired_pool, max_var_num, max_lag, max_periods, category_limit, exp_sign_map)
+        combos = self.build_spec_combos(
+            forced,
+            desired_pool,
+            max_var_num,
+            max_lag,
+            periods=resolved_periods,
+            category_limit=category_limit,
+            exp_sign_map=exp_sign_map,
+        )
         print(f"Built {len(combos)} spec combinations.\n")
 
         # 3) Filter specs

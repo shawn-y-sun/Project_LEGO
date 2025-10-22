@@ -18,6 +18,7 @@ from .transform import TSFM
 from .feature import Feature
 from . import transform as transform_module
 from .condition import CondVar
+from .periods import default_periods_for_freq, resolve_periods_argument
 import inspect
 import functools
 
@@ -108,7 +109,7 @@ class DataManager:
     >>> specs = dm.build_tsfm_specs(
     ...     specs=['GDP', 'UNRATE'],
     ...     max_lag=2,        # Include up to 2 lags
-    ...     max_periods=3     # For transforms that take periods parameter
+    ...     periods=[1, 3, 6, 12]  # For transforms that take periods parameter
     ... )
     >>> # Results in transforms like:
     >>> # GDP: [GDP, diff(GDP), diff(GDP,2), lag(GDP,1), lag(GDP,2)]
@@ -870,8 +871,9 @@ class DataManager:
         self,
         specs: List[Union[str, TSFM]],
         max_lag: int = 0,
-        max_periods: Union[int, List[int]] = 1,
-        exp_sign_map: Optional[Dict[str, int]] = None
+        periods: Optional[List[int]] = None,
+        exp_sign_map: Optional[Dict[str, int]] = None,
+        **legacy_kwargs: Any
     ) -> Dict[str, List[Union[str, TSFM]]]:
         """
         Generate TSFM specification lists for each variable based on their type.
@@ -889,15 +891,18 @@ class DataManager:
         max_lag : int, default=0
             Generate transform entries for lags 0 through max_lag.
             Must be non-negative.
-        max_periods : Union[int, List[int]], default=1
-            For transforms that accept a 'periods' parameter:
-            - If int: generate entries for periods 1 through max_periods
-            - If List[int]: generate entries for the specific periods provided
-            Must be positive (if int) or contain only positive values (if list).
-            
-            Special handling for monthly data: When internal data has monthly frequency
-            and max_periods > 3, automatically creates periods [1, 2, 3, 6, 9, 12, ...]
-            (multiples of 3 beyond period 3) instead of [1, 2, 3, 4, 5, 6, ...].
+        periods : list of int, optional
+            Positive integers used when expanding transforms that accept a
+            ``periods`` parameter. When ``None`` (default), recommended
+            frequency-specific periods are inferred from :pyattr:`self.freq`:
+
+            * Monthly (``'M'``): ``[1, 3, 6, 12]``
+            * Quarterly (``'Q'``): ``[1, 2, 3, 4]``
+
+            For other frequencies the default falls back to ``[1]``. When
+            supplying a custom list, monthly data typically benefits from
+            periods drawn from ``[1, 2, 3, 6, 9, 12]`` whereas quarterly data
+            should remain within ``[1, 2, 3, 4]``.
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             - Keys: MEV variable names (str)
@@ -924,11 +929,11 @@ class DataManager:
         >>> #     'UNRATE': [TSFM(UNRATE, diff)]
         >>> # }
         >>> 
-        >>> # With lags and multiple periods (int)
+        >>> # With lags and explicit periods
         >>> specs = dm.build_tsfm_specs(
         ...     specs=['GDP', 'UNRATE'],
         ...     max_lag=2,
-        ...     max_periods=2
+        ...     periods=[1, 2]
         ... )
         >>> # Result includes variations like:
         >>> # GDP: [
@@ -936,12 +941,12 @@ class DataManager:
         >>> #     TSFM(GDP, diff, periods=1), TSFM(GDP, diff, periods=2),
         >>> #     TSFM(GDP, log, lag=1), TSFM(GDP, log, lag=2)
         >>> # ]
-        >>> 
-        >>> # With specific periods (list) - useful for monthly data
+        >>>
+        >>> # With broader periods - useful for monthly data
         >>> specs = dm.build_tsfm_specs(
         ...     specs=['GDP', 'UNRATE'],
         ...     max_lag=1,
-        ...     max_periods=[1, 2, 3, 6, 9, 12]
+        ...     periods=[1, 2, 3, 6, 9, 12]
         ... )
         >>> # Result includes transforms with specific periods like:
         >>> # GDP: [
@@ -951,11 +956,10 @@ class DataManager:
         >>> #     TSFM(GDP, diff, periods=9), TSFM(GDP, diff, periods=12),
         >>> #     (plus lagged versions)
         >>> # ]
-        >>> 
-        >>> # Monthly data automatic behavior (max_periods > 3)
-        >>> # For monthly internal data with max_periods=13:
-        >>> specs = dm.build_tsfm_specs(['GDP'], max_periods=13)
-        >>> # Automatically creates periods [1, 2, 3, 6, 9, 12] instead of [1...13]
+        >>>
+        >>> # Monthly defaults when periods is None:
+        >>> specs = dm.build_tsfm_specs(['GDP'])
+        >>> # For monthly data the method uses [1, 3, 6, 12] automatically
 
         Notes
         -----
@@ -963,31 +967,39 @@ class DataManager:
         - Transform functions must exist in transform_module
         - The method warns about unmapped variables but continues processing
         - Transform order is preserved within each variable's list
+        - The legacy ``max_periods`` keyword is still accepted but emits a
+          :class:`DeprecationWarning`; prefer ``periods``
         """
         if max_lag < 0:
             raise ValueError("max_lag must be >= 0")
-        
-        # Validate max_periods
-        if isinstance(max_periods, int):
-            if max_periods < 1:
-                raise ValueError("max_periods must be >= 1")
-        elif isinstance(max_periods, list):
-            if not max_periods:
-                raise ValueError("max_periods list cannot be empty")
-            if any(p < 1 for p in max_periods):
-                raise ValueError("all values in max_periods list must be >= 1")
-        else:
-            raise TypeError("max_periods must be int or List[int]")
 
-        # Apply special period logic for monthly data
-        # When internal_data is monthly, periods > 3 should only include multiples of 3
-        effective_max_periods = max_periods
-        if self.freq == 'M' and isinstance(max_periods, int) and max_periods > 3:
-            # Create periods list: (1, 2, 3, 6, 9, 12, ...) up to max_periods
-            periods_list = [1, 2, 3]
-            for p in range(6, max_periods + 1, 3):  # multiples of 3 starting from 6
-                periods_list.append(p)
-            effective_max_periods = periods_list
+        # Support deprecated max_periods keyword for backward compatibility
+        legacy_max_periods = legacy_kwargs.pop("max_periods", None)
+        if legacy_kwargs:
+            unexpected = ", ".join(sorted(legacy_kwargs.keys()))
+            raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+
+        if legacy_max_periods is not None and not isinstance(legacy_max_periods, (int, list)):
+            raise TypeError("max_periods must be int or List[int]")
+        if isinstance(legacy_max_periods, list) and not legacy_max_periods:
+            raise ValueError("max_periods list cannot be empty")
+
+        if periods is not None:
+            if not isinstance(periods, list):
+                raise TypeError("periods must be provided as a list of positive integers")
+            if not periods:
+                raise ValueError("periods list cannot be empty")
+
+        resolved_periods = resolve_periods_argument(
+            self.freq,
+            periods,
+            legacy_max_periods=legacy_max_periods
+        )
+
+        if resolved_periods is None:
+            periods_list = default_periods_for_freq(self.freq)
+        else:
+            periods_list = resolved_periods
 
         vt_map = self._mev_loader.mev_map
         tf_map = self._mev_loader.tsfm_map
@@ -1015,14 +1027,11 @@ class DataManager:
                             continue
                         sig = inspect.signature(fn)
                         if 'periods' in sig.parameters:
-                            if isinstance(effective_max_periods, int):
-                                pvals = list(range(1, effective_max_periods + 1))
-                            else:  # List[int]
-                                pvals = effective_max_periods
+                            pvals = periods_list
                         else:
                             pvals = [None]
                         for p in pvals:
-                            base_fn = functools.partial(fn, periods=p) if p else fn
+                            base_fn = functools.partial(fn, periods=p) if p is not None else fn
                             for lag in range(max_lag+1):
                                 # Get expected sign from map if provided
                                 exp_sign = 0
@@ -1043,8 +1052,9 @@ class DataManager:
         self,
         specs: List[Union[str, TSFM]],
         max_lag: int = 0,
-        max_periods: Union[int, List[int]] = 1,
-        exp_sign_map: Optional[Dict[str, int]] = None
+        periods: Optional[List[int]] = None,
+        exp_sign_map: Optional[Dict[str, int]] = None,
+        **legacy_kwargs: Any
     ) -> Dict[str, pd.DataFrame]:
         """
         Build a DataFrame for each variable by generating transform specifications
@@ -1060,11 +1070,11 @@ class DataManager:
             See build_tsfm_specs() for details.
         max_lag : int, default=0
             Maximum lag to include in transforms. Must be non-negative.
-        max_periods : Union[int, List[int]], default=1
-            Maximum periods for transforms that accept this parameter.
-            Must be positive (if int) or contain only positive values (if list).
-            For monthly data with max_periods > 3, automatically uses 
-            [1, 2, 3, 6, 9, 12, ...] instead of [1, 2, 3, 4, 5, 6, ...].
+        periods : list of int, optional
+            Positive integers forwarded to :meth:`build_tsfm_specs` for
+            transforms that accept a ``periods`` parameter. When ``None`` the
+            defaults from :meth:`build_tsfm_specs` are applied (monthly
+            ``[1, 3, 6, 12]``, quarterly ``[1, 2, 3, 4]``).
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             See build_tsfm_specs() for details.
@@ -1086,7 +1096,7 @@ class DataManager:
         >>> var_dfs = dm.build_search_vars(
         ...     specs=['GDP', 'UNRATE'],
         ...     max_lag=2,
-        ...     max_periods=2
+        ...     periods=[1, 2]
         ... )
         >>> # Access specific transforms
         >>> gdp_changes = var_dfs['GDP']['GDP_diff']
@@ -1100,8 +1110,9 @@ class DataManager:
         tsfm_specs = self.build_tsfm_specs(
             specs,
             max_lag=max_lag,
-            max_periods=max_periods,
-            exp_sign_map=exp_sign_map
+            periods=periods,
+            exp_sign_map=exp_sign_map,
+            **legacy_kwargs
         )
         var_df_map: Dict[str, pd.DataFrame] = {}
         for var, tsfms in tsfm_specs.items():
