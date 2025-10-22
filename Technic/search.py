@@ -17,7 +17,7 @@ from .feature import Feature, DumVar
 from .transform import TSFM
 from .model import ModelBase
 from .cm import CM
-from .periods import resolve_periods_argument
+from .periods import default_periods_for_freq, resolve_periods_argument
 
 
 def _sort_specs_with_dummies_first(spec_list: List[Any]) -> List[Any]:
@@ -105,7 +105,7 @@ class ModelSearch:
         desired_pool: List[Union[str, TSFM, Feature, Tuple[Any, ...], set]],
         max_var_num: int,
         max_lag: int = 3,
-        periods: Optional[Union[int, Sequence[int]]] = None,
+        periods: Optional[Sequence[int]] = None,
         category_limit: int = 1,
         exp_sign_map: Optional[Dict[str, int]] = None,
         **legacy_kwargs: Any
@@ -131,7 +131,7 @@ class ModelSearch:
             Max total specs per combo.
         max_lag : int
             Max lag for string TSFM expansion.
-        periods : int or Sequence[int], optional
+        periods : Sequence[int], optional
             Period configuration forwarded to :meth:`DataManager.build_tsfm_specs`.
             Provide a list of positive integers to explicitly control
             period-based transforms. Recommended choices include
@@ -593,7 +593,7 @@ class ModelSearch:
         sample: str = 'in',
         max_var_num: int = 10,
         max_lag: int = 3,
-        periods: Optional[Union[int, Sequence[int]]] = None,
+        periods: Optional[Sequence[int]] = None,
         category_limit: int = 1,
         exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1.0, 1.0, 1.0),
@@ -626,7 +626,7 @@ class ModelSearch:
             Maximum number of features allowed in each model.
         max_lag : int, default 3
             Maximum lag to consider in transformation specifications.
-        periods : int or Sequence[int], optional
+        periods : Sequence[int], optional
             Period configuration forwarded to :meth:`DataManager.build_tsfm_specs`.
             Provide a list of positive integers to explicitly control
             period-based transforms. Recommended choices include
@@ -664,7 +664,10 @@ class ModelSearch:
             periods,
             legacy_max_periods=legacy_max_periods
         )
-        periods_summary = resolved_periods if resolved_periods is not None else "auto"
+        if resolved_periods is None:
+            periods_summary = default_periods_for_freq(freq)
+        else:
+            periods_summary = resolved_periods
 
         # 1. Configuration
         print("=== ModelSearch Configuration ===")

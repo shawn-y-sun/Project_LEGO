@@ -18,6 +18,7 @@ from .transform import TSFM
 from .feature import Feature
 from . import transform as transform_module
 from .condition import CondVar
+from .periods import default_periods_for_freq, resolve_periods_argument
 import inspect
 import functools
 
@@ -978,45 +979,27 @@ class DataManager:
             unexpected = ", ".join(sorted(legacy_kwargs.keys()))
             raise TypeError(f"Unexpected keyword arguments: {unexpected}")
 
-        if legacy_max_periods is not None:
-            warnings.warn(
-                "'max_periods' is deprecated; pass an explicit list via 'periods' instead.",
-                DeprecationWarning,
-                stacklevel=2
-            )
-            if periods is not None:
-                raise ValueError("Cannot specify both 'periods' and deprecated 'max_periods'.")
-            if isinstance(legacy_max_periods, int):
-                if legacy_max_periods < 1:
-                    raise ValueError("max_periods must be >= 1")
-                periods = list(range(1, legacy_max_periods + 1))
-            elif isinstance(legacy_max_periods, list):
-                if not legacy_max_periods:
-                    raise ValueError("max_periods list cannot be empty")
-                if any((not isinstance(p, int)) or p < 1 for p in legacy_max_periods):
-                    raise ValueError("all values in max_periods list must be positive integers")
-                periods = legacy_max_periods
-            else:
-                raise TypeError("max_periods must be int or List[int]")
+        if legacy_max_periods is not None and not isinstance(legacy_max_periods, (int, list)):
+            raise TypeError("max_periods must be int or List[int]")
+        if isinstance(legacy_max_periods, list) and not legacy_max_periods:
+            raise ValueError("max_periods list cannot be empty")
 
-        # Determine periods list based on provided values or frequency defaults
-        if periods is None:
-            if self.freq == 'M':
-                default_periods = [1, 3, 6, 12]
-            elif self.freq == 'Q':
-                default_periods = [1, 2, 3, 4]
-            else:
-                default_periods = [1]
-            periods_list = default_periods
-        else:
+        if periods is not None:
             if not isinstance(periods, list):
                 raise TypeError("periods must be provided as a list of positive integers")
             if not periods:
                 raise ValueError("periods list cannot be empty")
-            if any((not isinstance(p, int)) or p < 1 for p in periods):
-                raise ValueError("all values in periods list must be positive integers")
-            # Deduplicate while preserving user-provided order
-            periods_list = list(dict.fromkeys(periods))
+
+        resolved_periods = resolve_periods_argument(
+            self.freq,
+            periods,
+            legacy_max_periods=legacy_max_periods
+        )
+
+        if resolved_periods is None:
+            periods_list = default_periods_for_freq(self.freq)
+        else:
+            periods_list = resolved_periods
 
         vt_map = self._mev_loader.mev_map
         tf_map = self._mev_loader.tsfm_map

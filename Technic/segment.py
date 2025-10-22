@@ -551,7 +551,7 @@ class Segment:
         self,
         vars_list: List[str],
         max_lag: int = 3,
-        periods: Optional[Union[int, Sequence[int]]] = None,
+        periods: Optional[Sequence[int]] = None,
         sample: str = 'full',
         plot_type: str = 'line',
         date_range: Optional[Tuple[str, str]] = None,
@@ -570,7 +570,7 @@ class Segment:
             List of variable names to analyze and transform.
         max_lag : int, default 3
             Maximum lag to consider in transformation specifications.
-        periods : int or Sequence[int], optional
+        periods : Sequence[int], optional
             Period configuration forwarded to
             :meth:`DataManager.build_search_vars`. Provide a list of positive
             integers to explicitly control period-based transforms.
@@ -1314,7 +1314,7 @@ class Segment:
         self,
         vars_list: List[str],
         max_lag: int = 3,
-        periods: Optional[Union[int, Sequence[int]]] = None,
+        periods: Optional[Sequence[int]] = None,
         sample: str = 'full',
         **legacy_kwargs: Any
     ) -> pd.DataFrame:
@@ -1331,7 +1331,7 @@ class Segment:
             List of variable names to analyze and transform.
         max_lag : int, default 3
             Maximum lag to consider in transformation specifications.
-        periods : int or Sequence[int], optional
+        periods : Sequence[int], optional
             Period configuration forwarded to
             :meth:`DataManager.build_search_vars`. Provide a list of positive
             integers to explicitly control period-based transforms.
@@ -1449,7 +1449,7 @@ class Segment:
         sample: str = 'in',
         max_var_num: int = 5,
         max_lag: int = 3,
-        periods: Optional[Union[int, Sequence[int]]] = None,
+        periods: Optional[Sequence[int]] = None,
         category_limit: int = 1,
         exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1, 1, 1),
@@ -1485,7 +1485,7 @@ class Segment:
             Maximum number of features allowed in each model.
         max_lag : int, default 3
             Maximum lag to consider in transformation specifications.
-        periods : int or Sequence[int], optional
+        periods : Sequence[int], optional
             Period configuration forwarded to :meth:`ModelSearch.run_search`.
             Provide a list of positive integers to explicitly control
             period-based transforms. Recommended choices include
