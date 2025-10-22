@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import math
+import datetime as dt
 from typing import Type, Dict, List, Optional, Any, Union, Callable, Tuple, Set, Sequence
 from pathlib import Path
 
@@ -154,6 +155,8 @@ class Segment:
             - 'both': both in-sample and full sample
         outlier_idx : Sequence[Any], optional
             Collection of row labels to skip when fitting the in-sample model.
+            Any date-like values are converted to month-end timestamps so they
+            line up with the typical monthly DataFrame index.
 
         Raises
         ------
@@ -189,6 +192,12 @@ class Segment:
         ...     specs=["gdp", "cpi"],
         ...     outlier_idx=["2020-03-31", "2020-04-30"]
         ... )
+        >>> # Mid-month inputs are rounded up to the month end automatically
+        >>> cm = segment.build_cm(
+        ...     cm_id="model_4",
+        ...     specs=["gdp", "cpi"],
+        ...     outlier_idx=["2020-03-15"]
+        ... )
         """
         if isinstance(outlier_idx, (str, bytes)):
             raise TypeError(
@@ -199,13 +208,41 @@ class Segment:
         normalized_outliers: Optional[List[Any]] = None
         if outlier_idx is not None:
             try:
-                normalized_outliers = list(outlier_idx)
+                raw_outliers = list(outlier_idx)
             except TypeError as exc:
                 raise TypeError(
                     "outlier_idx must be a list (or other iterable) of index "
                     "labels. Use ['label'] if you need to skip a single "
                     "observation."
                 ) from exc
+
+            # Normalize any date-like labels to the month-end convention used
+            # throughout the project so DataFrame lookups succeed reliably.
+            def _normalize_month_end(label: Any) -> Any:
+                if isinstance(label, (pd.Timestamp, dt.datetime, dt.date, np.datetime64)):
+                    candidate = pd.Timestamp(label)
+                elif isinstance(label, str):
+                    stripped = label.strip()
+                    if not stripped:
+                        return label
+                    try:
+                        candidate = pd.Timestamp(stripped)
+                    except (TypeError, ValueError):
+                        return label
+                else:
+                    return label
+
+                if pd.isna(candidate):
+                    return label
+
+                try:
+                    if candidate.tzinfo is not None:
+                        candidate = candidate.tz_localize(None)
+                    return candidate.to_period("M").to_timestamp("M")
+                except (ValueError, TypeError):
+                    return label
+
+            normalized_outliers = [_normalize_month_end(label) for label in raw_outliers]
 
         cm = CM(
             model_id=cm_id,
