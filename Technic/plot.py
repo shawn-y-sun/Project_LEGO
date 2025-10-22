@@ -97,7 +97,7 @@ def _plot_segmented_series(
     marker : str, default 'o'
         Matplotlib marker style for single-point segments.
     markersize : float, optional
-        Marker size override. Defaults to ``max(6.0, linewidth * 2.5)``.
+        Marker size override. Defaults to matching ``linewidth``.
     zorder : int, optional
         Matplotlib z-order to control drawing order.
     line_kwargs : dict, optional
@@ -118,7 +118,9 @@ def _plot_segmented_series(
     if not segments:
         return
 
-    effective_markersize = markersize if markersize is not None else max(6.0, linewidth * 2.5)
+    # Keep isolated markers visually consistent with their surrounding line
+    # segments by mirroring the supplied linewidth unless explicitly overridden.
+    effective_markersize = markersize if markersize is not None else linewidth
     line_kwargs = dict(line_kwargs or {})
     marker_kwargs = dict(marker_kwargs or {})
 
