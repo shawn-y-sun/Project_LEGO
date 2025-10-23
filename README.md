@@ -7,13 +7,12 @@
 ![License](https://img.shields.io/badge/License-Proprietary-black)
 ![Version](https://img.shields.io/badge/Version-Beta%20v2.0-orange)
 
-**Build models like LEGO: a modular Python framework for automated search, rigorous evaluation, and scenario forecasting**
+**A comprehensive Python framework for financial model development: automated search, rigorous evaluation/testing, and scenario forecasting**
 
 </div>
 
 ## 📋 Table of Contents
 - [Overview](#-overview)
-- [LEGO‑Style Modular Architecture](#-lego-style-modular-architecture)
 - [The LEGO Six‑Step Workflow](#-the-lego-sixstep-workflow)
 - [Features](#-features)
 - [Installation](#-installation)
@@ -23,65 +22,18 @@
 
 ## 📖 Overview
 
-**Project LEGO** is a production‑grade framework for assembling econometric models through a consistent six‑step pipeline. Designed for financial modeling (PPNR focus), it combines:
-- automated, exhaustive model search,
-- comprehensive evaluation and diagnostics (fit, significance, residual tests, cointegration, stability), and
-- integrated scenario forecasting —
-all exposed via a small set of composable APIs that snap together like LEGO bricks.
+**Project LEGO** is a production-grade Python framework for assembling econometric models through a guided six-step workflow. Built for financial modeling (PPNR focus), it provides automated exhaustive search, comprehensive evaluation and diagnostics (fit, significance, residual tests, cointegration, stability), and scenario forecasting — all with a small set of consistent APIs.
 
-## 🧱 LEGO‑Style Modular Architecture
-
-The framework is designed like LEGO bricks: small, interchangeable components that snap together to build complete modeling workflows. Each component has standardized interfaces, so you can easily swap, extend, or combine them.
-
-**🔧 Foundation Bricks (Data Layer):**
-- **`InternalLoader`** (e.g., `PPNRInternalLoader`, `PanelLoader`) — loads and standardizes internal time‑series/panel data with sample splits
-- **`MEVLoader`** — loads macro‑economic variables (MEVs) for both historical and scenario data
-- **`DataManager`** — **combines InternalLoader + MEVLoader**, handles interpolation/aggregation, feature engineering
-
-**🏗️ Orchestration Bricks (Modeling Layer):**
-- **`Segment`** — manages a modeling sub‑project for a specific target variable
-  - Takes: `DataManager` + `ModelBase` (e.g., `OLS`) + `ModelType` (optional)
-  - Auto‑creates: `ModelSearch` instance (the "searcher")
-- **`ModelSearch`** — exhaustive search engine that generates and evaluates model combinations
-  - Produces: `CM` (Candidate Model) instances
-
-**🔬 Analysis Bricks (CM Layer):**
-Each `CM` (Candidate Model) contains multiple analysis modules:
-- **`ScenManager`** — scenario forecasting and analysis
-- **`StabilityTest`** (e.g., `WalkForwardTest`) — model stability validation  
-- **`TestSet`** — comprehensive diagnostics (fit, significance, residual tests, cointegration)
-- **Model instances** — fitted `ModelBase` objects (in‑sample, full‑sample)
-
-**🎯 Feature Bricks (Transform Layer):**
-- **`TSFM`**, **`CondVar`**, **`DumVar`** — declarative feature transforms that snap onto any variable
-
-**🔄 Easy Extension (Just Like LEGO):**
-```python
-# 1. Snap on new transforms
-my_transform = lambda x: np.log(x + 1)
-tc.TSFM('GDP', my_transform)
-
-# 2. Swap model engines  
-class MyARModel(tc.ModelBase): ...
-tc.Segment(..., model_cls=MyARModel)
-
-# 3. Extend search logic
-seg.search_cms(desired_pool=[...], custom_constraints=my_filter)
-
-# 4. Add custom diagnostics
-seg.build_cm('test', specs=[...], test_update_func=my_tests)
-```
-
-**The LEGO Magic:** Change one brick, everything else still works. The six‑step workflow stays consistent whether you're using OLS or future AR/VECM models, working with quarterly or monthly data, or adding custom transforms.
+While OLS is the primary model today, the framework is designed to be model‑agnostic. Upcoming releases will add additional model families (e.g., Error‑Correction, AR/ARIMA) behind the same `Segment` and reporting interfaces.
 
 ## 🔄 The LEGO Six‑Step Workflow
 
-- **1) Data Preprocessing**: Load with `InternalLoader` (e.g., `PPNRInternalLoader`) + `MEVLoader`, then snap together via `DataManager` — handles interpolation/aggregation automatically.
-- **2) EDA & Driver Selection**: Create `Segment` (takes `DataManager` + `ModelBase` + `ModelType`). Use `Segment.explore_vars()` for visual exploration. Engineer features via `DataManager.apply_to_all()`.
-- **3) Exhaustive Search**: `Segment` auto‑creates `ModelSearch` (the "searcher"). Run `Segment.search_cms()` with driver pools (`TSFM`, `CondVar`, `DumVar('*')`) — produces ranked `CM` instances.
-- **4) Model Evaluation & Validation**: Each `CM` contains `ScenManager`, `StabilityTest`, `TestSet` modules. Use `Segment.show_report()` for comprehensive analysis across all `CM` instances.
-- **5) Fine‑tune & Enhancement**: Build individual `CM` instances via `Segment.build_cm()` or re‑run search with refined pools and constraints.
-- **6) Presentation & Documentation**: Export via `Segment.export()` — leverages each `CM`'s analysis modules for consistent reporting and external Excel template.
+- **1) Data Preprocessing**: Clean/construct internal data, then load with `PPNRInternalLoader` (or panel `PanelLoader`). Load historical MEVs and scenario MEVs with `MEVLoader`.
+- **2) EDA & Driver Selection**: Create exploratory plots and correlation tables with `Segment.explore_vars()`. Engineer features via `DataManager.apply_to_all()` and update variable mapping with `DataManager.update_var_map()`.
+- **3) Exhaustive Search**: Generate driver pools using raw names, `TSFM`, `CondVar`, `DumVar('*')`, etc., and run `Segment.search_cms()` with optional sign expectations and test criteria.
+- **4) Model Evaluation & Validation**: Use `Segment.show_report()` for fit, parameters, diagnostics, scenarios, and walk‑forward stability tests. Access per‑CM diagnostics with `cm.testset_in.*` utilities.
+- **5) Fine‑tune & Enhancement**: Iterate quickly with `Segment.build_cm()` and custom specs or re‑run search with refined pools and criteria.
+- **6) Presentation & Documentation**: Export results with `Segment.export()` and populate the provided external Excel template for presentation.
 
 ## ✨ Features (by step)
 
