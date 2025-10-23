@@ -658,52 +658,63 @@ class ModelSearch:
               f"Outlier idx     : {outlier_idx}\n")
         print("==================================\n")
 
-        # 2. Build specs
-        combos = self.build_spec_combos(forced, desired_pool, max_var_num, max_lag, max_periods, category_limit, exp_sign_map)
-        print(f"Built {len(combos)} spec combinations.\n")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
 
-        # 3) Filter specs
-        passed, failed, errors = self.filter_specs(
-            sample=sample,
-            test_update_func=test_update_func,
-            outlier_idx=outlier_idx
-        )
-        # Print empty line after test info
-        print("")  # Empty line after test info
-        
-        self.passed_cms = passed
-        self.failed_info = failed
-        self.error_log = errors
-        # Early exit if nothing passed
-        if not self.passed_cms:
-            print("\n⚠️  No candidate models passed the filter tests. Search terminated.\n")
-            return
-        print(f"Passed {len(passed)} combos; Failed {len(failed)} combos; {len(errors)} errors.\n")
+            # 2. Build specs
+            combos = self.build_spec_combos(
+                forced,
+                desired_pool,
+                max_var_num,
+                max_lag,
+                max_periods,
+                category_limit,
+                exp_sign_map
+            )
+            print(f"Built {len(combos)} spec combinations.\n")
 
-        # 4. Rank models
-        df = ModelSearch.rank_cms(passed, sample, rank_weights)
-        # Identify and store top cms
-        ordered_ids = df['model_id'].tolist()
-        top_ids = ordered_ids[:top_n]
-        self.top_cms = [next(cm for cm in passed if cm.model_id == mid) for mid in top_ids]
+            # 3) Filter specs
+            passed, failed, errors = self.filter_specs(
+                sample=sample,
+                test_update_func=test_update_func,
+                outlier_idx=outlier_idx
+            )
+            # Print empty line after test info
+            print("")  # Empty line after test info
 
-        # Rename model_ids and update df_scores
-        new_ids = [f"cm{i+1}" for i in range(len(self.top_cms))]
-        for cm, new_id in zip(self.top_cms, new_ids):
-            cm.model_id = new_id
-        df_updated = df.copy()
-        for idx, new_id in enumerate(new_ids):
-            df_updated.at[idx, 'model_id'] = new_id
-        self.df_scores = df_updated
+            self.passed_cms = passed
+            self.failed_info = failed
+            self.error_log = errors
+            # Early exit if nothing passed
+            if not self.passed_cms:
+                print("\n⚠️  No candidate models passed the filter tests. Search terminated.\n")
+                return
+            print(f"Passed {len(passed)} combos; Failed {len(failed)} combos; {len(errors)} errors.\n")
 
-        # Print updated rankings
-        print("=== Updated Ranked Results ===")
-        print(df_updated.head(top_n).to_string(index=False))
+            # 4. Rank models
+            df = ModelSearch.rank_cms(passed, sample, rank_weights)
+            # Identify and store top cms
+            ordered_ids = df['model_id'].tolist()
+            top_ids = ordered_ids[:top_n]
+            self.top_cms = [next(cm for cm in passed if cm.model_id == mid) for mid in top_ids]
 
-        # Print top model formulas
-        print(f"\n=== Top {top_n} Model Formulas ===")
-        for cm in self.top_cms:
-            print(f"{cm.model_id}: {cm.formula}")
+            # Rename model_ids and update df_scores
+            new_ids = [f"cm{i+1}" for i in range(len(self.top_cms))]
+            for cm, new_id in zip(self.top_cms, new_ids):
+                cm.model_id = new_id
+            df_updated = df.copy()
+            for idx, new_id in enumerate(new_ids):
+                df_updated.at[idx, 'model_id'] = new_id
+            self.df_scores = df_updated
+
+            # Print updated rankings
+            print("=== Updated Ranked Results ===")
+            print(df_updated.head(top_n).to_string(index=False))
+
+            # Print top model formulas
+            print(f"\n=== Top {top_n} Model Formulas ===")
+            for cm in self.top_cms:
+                print(f"{cm.model_id}: {cm.formula}")
         # No return; results are stored in self
     
     def analyze_failures(self) -> None:
