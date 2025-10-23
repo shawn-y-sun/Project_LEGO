@@ -1,10 +1,11 @@
 # =============================================================================
 # module: mev.py
 # Purpose: Load and manage Macro Economic Variables (MEVs) from various sources
-# Dependencies: pandas, yaml, pathlib, typing
+# Key Types/Classes: MEVLoader
+# Key Functions: _process_quarterly_excel, _process_monthly_excel
+# Dependencies: pandas, yaml, pathlib, typing, warnings
 # =============================================================================
 
-import os
 from pathlib import Path
 import pandas as pd
 import yaml
@@ -243,6 +244,9 @@ class MEVLoader:
         # Initialize empty containers for scenario MEVs
         self._scen_mev_qtr: Dict[str, Dict[str, pd.DataFrame]] = {}
         self._scen_mev_mth: Dict[str, Dict[str, pd.DataFrame]] = {}
+
+        # Track scenario-specific jumpoff overrides supplied during loading
+        self._scen_p0_overrides: Dict[str, pd.Timestamp] = {}
         
         # Initialize MEV codes set
         self._mev_codes: Set[str] = set(mev_codes) if mev_codes else set()
@@ -252,35 +256,79 @@ class MEVLoader:
             self._validate_mev_codes()
         
     def _load_mev_map(self, path: Optional[Union[str, Path]] = None) -> Dict[str, Dict[str, Optional[str]]]:
-        """Load MEV mapping from Excel file."""
+        """Load MEV mapping from an Excel file.
+
+        The mapping file must contain ``mev_code``, ``type`` and ``description``
+        columns and may optionally include ``category`` and ``aggregation``. The
+        ``aggregation`` field describes how a quarterly MEV series is
+        constructed (e.g., ``average``, ``sum`` or ``end``) and is later used by
+        :class:`~Technic.data.DataManager` to choose the appropriate
+        interpolation strategy. Returned values include all available fields,
+        defaulting to ``None`` when optional entries are absent. When
+        ``aggregation`` is missing, :class:`~Technic.data.DataManager` assumes
+        the MEV represents a quarterly average during interpolation.
+
+        Parameters
+        ----------
+        path : str or Path, optional
+            Custom path to the mapping file. If omitted, the default
+            ``support/mev_type.xlsx`` is used.
+
+        Returns
+        -------
+        Dict[str, Dict[str, Optional[str]]]
+            Dictionary keyed by MEV code with values containing ``type``,
+            ``description``, ``category`` and ``aggregation`` information.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the mapping file does not exist.
+        ValueError
+            If required columns are missing from the Excel file.
+
+        Examples
+        --------
+        >>> loader = MEVLoader()
+        >>> mev_map = loader._load_mev_map("/path/to/mev_type.xlsx")
+        >>> mev_map["GDP"]["aggregation"]
+        'average'
+        """
         file_path = Path(path) if path else _DEFAULT_MEV_MAP_PATH
         if not file_path.exists():
             raise FileNotFoundError(f"MEV type mapping file not found: {file_path}")
-            
+
         df = pd.read_excel(file_path)
-        required_cols = {'mev_code', 'type', 'description'}
+        required_cols = {"mev_code", "type", "description"}
         if not required_cols.issubset(df.columns):
             raise ValueError(f"Expected columns {required_cols} in {file_path}")
-            
-        # Check if category column exists
-        has_category = 'category' in df.columns
-        
-        if has_category:
-            return {
-                code: {
-                    'type': type_, 
-                    'description': desc, 
-                    'category': cat if pd.notna(cat) else None
-                }
-                for code, type_, desc, cat in zip(
-                    df['mev_code'], df['type'], df['description'], df['category']
-                )
+
+        # Optional columns may be absent; fall back to ``None`` for missing
+        # entries so downstream consumers always see the same keys.
+        has_category = "category" in df.columns
+        has_aggregation = "aggregation" in df.columns
+
+        category_values = df["category"] if has_category else [None] * len(df)
+        aggregation_values = df["aggregation"] if has_aggregation else [None] * len(df)
+
+        mapping: Dict[str, Dict[str, Optional[str]]] = {}
+        for code, type_, desc, cat, agg in zip(
+            df["mev_code"],
+            df["type"],
+            df["description"],
+            category_values,
+            aggregation_values,
+        ):
+            # Normalize optional fields: pandas reads missing cells as NaN,
+            # which we convert to ``None`` for cleaner downstream handling.
+            mapping[code] = {
+                "type": type_,
+                "description": desc,
+                "category": cat if pd.notna(cat) else None,
+                "aggregation": agg if pd.notna(agg) else None,
             }
-        else:
-            return {
-                code: {'type': type_, 'description': desc, 'category': None}
-                for code, type_, desc in zip(df['mev_code'], df['type'], df['description'])
-            }
+
+        return mapping
         
     def _load_tsfm_map(self, path: Optional[Union[str, Path]] = None) -> Dict[str, List[str]]:
         """Load transform mapping from YAML file."""
@@ -390,28 +438,30 @@ class MEVLoader:
         source: Union[str, Dict[str, Dict[str, Union[pd.DataFrame, pd.Series]]]],
         scens: Optional[Dict[str, str]] = None,
         set_name: Optional[str] = None,
-        freq: Optional[str] = None
+        freq: Optional[str] = None,
+        p0: Optional[Union[str, pd.Timestamp, Dict[str, Union[str, pd.Timestamp]]]] = None
     ) -> None:
         """
         Load scenario MEVs from either an Excel source or a dictionary structure.
-        Creates or updates a scenario set containing multiple sub-scenarios.
-        
+        Creates or updates a scenario set containing multiple sub-scenarios and stores
+        optional scenario-specific jumpoff overrides.
+
         The method supports two loading modes:
         1. From Excel file:
-           - source: path to Excel workbook
-           - scens: mapping of scenario names to sheet names
-           - set_name: optional name for the scenario set
-           
+           - ``source``: path to Excel workbook
+           - ``scens``: mapping of scenario names to sheet names
+           - ``set_name``: optional name for the scenario set
+
         2. From dictionary (3-layer structure):
-           - source: dictionary with structure {set_name: {scen_name: DataFrame}}
-           - scens and set_name parameters are ignored
-        
+           - ``source``: dictionary with structure ``{set_name: {scen_name: DataFrame}}``
+           - ``scens`` and ``set_name`` parameters are ignored
+
         Parameters
         ----------
         source : str or dict
             Either:
             - Path to Excel workbook containing scenario data, or
-            - Dictionary with structure {set_name: {scen_name: DataFrame}}
+            - Dictionary with structure ``{set_name: {scen_name: DataFrame}}``
         scens : dict, optional
             Required only when loading from Excel.
             Mapping of scenario names to sheet names
@@ -419,47 +469,62 @@ class MEVLoader:
         set_name : str, optional
             Used only when loading from Excel.
             Name of the scenario set. If None, uses the source filename without extension.
-            Example: If source is 'EWST2024.xlsx', set_name defaults to 'EWST2024'
+            Example: If source is ``'EWST2024.xlsx'``, ``set_name`` defaults to ``'EWST2024'``.
         freq : str, optional
-            Expected frequency ('M' for monthly, 'Q' for quarterly).
+            Expected frequency (``'M'`` for monthly, ``'Q'`` for quarterly).
             If not provided, will be inferred from data.
-            
+        p0 : str, Timestamp, or dict, optional
+            Scenario jumpoff date override(s). When loading from Excel, provide a
+            single date string (e.g., ``"2024-12-31"``) or :class:`~pandas.Timestamp`
+            to override the internal loader ``scen_p0`` for that scenario set.
+            When loading from a dictionary containing multiple scenario sets,
+            supply a mapping of ``{set_name: p0_string}`` to assign different
+            jumpoff dates per set. Overrides are normalized to month-end dates
+            and made available through :class:`~Technic.data.DataManager`.
+
         Examples
         --------
         >>> loader = MEVLoader()
-        >>> # 1. Load from Excel file
         >>> loader.load_scens(
         ...     "EWST2024.xlsx",
-        ...     scens={"Base": "Base", "Adv": "Adverse"}
+        ...     scens={"Base": "Base", "Adv": "Adverse"},
+        ...     p0="2024-12-31"
         ... )
-        >>> 
-        >>> # 2. Load from dictionary
-        >>> loader.load_scens({
-        ...     "EWST2024": {
-        ...         "Base": df_base,
-        ...         "Adv": df_adverse
-        ...     }
-        ... })
+        >>> loader.load_scens({"EWST2025": {"Base": df_base}}, p0="2024-12-31")
+        >>> loader.load_scens(
+        ...     {"EWST2026": {"Base": df_base}, "GRST2026": {"Base": df_other}},
+        ...     p0={"EWST2026": "2024-12-31", "GRST2026": "2024-09-30"}
+        ... )
         """
         if isinstance(source, str):
             # Loading from Excel file
             if scens is None:
                 raise ValueError("'scens' parameter required when loading from Excel file")
-                
+
             # Determine scenario set name if not provided
             if set_name is None:
                 set_name = Path(source).stem
-                
+
+            # Apply optional P0 override for this scenario set
+            override_value: Optional[Union[str, pd.Timestamp]] = None
+            if isinstance(p0, dict):
+                override_value = p0.get(set_name)
+            elif p0 is not None:
+                override_value = p0  # type: ignore[assignment]
+            if override_value is not None:
+                normalized = self._normalize_p0_value(override_value)
+                self._scen_p0_overrides[set_name] = normalized
+
             # Initialize containers for this scenario set if not exist
             if set_name not in self._scen_mev_qtr:
                 self._scen_mev_qtr[set_name] = {}
             if set_name not in self._scen_mev_mth:
                 self._scen_mev_mth[set_name] = {}
-                
+
             # Load each sub-scenario from Excel sheets
             for scen_name, sheet in scens.items():
                 data = self._load_from_excel(source, sheet, freq)
-                
+
                 # Store in appropriate scenario container based on frequency
                 if data.index.inferred_freq.startswith('Q'):
                     self._scen_mev_qtr[set_name][scen_name] = data
@@ -470,11 +535,19 @@ class MEVLoader:
                         f"Unsupported data frequency: {data.index.inferred_freq}. "
                         "Only monthly (M) and quarterly (Q) frequencies are supported."
                     )
-                    
+
                 # Update MEV codes and validate
                 self._mev_codes.update(data.columns)
-                
+
         else:
+            if not isinstance(source, dict):
+                raise TypeError(
+                    "When source is not a string, it must be a dictionary mapping set names to scenario data."
+                )
+
+            # Track number of scenario sets to validate scalar p0 usage
+            set_count = len(source)
+
             # Loading from dictionary structure
             for curr_set_name, scenarios in source.items():
                 # Initialize containers for this scenario set if not exist
@@ -482,25 +555,39 @@ class MEVLoader:
                     self._scen_mev_qtr[curr_set_name] = {}
                 if curr_set_name not in self._scen_mev_mth:
                     self._scen_mev_mth[curr_set_name] = {}
-                    
+
+                # Resolve optional P0 override for this set
+                override_value: Optional[Union[str, pd.Timestamp]] = None
+                if isinstance(p0, dict):
+                    override_value = p0.get(curr_set_name)
+                elif p0 is not None:
+                    if set_count > 1:
+                        raise ValueError(
+                            "When loading multiple scenario sets from a dictionary, provide 'p0' as a mapping of set names to dates."
+                        )
+                    override_value = p0  # type: ignore[assignment]
+                if override_value is not None:
+                    normalized = self._normalize_p0_value(override_value)
+                    self._scen_p0_overrides[curr_set_name] = normalized
+
                 # Process each scenario
                 for scen_name, data in scenarios.items():
                     # Convert Series to DataFrame if necessary
                     if isinstance(data, pd.Series):
                         data = data.to_frame()
-                        
+
                     # Validate and store based on frequency
                     if not isinstance(data.index, pd.DatetimeIndex):
                         raise ValueError(
                             f"Data for scenario '{scen_name}' must have datetime index"
                         )
-                        
+
                     inferred_freq = pd.infer_freq(data.index)
                     if inferred_freq is None:
                         raise ValueError(
                             f"Could not infer frequency from data for scenario '{scen_name}'"
                         )
-                        
+
                     # Store in appropriate container based on frequency
                     if inferred_freq.startswith('Q'):
                         self._scen_mev_qtr[curr_set_name][scen_name] = data
@@ -511,11 +598,17 @@ class MEVLoader:
                             f"Unsupported data frequency: {inferred_freq}. "
                             "Only monthly (M) and quarterly (Q) frequencies are supported."
                         )
-                        
+
                     # Update MEV codes and validate
                     self._mev_codes.update(data.columns)
-                    
+
         self._validate_mev_codes()
+
+    @staticmethod
+    def _normalize_p0_value(raw_p0: Union[str, pd.Timestamp]) -> pd.Timestamp:
+        """Normalize jumpoff date inputs to month-end timestamps."""
+        timestamp = pd.to_datetime(raw_p0).normalize()
+        return pd.Timestamp(timestamp.year, timestamp.month, 1) + pd.offsets.MonthEnd(0)
 
     def _load_from_excel(
         self,
@@ -650,7 +743,7 @@ class MEVLoader:
     def scen_mev_mth(self) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
         Get monthly scenario MEVs.
-        
+
         Returns
         -------
         dict
@@ -658,6 +751,18 @@ class MEVLoader:
             {set_name: {scenario_name: DataFrame}}
         """
         return self._scen_mev_mth
+
+    @property
+    def scen_p0_overrides(self) -> Dict[str, pd.Timestamp]:
+        """
+        Get scenario-specific jumpoff overrides provided during loading.
+
+        Returns
+        -------
+        Dict[str, pd.Timestamp]
+            Mapping of scenario set names to normalized month-end P0 timestamps.
+        """
+        return dict(self._scen_p0_overrides)
         
     @property
     def mev_codes(self) -> List[str]:
@@ -822,12 +927,14 @@ class MEVLoader:
             # Clean all scenario sets
             self._scen_mev_qtr.clear()
             self._scen_mev_mth.clear()
+            self._scen_p0_overrides.clear()
         else:
             # Clean specific scenario set
             if set_name in self._scen_mev_qtr:
                 del self._scen_mev_qtr[set_name]
             if set_name in self._scen_mev_mth:
                 del self._scen_mev_mth[set_name]
+            self._scen_p0_overrides.pop(set_name, None)
 
     def clean_all(self) -> None:
         """

@@ -1,15 +1,12 @@
 # =============================================================================
 # module: data.py
 # Purpose: Manage and combine internal and MEV data for modeling
-# Dependencies: pandas, typing, DataLoader, MEVLoader, TSFM, CondVar, DumVar
+# Key Types/Classes: DataManager
+# Key Functions: build_features, _interpolate_df
+# Dependencies: pandas, numpy, scipy, typing, DataLoader, MEVLoader, TSFM, CondVar, DumVar
 # =============================================================================
-import os
-from pathlib import Path
 import pandas as pd
 import warnings
-import yaml
-import math
-import matplotlib.pyplot as plt
 from typing import Any, Dict, List, Optional, Callable, Union, Tuple
 import numpy as np
 from scipy.interpolate import CubicSpline
@@ -21,6 +18,7 @@ from .transform import TSFM
 from .feature import Feature
 from . import transform as transform_module
 from .condition import CondVar
+from .periods import default_periods_for_freq, resolve_periods_argument
 import inspect
 import functools
 
@@ -54,7 +52,7 @@ class DataManager:
     poos_periods : List[int], optional
         List of integers specifying pseudo-out-of-sample period lengths for Walk Forward Test.
         Each number represents how many periods to use as pseudo out-of-sample ending at
-        the original in-sample end date. If None, defaults to [4, 9, 12] for quarterly 
+        the original in-sample end date. If None, defaults to [4, 8, 12] for quarterly
         data or [3, 6, 12] for monthly data.
 
     Examples
@@ -111,7 +109,7 @@ class DataManager:
     >>> specs = dm.build_tsfm_specs(
     ...     specs=['GDP', 'UNRATE'],
     ...     max_lag=2,        # Include up to 2 lags
-    ...     max_periods=3     # For transforms that take periods parameter
+    ...     periods=[1, 3, 6, 12]  # For transforms that take periods parameter
     ... )
     >>> # Results in transforms like:
     >>> # GDP: [GDP, diff(GDP), diff(GDP,2), lag(GDP,1), lag(GDP,2)]
@@ -873,8 +871,9 @@ class DataManager:
         self,
         specs: List[Union[str, TSFM]],
         max_lag: int = 0,
-        max_periods: Union[int, List[int]] = 1,
-        exp_sign_map: Optional[Dict[str, int]] = None
+        periods: Optional[List[int]] = None,
+        exp_sign_map: Optional[Dict[str, int]] = None,
+        **legacy_kwargs: Any
     ) -> Dict[str, List[Union[str, TSFM]]]:
         """
         Generate TSFM specification lists for each variable based on their type.
@@ -892,15 +891,18 @@ class DataManager:
         max_lag : int, default=0
             Generate transform entries for lags 0 through max_lag.
             Must be non-negative.
-        max_periods : Union[int, List[int]], default=1
-            For transforms that accept a 'periods' parameter:
-            - If int: generate entries for periods 1 through max_periods
-            - If List[int]: generate entries for the specific periods provided
-            Must be positive (if int) or contain only positive values (if list).
-            
-            Special handling for monthly data: When internal data has monthly frequency
-            and max_periods > 3, automatically creates periods [1, 2, 3, 6, 9, 12, ...]
-            (multiples of 3 beyond period 3) instead of [1, 2, 3, 4, 5, 6, ...].
+        periods : list of int, optional
+            Positive integers used when expanding transforms that accept a
+            ``periods`` parameter. When ``None`` (default), recommended
+            frequency-specific periods are inferred from :pyattr:`self.freq`:
+
+            * Monthly (``'M'``): ``[1, 3, 6, 12]``
+            * Quarterly (``'Q'``): ``[1, 2, 3, 4]``
+
+            For other frequencies the default falls back to ``[1]``. When
+            supplying a custom list, monthly data typically benefits from
+            periods drawn from ``[1, 2, 3, 6, 9, 12]`` whereas quarterly data
+            should remain within ``[1, 2, 3, 4]``.
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             - Keys: MEV variable names (str)
@@ -927,11 +929,11 @@ class DataManager:
         >>> #     'UNRATE': [TSFM(UNRATE, diff)]
         >>> # }
         >>> 
-        >>> # With lags and multiple periods (int)
+        >>> # With lags and explicit periods
         >>> specs = dm.build_tsfm_specs(
         ...     specs=['GDP', 'UNRATE'],
         ...     max_lag=2,
-        ...     max_periods=2
+        ...     periods=[1, 2]
         ... )
         >>> # Result includes variations like:
         >>> # GDP: [
@@ -939,12 +941,12 @@ class DataManager:
         >>> #     TSFM(GDP, diff, periods=1), TSFM(GDP, diff, periods=2),
         >>> #     TSFM(GDP, log, lag=1), TSFM(GDP, log, lag=2)
         >>> # ]
-        >>> 
-        >>> # With specific periods (list) - useful for monthly data
+        >>>
+        >>> # With broader periods - useful for monthly data
         >>> specs = dm.build_tsfm_specs(
         ...     specs=['GDP', 'UNRATE'],
         ...     max_lag=1,
-        ...     max_periods=[1, 2, 3, 6, 9, 12]
+        ...     periods=[1, 2, 3, 6, 9, 12]
         ... )
         >>> # Result includes transforms with specific periods like:
         >>> # GDP: [
@@ -954,11 +956,10 @@ class DataManager:
         >>> #     TSFM(GDP, diff, periods=9), TSFM(GDP, diff, periods=12),
         >>> #     (plus lagged versions)
         >>> # ]
-        >>> 
-        >>> # Monthly data automatic behavior (max_periods > 3)
-        >>> # For monthly internal data with max_periods=13:
-        >>> specs = dm.build_tsfm_specs(['GDP'], max_periods=13)
-        >>> # Automatically creates periods [1, 2, 3, 6, 9, 12] instead of [1...13]
+        >>>
+        >>> # Monthly defaults when periods is None:
+        >>> specs = dm.build_tsfm_specs(['GDP'])
+        >>> # For monthly data the method uses [1, 3, 6, 12] automatically
 
         Notes
         -----
@@ -966,31 +967,39 @@ class DataManager:
         - Transform functions must exist in transform_module
         - The method warns about unmapped variables but continues processing
         - Transform order is preserved within each variable's list
+        - The legacy ``max_periods`` keyword is still accepted but emits a
+          :class:`DeprecationWarning`; prefer ``periods``
         """
         if max_lag < 0:
             raise ValueError("max_lag must be >= 0")
-        
-        # Validate max_periods
-        if isinstance(max_periods, int):
-            if max_periods < 1:
-                raise ValueError("max_periods must be >= 1")
-        elif isinstance(max_periods, list):
-            if not max_periods:
-                raise ValueError("max_periods list cannot be empty")
-            if any(p < 1 for p in max_periods):
-                raise ValueError("all values in max_periods list must be >= 1")
-        else:
-            raise TypeError("max_periods must be int or List[int]")
 
-        # Apply special period logic for monthly data
-        # When internal_data is monthly, periods > 3 should only include multiples of 3
-        effective_max_periods = max_periods
-        if self.freq == 'M' and isinstance(max_periods, int) and max_periods > 3:
-            # Create periods list: (1, 2, 3, 6, 9, 12, ...) up to max_periods
-            periods_list = [1, 2, 3]
-            for p in range(6, max_periods + 1, 3):  # multiples of 3 starting from 6
-                periods_list.append(p)
-            effective_max_periods = periods_list
+        # Support deprecated max_periods keyword for backward compatibility
+        legacy_max_periods = legacy_kwargs.pop("max_periods", None)
+        if legacy_kwargs:
+            unexpected = ", ".join(sorted(legacy_kwargs.keys()))
+            raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+
+        if legacy_max_periods is not None and not isinstance(legacy_max_periods, (int, list)):
+            raise TypeError("max_periods must be int or List[int]")
+        if isinstance(legacy_max_periods, list) and not legacy_max_periods:
+            raise ValueError("max_periods list cannot be empty")
+
+        if periods is not None:
+            if not isinstance(periods, list):
+                raise TypeError("periods must be provided as a list of positive integers")
+            if not periods:
+                raise ValueError("periods list cannot be empty")
+
+        resolved_periods = resolve_periods_argument(
+            self.freq,
+            periods,
+            legacy_max_periods=legacy_max_periods
+        )
+
+        if resolved_periods is None:
+            periods_list = default_periods_for_freq(self.freq)
+        else:
+            periods_list = resolved_periods
 
         vt_map = self._mev_loader.mev_map
         tf_map = self._mev_loader.tsfm_map
@@ -1018,14 +1027,11 @@ class DataManager:
                             continue
                         sig = inspect.signature(fn)
                         if 'periods' in sig.parameters:
-                            if isinstance(effective_max_periods, int):
-                                pvals = list(range(1, effective_max_periods + 1))
-                            else:  # List[int]
-                                pvals = effective_max_periods
+                            pvals = periods_list
                         else:
                             pvals = [None]
                         for p in pvals:
-                            base_fn = functools.partial(fn, periods=p) if p else fn
+                            base_fn = functools.partial(fn, periods=p) if p is not None else fn
                             for lag in range(max_lag+1):
                                 # Get expected sign from map if provided
                                 exp_sign = 0
@@ -1046,8 +1052,9 @@ class DataManager:
         self,
         specs: List[Union[str, TSFM]],
         max_lag: int = 0,
-        max_periods: Union[int, List[int]] = 1,
-        exp_sign_map: Optional[Dict[str, int]] = None
+        periods: Optional[List[int]] = None,
+        exp_sign_map: Optional[Dict[str, int]] = None,
+        **legacy_kwargs: Any
     ) -> Dict[str, pd.DataFrame]:
         """
         Build a DataFrame for each variable by generating transform specifications
@@ -1063,11 +1070,11 @@ class DataManager:
             See build_tsfm_specs() for details.
         max_lag : int, default=0
             Maximum lag to include in transforms. Must be non-negative.
-        max_periods : Union[int, List[int]], default=1
-            Maximum periods for transforms that accept this parameter.
-            Must be positive (if int) or contain only positive values (if list).
-            For monthly data with max_periods > 3, automatically uses 
-            [1, 2, 3, 6, 9, 12, ...] instead of [1, 2, 3, 4, 5, 6, ...].
+        periods : list of int, optional
+            Positive integers forwarded to :meth:`build_tsfm_specs` for
+            transforms that accept a ``periods`` parameter. When ``None`` the
+            defaults from :meth:`build_tsfm_specs` are applied (monthly
+            ``[1, 3, 6, 12]``, quarterly ``[1, 2, 3, 4]``).
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             See build_tsfm_specs() for details.
@@ -1089,7 +1096,7 @@ class DataManager:
         >>> var_dfs = dm.build_search_vars(
         ...     specs=['GDP', 'UNRATE'],
         ...     max_lag=2,
-        ...     max_periods=2
+        ...     periods=[1, 2]
         ... )
         >>> # Access specific transforms
         >>> gdp_changes = var_dfs['GDP']['GDP_diff']
@@ -1103,189 +1110,195 @@ class DataManager:
         tsfm_specs = self.build_tsfm_specs(
             specs,
             max_lag=max_lag,
-            max_periods=max_periods,
-            exp_sign_map=exp_sign_map
+            periods=periods,
+            exp_sign_map=exp_sign_map,
+            **legacy_kwargs
         )
         var_df_map: Dict[str, pd.DataFrame] = {}
         for var, tsfms in tsfm_specs.items():
             var_df_map[var] = self.build_features(tsfms)
         return var_df_map
     
-    @staticmethod
-    def _interpolate_df(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Interpolate quarterly MEV DataFrames to match monthly frequency using cubic spline.
-        The interpolation ensures that quarterly averages of the monthly values match
-        the original quarterly values. For valid series, quarterly values are first shifted
-        to the middle month of each quarter before interpolation.
+    def _interpolate_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Convert quarterly MEV data to a monthly frequency.
 
-        The process:
-        1. Forward fills any NA values in the quarterly series
-        2. For valid series:
-           - Shifts quarterly values to mid-quarter dates
-           - Extends the series by 4 quarters
-           - Performs cubic spline interpolation
-           - Scales interpolated values to preserve quarterly averages
-        3. Returns only the original date range
+        The interpolation respects how each MEV is aggregated within the
+        quarter, as specified by ``var_map[col]['aggregation']``. When this
+        metadata is absent, the series is treated as a quarterly average.
+        Supported aggregation types are:
+
+        ``average`` or ``mean``
+            1. Shift each quarterly observation to the middle month of the
+               quarter.
+            2. Extend the series with four additional mid-quarter points using
+               the last observed value to stabilize spline edges.
+            3. Fit a cubic spline and evaluate it at each month within the
+               valid range.
+            4. Scale the interpolated months within each quarter so that their
+               average equals the observed quarterly value.
+
+        ``sum`` or ``total``
+            Follows the same steps as ``average``/``mean`` but divides the
+            resulting monthly values by ``3`` so that summing the months within
+            a quarter reproduces the original quarterly total.
+
+        ``end``
+            1. Keep quarterly values at quarter-end dates (no shifting).
+            2. Extend the series with four additional quarter ends to stabilize
+               the spline.
+            3. Fit a cubic spline and evaluate it at monthly dates between the
+               first and last valid quarters.
+            4. No scaling is applied; interpolated monthly values naturally
+               converge to the quarter-end observation in the final month.
 
         Parameters
         ----------
         df : pd.DataFrame
-            Input DataFrame with datetime index. If not quarterly, returns original data.
+            Input DataFrame indexed by quarter-end timestamps.
 
         Returns
         -------
         pd.DataFrame
-            If input is quarterly: Interpolated monthly DataFrame with scaled values
-            If input is not quarterly: Original DataFrame
+            Monthly interpolated DataFrame. Non-quarterly inputs are returned
+            unchanged.
 
-        Notes
-        -----
-        - Uses scipy's CubicSpline with natural boundary conditions
-        - Shifts quarterly values to mid-quarter for better interpolation
-        - Scales interpolated values to preserve quarterly averages
-        - Handles missing values by preserving them in output
-        - Normalizes all dates to midnight UTC
-        - For quarterly data, creates a monthly date range from first quarter start to last quarter end
+        Examples
+        --------
+        >>> q_df = pd.DataFrame({"GDP": [1.0, 2.0]},
+        ...                     index=pd.to_datetime(["2020-03-31", "2020-06-30"]))
+        >>> dm._interpolate_df(q_df).head()
+                   GDP
+        2020-01-31  NaN
+        2020-02-29  NaN
+        2020-03-31  1.0
+        2020-04-30  1.3
+        2020-05-31  1.6
         """
         if df.empty:
             return df
 
-        # Normalize index to midnight UTC
         df2 = df.copy()
         df2.index = pd.DatetimeIndex(pd.to_datetime(df2.index)).normalize()
+        # Infer frequency to determine if quarterly interpolation is needed.
         freq_mev = pd.infer_freq(df2.index)
-        
-        # Only interpolate Q -> M
+
         if freq_mev and freq_mev.startswith('Q'):
-            # Get the first and last quarters for complete coverage
             first_qtr = pd.Period(df2.index[0], freq='Q')
             last_qtr = pd.Period(df2.index[-1], freq='Q')
-            
-            # Create monthly index from first month of first quarter to last month of last quarter
             start_month = first_qtr.start_time
             end_month = last_qtr.end_time
+            # Build a complete monthly index spanning the quarterly range.
             monthly_index = pd.date_range(start=start_month, end=end_month, freq='M')
-            
-            # Initialize result DataFrame with NaN
             monthly_df = pd.DataFrame(index=monthly_index)
-            
-            # Process each column separately
+
+            # Access the MEV metadata directly from the loader to avoid
+            # triggering DataManager.var_map, which depends on model_mev and
+            # can cause recursion during the initial interpolation.
+            var_map = self._mev_loader.mev_map
             for col in df2.columns:
                 q_series = df2[col]
-                
-                # Skip if all values are NA
                 if q_series.isnull().all():
                     monthly_df[col] = np.nan
                     continue
-                
-                # Find continuous non-NA segments
+
                 non_na_mask = ~q_series.isnull()
                 valid_indices = q_series.index[non_na_mask]
-                
                 if len(valid_indices) == 0:
                     monthly_df[col] = np.nan
                     continue
-                
-                # Get the first and last non-NA indices
+
                 first_valid_idx = valid_indices[0]
                 last_valid_idx = valid_indices[-1]
-                
-                # Get the non-NA segment
                 valid_series = q_series.loc[first_valid_idx:last_valid_idx].dropna()
-                
-                if len(valid_series) < 4:  # Need at least 4 points for cubic spline
-                    # Use linear interpolation for short segments
-                    valid_series = valid_series.reindex(monthly_index, method='linear')
-                    monthly_df[col] = valid_series
-                    continue
-                
-                # Shift quarterly values to mid-quarter dates
-                mid_quarter_series = pd.Series(index=pd.DatetimeIndex([]), dtype=float)
-                for idx, val in valid_series.items():
-                    qtr = pd.Period(idx, freq='Q')
-                    # Calculate middle month of the quarter (2nd month)
-                    mid_month = qtr.asfreq('M', how='s') + 1
-                    mid_quarter_date = mid_month.to_timestamp()
-                    mid_quarter_series[mid_quarter_date] = val
-                
-                # Extend the series by 4 quarters
-                last_value = mid_quarter_series.iloc[-1]
-                last_qtr = pd.Period(mid_quarter_series.index[-1], freq='Q')
-                extended_qtrs = []
-                for i in range(1, 5):  # 4 additional quarters
-                    next_qtr = last_qtr + i
-                    mid_month = next_qtr.asfreq('M', how='s') + 1
-                    extended_qtrs.append(mid_month.to_timestamp())
-                extended_data = pd.Series([last_value] * 4, index=extended_qtrs)
-                extended_series = pd.concat([mid_quarter_series, extended_data])
-                
-                # Convert dates to numeric for spline interpolation
-                x = extended_series.index.map(pd.Timestamp.toordinal)
-                y = extended_series.values
-                
-                # Fit cubic spline
-                spline = CubicSpline(x, y, bc_type='not-a-knot')
-                
-                # Get monthly points within the valid range
-                valid_start = pd.Period(valid_series.index[0], freq='Q').start_time
-                valid_end = pd.Period(valid_series.index[-1], freq='Q').end_time
-                valid_months = pd.date_range(start=valid_start, end=valid_end, freq='M')
-                
-                # Evaluate spline at monthly points
-                monthly_x = valid_months.map(pd.Timestamp.toordinal)
-                monthly_y = spline(monthly_x)
-                
-                # Create initial monthly series
-                m_series = pd.Series(monthly_y, index=valid_months)
-                
-                # Scale values to preserve quarterly averages
-                scaled_series = m_series.copy()
-                
-                # Map months to corresponding quarter ends for scaling
-                # Ensure all dates are normalized to midnight UTC
-                month_to_qtr = pd.PeriodIndex(valid_months, freq='Q').end_time.normalize()
-                
-                # Apply scaling for each quarter
-                for qtr_end in valid_series.index:
-                    # Normalize quarter end date to midnight UTC
-                    qtr_end_normalized = pd.Timestamp(qtr_end).normalize()
-                    mask = month_to_qtr == qtr_end_normalized
-                    
-                    if not mask.any():
-                        print(f"Warning: No matching months found for quarter {qtr_end}")
-                        print(f"Quarter end: {qtr_end_normalized}")
-                        print(f"Available quarter ends: {sorted(set(month_to_qtr))}")
-                        continue
-                    
-                    interpolated_avg = m_series[mask].mean()
-                    observed_value = valid_series.loc[qtr_end]
-                    
-                    # Handle zero or near-zero averages
-                    if np.isclose(interpolated_avg, 0):
-                        scale_factor = 1.0
+                agg = (var_map.get(col, {}).get('aggregation') or 'average').lower()
+                # Default to quarterly average when aggregation metadata is missing
+
+                if len(valid_series) < 4:
+                    # Linear interpolation suffices when fewer than four quarters
+                    # are available; still adjust sums if needed.
+                    monthly_series = valid_series.reindex(monthly_index).interpolate(method='linear')
+                    if agg in {'sum', 'total'}:
+                        monthly_series = monthly_series / 3.0
+                else:
+                    if agg == 'end':
+                        # Quarter-end series: keep values at quarter ends.
+                        base_series = valid_series
+                        last_value = base_series.iloc[-1]
+                        last_qtr = pd.Period(base_series.index[-1], freq='Q')
+                        # Extend with four future quarter ends to stabilize spline.
+                        extended_qtrs = []
+                        for i in range(1, 5):
+                            next_qtr = last_qtr + i
+                            extended_qtrs.append(next_qtr.end_time)
+                        extended_data = pd.Series([last_value] * 4, index=extended_qtrs)
+                        extended_series = pd.concat([base_series, extended_data])
                     else:
-                        scale_factor = observed_value / interpolated_avg
-                    
-                    scaled_series.loc[mask] = m_series.loc[mask] * scale_factor
-                    
-                
-                # Assign the scaled values to the result DataFrame
-                monthly_df[col] = scaled_series
-                
-                # Preserve original NA values
+                        # Average/sum series: move each value to mid-quarter.
+                        mid_quarter_series = pd.Series(index=pd.DatetimeIndex([]), dtype=float)
+                        for idx, val in valid_series.items():
+                            qtr = pd.Period(idx, freq='Q')
+                            mid_month = qtr.asfreq('M', how='s') + 1
+                            mid_quarter_series[mid_month.to_timestamp()] = val
+                        last_value = mid_quarter_series.iloc[-1]
+                        last_qtr = pd.Period(mid_quarter_series.index[-1], freq='Q')
+                        # Extend with four future mid-quarter points to avoid edge effects.
+                        extended_qtrs = []
+                        for i in range(1, 5):
+                            next_qtr = last_qtr + i
+                            mid_month = next_qtr.asfreq('M', how='s') + 1
+                            extended_qtrs.append(mid_month.to_timestamp())
+                        extended_data = pd.Series([last_value] * 4, index=extended_qtrs)
+                        extended_series = pd.concat([mid_quarter_series, extended_data])
+
+                    x = extended_series.index.map(pd.Timestamp.toordinal)
+                    y = extended_series.values
+                    spline = CubicSpline(x, y, bc_type='not-a-knot')
+
+                    valid_start = pd.Period(valid_series.index[0], freq='Q').start_time
+                    valid_end = pd.Period(valid_series.index[-1], freq='Q').end_time
+                    valid_months = pd.date_range(start=valid_start, end=valid_end, freq='M')
+                    monthly_x = valid_months.map(pd.Timestamp.toordinal)
+                    monthly_y = spline(monthly_x)
+                    m_series = pd.Series(monthly_y, index=valid_months)
+
+                    if agg == 'end':
+                        # Quarter-end series do not require scaling.
+                        monthly_series = m_series
+                    else:
+                        # Scale months so that the mean/sum matches the observed
+                        # quarterly value.
+                        scaled_series = m_series.copy()
+                        month_to_qtr = pd.PeriodIndex(valid_months, freq='Q').end_time.normalize()
+                        for qtr_end in valid_series.index:
+                            qtr_end_normalized = pd.Timestamp(qtr_end).normalize()
+                            mask = month_to_qtr == qtr_end_normalized
+                            if not mask.any():
+                                continue
+                            interpolated_avg = m_series[mask].mean()
+                            observed_value = valid_series.loc[qtr_end]
+                            if np.isclose(interpolated_avg, 0):
+                                scale_factor = 1.0
+                            else:
+                                scale_factor = observed_value / interpolated_avg
+                            scaled_series.loc[mask] = m_series.loc[mask] * scale_factor
+                        monthly_series = scaled_series
+                        if agg in {'sum', 'total'}:
+                            monthly_series = monthly_series / 3.0
+
+                monthly_df[col] = monthly_series
+
                 na_qtrs = q_series[q_series.isnull()].index
                 for qtr in na_qtrs:
+                    # Remove interpolated values for quarters that were NaN in the
+                    # original data to avoid introducing spurious information.
                     qtr_period = pd.Period(qtr, freq='Q')
                     qtr_start = qtr_period.start_time
                     qtr_end = qtr_period.end_time
                     na_months = monthly_df.loc[qtr_start:qtr_end].index
                     monthly_df.loc[na_months, col] = np.nan
-            
-            # Add month and quarter indicators
+
             monthly_df['M'] = pd.DatetimeIndex(monthly_df.index).month
             monthly_df['Q'] = pd.DatetimeIndex(monthly_df.index).quarter
-            
             return monthly_df
 
         return df
@@ -1377,13 +1390,27 @@ class DataManager:
         for scen_set, scen_mev_map in scen_mevs_dict.items():
             for scen_name, scen_mev in scen_mev_map.items():
                 scen_internal = scen_internal_dict.get(scen_set, {}).get(scen_name)
-                if scen_internal is None:
+                missing_internal = scen_internal is None
+
+                # Provide a fallback so MEV-only feature functions still execute.
+                if missing_internal:
                     warnings.warn(
-                        f"apply_to_all(): No scenario internal data for {scen_set}/{scen_name}; skipping this scenario.",
+                        (
+                            "apply_to_all(): No scenario internal data for "
+                            f"{scen_set}/{scen_name}; using main internal data as context. "
+                            "Internal scenario updates will be skipped."
+                        ),
                         UserWarning
                     )
-                    continue
-                scen_ret = fn(scen_mev.copy(), scen_internal.copy())
+                    internal_for_fn = main_internal_df
+                else:
+                    internal_for_fn = scen_internal
+
+                if internal_for_fn is None:
+                    # Create an empty placeholder DataFrame to satisfy function signature.
+                    internal_for_fn = pd.DataFrame(index=scen_mev.index)
+
+                scen_ret = fn(scen_mev.copy(), internal_for_fn.copy())
                 if not (isinstance(scen_ret, tuple) and len(scen_ret) == 2 and isinstance(scen_ret[0], pd.DataFrame) and isinstance(scen_ret[1], pd.DataFrame)):
                     raise TypeError(
                         f"apply_to_all(): fn must return (mev_df, internal_df) for scenarios as well; got {type(scen_ret)}"
@@ -1391,6 +1418,16 @@ class DataManager:
                 scen_mev_ret, scen_in_ret = scen_ret
                 # Replace caches for scenario data
                 self._scen_mevs_cache[scen_set][scen_name] = scen_mev_ret.copy()
+                if missing_internal:
+                    if not scen_in_ret.empty:
+                        warnings.warn(
+                            (
+                                "apply_to_all(): Scenario internal data for "
+                                f"{scen_set}/{scen_name} is unavailable; returned internal updates were ignored."
+                            ),
+                            UserWarning
+                        )
+                    continue
                 self._scen_internal_data_cache[scen_set][scen_name] = scen_in_ret.copy()
 
     @property
@@ -1403,8 +1440,10 @@ class DataManager:
         Returns
         -------
         Dict[str, Dict[str, str]]
-            Dictionary mapping variable codes to their type and description information.
-            Includes codes that exist in either model_mev columns or internal_data columns.
+            Dictionary mapping variable codes to their metadata such as type,
+            description, and any available category or aggregation details.
+            Includes codes that exist in either model_mev columns or
+            internal_data columns.
 
         Example
         -------
@@ -1430,8 +1469,65 @@ class DataManager:
             code: info for code, info in full_var_map.items()
             if code in all_available_codes
         }
-        
+
         return filtered_map
+
+    def interpolated_vars(self, variables: List[Union[str, TSFM]]) -> Optional[pd.DataFrame]:
+        """Identify interpolated variables within ``model_mev``.
+
+        Parameters
+        ----------
+        variables : List[Union[str, TSFM]]
+            Variable names or :class:`TSFM` objects to inspect.
+
+        Returns
+        -------
+        Optional[pandas.DataFrame]
+            DataFrame listing interpolated variable names and their aggregation
+            methods. Returns ``None`` if none of the provided variables are
+            interpolated or if the internal data frequency is quarterly.
+
+        Notes
+        -----
+        The method prints a warning reminding users to verify aggregation
+        methods for interpolated series before returning the DataFrame.
+        """
+
+        # Accept both raw variable names and TSFM objects
+        var_names: List[str] = []
+        for v in variables:
+            if isinstance(v, TSFM):
+                var_names.append(v.var)
+            elif isinstance(v, str):
+                var_names.append(v)
+            else:
+                raise TypeError("Variables must be provided as str or TSFM objects.")
+
+        # Interpolation only occurs for monthly frequency
+        if self.freq != "M":
+            return None
+
+        qtr_cols = set(self._mev_loader.model_mev_qtr.columns)
+        mth_cols = set(self._mev_loader.model_mev_mth.columns)
+        interpolated_cols = {
+            col if col not in mth_cols else f"{col}_Q" for col in qtr_cols
+        }
+        # Retrieve aggregation information from the existing variable map
+        var_map = self.var_map
+        results: List[Dict[str, Any]] = []
+        for name in var_names:
+            if name in interpolated_cols and name in self.model_mev.columns:
+                base = name[:-2] if name.endswith(("_Q", "_M")) else name
+                agg = var_map.get(base, {}).get("aggregation")
+                results.append({"variable": name, "aggregation": agg})
+
+        if results:
+            print("⚠️"
+                "Please review the aggregation method for interpolated variables below. "
+                "Revise the aggregation column in the mev_type.xlsx under folder Technic/support if necessary."
+            )
+            return pd.DataFrame(results)
+        return None
 
     @property
     def in_sample_end(self) -> Optional[pd.Timestamp]:
@@ -1470,6 +1566,40 @@ class DataManager:
             The scenario jumpoff date, or None if not set.
         """
         return self._internal_loader.scen_p0
+
+    @property
+    def scen_p0_map(self) -> Dict[str, pd.Timestamp]:
+        """
+        Get scenario-set-specific jumpoff overrides supplied via the MEV loader.
+
+        Returns
+        -------
+        Dict[str, pd.Timestamp]
+            Mapping of scenario set names to normalized month-end P0 timestamps.
+            Returns an empty dictionary when no overrides are defined.
+        """
+        overrides = getattr(self._mev_loader, 'scen_p0_overrides', {})
+        return dict(overrides)
+
+    def get_scen_p0(self, scen_set: str) -> Optional[pd.Timestamp]:
+        """
+        Resolve the effective jumpoff date for a specific scenario set.
+
+        Parameters
+        ----------
+        scen_set : str
+            Name of the scenario set whose P0 should be retrieved.
+
+        Returns
+        -------
+        Optional[pd.Timestamp]
+            The override defined for the scenario set, or the default
+            :meth:`scen_p0` value from the internal loader when no override exists.
+        """
+        overrides = self.scen_p0_map
+        if scen_set in overrides:
+            return overrides[scen_set]
+        return self.scen_p0
 
     @property
     def p0(self) -> Optional[pd.Timestamp]:

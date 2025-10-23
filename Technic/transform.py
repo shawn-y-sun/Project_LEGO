@@ -202,7 +202,7 @@ def ROLLAVG4(series: pd.Series, periods: int = 4) -> pd.Series:
 
 def DIV_ROLLAVG4(series: pd.Series, periods: int = 4) -> pd.Series:
     """Difference from rolling average: series - rolling average."""
-    return series - ROLLAVG(series, periods)
+    return series - ROLLAVG4(series, periods)
 
 # Alias functions for common lags (no need to add to type_tsfm.yaml)
 

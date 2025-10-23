@@ -840,8 +840,8 @@ class OLSModelAdapter(ExportableModel):
         # Add scen_p0 data to scenario results if available
         if hasattr(self.model.scen_manager, 'scen_p0') and self.model.scen_manager.scen_p0 is not None:
             scen_p0_data = self.model.scen_manager.scen_p0
+            scen_p0_freq = 'monthly' if is_monthly else 'quarterly'
             for scen_set in scen_results.keys():
-                # Create scen_p0 entry for target variable
                 df_data = {
                     'model': model_id,
                     'scenario_name': scen_set,
@@ -852,12 +852,25 @@ class OLSModelAdapter(ExportableModel):
                     'frequency': 'monthly'
                 }
                 data_list.append(pd.DataFrame(df_data))
-        
-        # Process target variable forecasts (monthly)
+                if is_monthly:
+                    scen_p0_q = aggregate_to_quarterly(scen_p0_data)
+                    df_data_q = {
+                        'category': CATEGORY_TARGET_FORECAST,
+                        'model': model_id,
+                        'scenario_name': scen_set,
+                        'severity': 'p0',
+                        'date': scen_p0_q.index,
+                        'frequency': 'quarterly',
+                        'value_type': VALUE_TYPE_TARGET_FORECAST,
+                        'value': scen_p0_q.values
+                    }
+                    data_list.append(pd.DataFrame(df_data_q))
+
+        # Process target variable forecasts
         for scen_set, scenarios in scen_results.items():
             for scen_name, forecast in scenarios.items():
                 if forecast is not None and not forecast.empty:
-                    # Create DataFrame for target forecasts (monthly)
+                    freq_label = 'monthly' if is_monthly else 'quarterly'
                     df_data = {
                         'model': model_id,
                         'scenario_name': scen_set,
@@ -908,15 +921,14 @@ class OLSModelAdapter(ExportableModel):
         # Process base variable forecasts (monthly) if available
         if hasattr(self.model.scen_manager, 'y_base_scens'):
             base_results = self.model.scen_manager.y_base_scens
-            
+
             # Add scen_p0 base data if available
             if hasattr(self.model, 'base_predictor') and self.model.base_predictor is not None:
                 if hasattr(self.model.scen_manager, 'scen_p0') and self.model.scen_manager.scen_p0 is not None:
                     scen_p0_data = self.model.scen_manager.scen_p0
                     base_p0_values = self.model.base_predictor.predict_base(scen_p0_data, scen_p0_data)
-                    
+
                     for scen_set in base_results.keys():
-                        # Create scen_p0 entry for base variable
                         df_data = {
                             'model': model_id,
                             'scenario_name': scen_set,
@@ -927,11 +939,24 @@ class OLSModelAdapter(ExportableModel):
                             'frequency': 'monthly'
                         }
                         data_list.append(pd.DataFrame(df_data))
-            
+
+                        # quarterly aggregate of p0
+                        base_p0_q = aggregate_to_quarterly(base_p0_values)
+                        df_data_q = {
+                            'category': CATEGORY_BASE_FORECAST,
+                            'model': model_id,
+                            'scenario_name': scen_set,
+                            'severity': 'p0',
+                            'date': base_p0_q.index,
+                            'frequency': 'quarterly',
+                            'value_type': VALUE_TYPE_BASE_FORECAST,
+                            'value': base_p0_q.values
+                        }
+                        data_list.append(pd.DataFrame(df_data_q))
+
             for scen_set, scenarios in base_results.items():
                 for scen_name, forecast in scenarios.items():
                     if forecast is not None and not forecast.empty:
-                        # Create DataFrame for base forecasts (monthly)
                         df_data = {
                             'model': model_id,
                             'scenario_name': scen_set,
@@ -1166,24 +1191,10 @@ class OLSModelAdapter(ExportableModel):
         return results
 
     def get_sensitivity_results(self) -> Optional[pd.DataFrame]:
-        """Return sensitivity testing results in long format.
-        
-        Returns a DataFrame with columns:
-        - model: string, model_id
-        - test: string ["Input Sensitivity Test", "Parameter Sensitivity Test"]
-        - scenario_name: string (e.g., 'EWST_2024')
-        - severity: string (e.g., 'base', 'adv', 'sev', 'p0')
-        - variable/parameter: string, variable or parameter name being tested (or 'baseline_p0' for scen_p0 data)
-        - shock: string, shock level ("-3std", "+1se", "baseline", etc)
-        - date: timestamp
-        - frequency: string ['monthly'/'quarterly']
-        - value_type: string ['Target'/'Base']
-        - value: numerical
-        """
-        if not hasattr(self.model, 'scen_manager') or self.model.scen_manager is None:
+        """Return sensitivity testing results in long format."""
+        if not hasattr(self.model, "scen_manager") or self.model.scen_manager is None:
             return None
 
-        # Get sensitivity test instance
         sens_test = self.model.scen_manager.sens_test
         if sens_test is None:
             return None
@@ -1684,10 +1695,11 @@ class OLSModelAdapter(ExportableModel):
         if not data_list:
             return None
 
-        # Combine all data and ensure column order
-        result = pd.concat(data_list, ignore_index=True)
-        return result[['model', 'test', 'scenario_name', 'severity', 'variable/parameter', 
-                      'shock', 'date', 'frequency', 'value_type', 'value']] 
+        df = results_df.copy()
+        df.insert(0, "model", self._model_id)
+        return df[["model", "test", "scenario_name", "severity", "variable/parameter",
+                   "shock", "date", "frequency", "value_type", "value"]]
+
 
     # Helper to build a standardized time series DataFrame row block
     def _build_ts_block(self, index, model_id: str, series_type: str, value_type: str, values) -> pd.DataFrame:

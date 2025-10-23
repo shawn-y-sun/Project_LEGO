@@ -42,8 +42,9 @@ class DataLoader(ABC):
     
     Parameters
     ----------
-    freq : str, default='M'
-        Frequency code ('M' for monthly, 'Q' for quarterly)
+    freq : str or None, optional
+        Frequency code ('M' for monthly, 'Q' for quarterly). Pass ``None`` to infer the
+        frequency from the data.
     full_sample_start : Optional[str], optional
         Start date for full sample period (YYYY-MM-DD)
     full_sample_end : Optional[str], optional
@@ -366,7 +367,7 @@ class DataLoader(ABC):
         Example
         -------
         >>> # Load scenarios from Excel file
-        >>> loader = TimeSeriesLoader(scen_p0="2023-12-31")
+        >>> loader = TimeSeriesLoader(freq="M", scen_p0="2023-12-31")
         >>> loader.load("historical.csv", date_col="date")
         >>> loader.load_scens(
         ...     source="scenarios.xlsx",
@@ -491,7 +492,7 @@ class DataLoader(ABC):
         Example
         -------
         >>> # Load multiple scenario sets
-        >>> loader = TimeSeriesLoader(scen_p0="2023-12-31")
+        >>> loader = TimeSeriesLoader(freq="M", scen_p0="2023-12-31")
         >>> loader.load("historical.csv", date_col="date")
         >>> # Create sample scenarios
         >>> scen_data = {
@@ -544,7 +545,7 @@ class DataLoader(ABC):
         Example
         -------
         >>> # Setup loader with scenario data
-        >>> loader = TimeSeriesLoader(scen_p0="2023-12-31")
+        >>> loader = TimeSeriesLoader(freq="M", scen_p0="2023-12-31")
         >>> # Create sample historical and scenario data
         >>> historical = pd.DataFrame({
         ...     "date": pd.date_range("2023-01-01", "2023-12-31", freq="M"),
@@ -613,7 +614,7 @@ class DataLoader(ABC):
         Example
         -------
         >>> # Setup loader with scenario data
-        >>> loader = TimeSeriesLoader(scen_p0="2023-12-31")
+        >>> loader = TimeSeriesLoader(freq="M", scen_p0="2023-12-31")
         >>> # Create sample data
         >>> historical = pd.DataFrame({
         ...     "date": pd.date_range("2023-01-01", "2023-12-31", freq="M"),
@@ -668,7 +669,8 @@ class DataLoader(ABC):
         >>> loader = PanelLoader(
         ...     entity_col="firm_id",
         ...     date_col="report_date",
-        ...     scen_p0="2023-12-31"
+        ...     scen_p0="2023-12-31",
+        ...     freq="M"
         ... )
         >>> # Create sample panel data
         >>> historical = pd.DataFrame({
@@ -716,8 +718,8 @@ class TimeSeriesLoader(DataLoader):
         Start date for full sample period (YYYY-MM-DD)
     full_sample_end : str, optional
         End date for full sample period (YYYY-MM-DD)
-    freq : str, default='M'
-        Frequency code ('M' for monthly, 'Q' for quarterly)
+    freq : str or None
+        Frequency code ('M' for monthly, 'Q' for quarterly). Pass None to infer from data.
     scen_p0 : str, optional
         The month-end date that serves as the jumpoff date for scenario forecasting
         
@@ -744,7 +746,8 @@ class TimeSeriesLoader(DataLoader):
     >>> loader = TimeSeriesLoader(
     ...     in_sample_start="2020-01-01",
     ...     in_sample_end="2022-12-31",
-    ...     scen_p0="2023-12-31"
+    ...     scen_p0="2023-12-31",
+    ...     freq="M"
     ... )
     >>> loader.load("data.xlsx", date_col="Date", sheet="Historical")
     >>> loader.load_scens(
@@ -762,7 +765,8 @@ class TimeSeriesLoader(DataLoader):
         in_sample_end: Optional[str] = None,
         full_sample_start: Optional[str] = None,
         full_sample_end: Optional[str] = None,
-        freq: str = 'M',
+        *,
+        freq: Optional[str] = None,
         scen_p0: Optional[str] = None
     ):
         """
@@ -778,8 +782,9 @@ class TimeSeriesLoader(DataLoader):
             Start date for full sample period (YYYY-MM-DD)
         full_sample_end : str, optional
             End date for full sample period (YYYY-MM-DD)
-        freq : str, default='M'
-            Frequency code ('M' for monthly, 'Q' for quarterly)
+        freq : str or None, optional
+            Frequency code ('M' for monthly, 'Q' for quarterly). Pass ``None`` to infer
+            from the data.
         scen_p0 : str, optional
             The month-end date that serves as the jumpoff date for scenario forecasting
         """
@@ -1044,7 +1049,7 @@ class TimeSeriesLoader(DataLoader):
             
         Example
         -------
-        >>> loader = TimeSeriesLoader(in_sample_start="2020-02-01")
+        >>> loader = TimeSeriesLoader(in_sample_start="2020-02-01", freq="M")
         >>> loader.load("data.csv", date_col="date")
         >>> # If data starts from 2020-01-31, p0 would be 2020-01-31
         >>> # If data starts from 2020-02-01 or later, p0 would be None
@@ -1078,7 +1083,8 @@ class TimeSeriesLoader(DataLoader):
         -------
         >>> loader = TimeSeriesLoader(
         ...     in_sample_start="2020-01-01",
-        ...     in_sample_end="2022-12-31"
+        ...     in_sample_end="2022-12-31",
+        ...     freq="M"
         ... )
         >>> loader.load("data.csv", date_col="date")
         >>> out_p0_date = loader.out_p0  # Returns 2022-12-31
@@ -1113,8 +1119,8 @@ class PanelLoader(DataLoader):
         Start date for full sample period
     full_sample_end : str, optional
         End date for full sample period
-    freq : str, default='M'
-        Frequency code ('M' for monthly, 'Q' for quarterly)
+    freq : str or None
+        Frequency code ('M' for monthly, 'Q' for quarterly). Pass None to infer from data.
     scen_p0 : str, optional
         The month-end date that serves as the jumpoff date for scenario forecasting
         
@@ -1125,7 +1131,8 @@ class PanelLoader(DataLoader):
     ...     entity_col="customer_id",
     ...     date_col="transaction_date",
     ...     split_method="random",
-    ...     test_size=0.2
+    ...     test_size=0.2,
+    ...     freq="M"
     ... )
     >>> loader.load("customer_data.csv")
     >>> in_sample = loader.internal_data.loc[loader.in_sample_idx]
@@ -1140,7 +1147,8 @@ class PanelLoader(DataLoader):
     >>> loader = PanelLoader(
     ...     entity_col="account_id",
     ...     split_method="stratified",
-    ...     test_size=0.25
+    ...     test_size=0.25,
+    ...     freq="M"
     ... )
     >>> loader.load(df, date_col="date")  # Each month will have ~25% of accounts in test set
     
@@ -1151,7 +1159,8 @@ class PanelLoader(DataLoader):
     ...     split_method="time_cutoff",
     ...     in_sample_start="2020-01-01",
     ...     in_sample_end="2022-12-31",
-    ...     scen_p0="2023-12-31"
+    ...     scen_p0="2023-12-31",
+    ...     freq="M"
     ... )
     >>> loader.load("firm_data.xlsx", sheet="Historical")
     >>> loader.load_scens(
@@ -1174,7 +1183,8 @@ class PanelLoader(DataLoader):
         in_sample_end: Optional[str] = None,
         full_sample_start: Optional[str] = None,
         full_sample_end: Optional[str] = None,
-        freq: str = 'M',
+        *,
+        freq: Optional[str] = None,
         scen_p0: Optional[str] = None
     ):
         """
@@ -1200,8 +1210,9 @@ class PanelLoader(DataLoader):
             Start date for full sample period (YYYY-MM-DD)
         full_sample_end : str, optional
             End date for full sample period (YYYY-MM-DD)
-        freq : str, default='M'
-            Frequency code ('M' for monthly, 'Q' for quarterly)
+        freq : str or None, optional
+            Frequency code ('M' for monthly, 'Q' for quarterly). Pass ``None`` to infer
+            from the data.
         scen_p0 : str, optional
             The month-end date that serves as the jumpoff date for scenario forecasting
         """
@@ -1259,20 +1270,20 @@ class PanelLoader(DataLoader):
         Example
         -------
         >>> # Load from CSV with custom date column
-        >>> loader = PanelLoader(entity_col="customer_id")
+        >>> loader = PanelLoader(entity_col="customer_id", freq="M")
         >>> loader.load("transactions.csv", date_col="transaction_date")
-        
+
         >>> # Load from Excel with specific sheet
-        >>> loader = PanelLoader(entity_col="account_id", date_col="report_date")
+        >>> loader = PanelLoader(entity_col="account_id", date_col="report_date", freq="M")
         >>> loader.load("account_data.xlsx", sheet="Monthly_Data")
-        
+
         >>> # Load from DataFrame with date standardization
         >>> df = pd.DataFrame({
         ...     "customer_id": [1, 1, 2, 2],
         ...     "date": ["2023-01-15", "2023-02-15", "2023-01-15", "2023-02-15"],
         ...     "balance": [100, 150, 200, 250]
         ... })
-        >>> loader = PanelLoader(entity_col="customer_id")
+        >>> loader = PanelLoader(entity_col="customer_id", freq="M")
         >>> loader.load(df, date_col="date")  # Dates standardized to month-end
         """
         # Update date_col if provided
@@ -1321,7 +1332,7 @@ class PanelLoader(DataLoader):
         ...     "date": ["2023-01-01", "2023-02-01", "2023-01-01", "2023-02-01"],
         ...     "value": [100, 110, 200, 220]
         ... })
-        >>> loader = PanelLoader()
+        >>> loader = PanelLoader(freq="M")
         >>> loader._validate_structure(df_valid, "date")  # No error
         
         >>> # Invalid: duplicate entity-date pair
@@ -1420,20 +1431,21 @@ class PanelLoader(DataLoader):
         ...     "date": pd.date_range("2023-01-01", periods=12, freq="M").repeat(2),
         ...     "value": range(24)
         ... })
-        >>> loader = PanelLoader(split_method="random", test_size=0.25)
+        >>> loader = PanelLoader(split_method="random", test_size=0.25, freq="M")
         >>> loader._split_samples(df)
         >>> in_sample = df.loc[loader.in_sample_idx]
         >>> out_sample = df.loc[loader.out_sample_idx]
         
         >>> # Stratified splitting (by time period)
-        >>> loader = PanelLoader(split_method="stratified", test_size=0.5)
+        >>> loader = PanelLoader(split_method="stratified", test_size=0.5, freq="M")
         >>> loader._split_samples(df)  # Each period has ~50% entities in test set
         
         >>> # Time cutoff splitting
         >>> loader = PanelLoader(
         ...     split_method="time_cutoff",
         ...     in_sample_start="2023-01-01",
-        ...     in_sample_end="2023-06-30"
+        ...     in_sample_end="2023-06-30",
+        ...     freq="M"
         ... )
         >>> loader._split_samples(df)  # Split based on dates
         """
@@ -1499,8 +1511,8 @@ class PPNRInternalLoader(TimeSeriesLoader):
         Start date for full sample period (YYYY-MM-DD)
     full_sample_end : str, optional
         End date for full sample period (YYYY-MM-DD)
-    freq : str, default='M'
-        Frequency code ('M' for monthly, 'Q' for quarterly)
+    freq : str or None
+        Frequency code ('M' for monthly, 'Q' for quarterly). Pass None to infer from data.
     scen_p0 : str, optional
         The month-end date that serves as the jumpoff date for scenario forecasting
         
@@ -1510,7 +1522,8 @@ class PPNRInternalLoader(TimeSeriesLoader):
     >>> loader = PPNRInternalLoader(
     ...     in_sample_start="2020-01-01",
     ...     in_sample_end="2022-12-31",
-    ...     scen_p0="2023-12-31"
+    ...     scen_p0="2023-12-31",
+    ...     freq="M"
     ... )
     >>> # Create sample data
     >>> historical = pd.DataFrame({
@@ -1551,7 +1564,8 @@ class PPNRInternalLoader(TimeSeriesLoader):
         in_sample_end: Optional[str] = None,
         full_sample_start: Optional[str] = None,
         full_sample_end: Optional[str] = None,
-        freq: str = 'M',
+        *,
+        freq: Optional[str] = None,
         scen_p0: Optional[str] = None
     ):
         # Call parent's __init__ with all parameters
@@ -1579,7 +1593,8 @@ class SMRInternalLoader(PanelLoader):
     >>> # Load account-level data with scenarios
     >>> loader = SMRInternalLoader(
     ...     split_method="random",
-    ...     test_size=0.2
+    ...     test_size=0.2,
+    ...     freq="M"
     ... )
     >>> # Create sample data
     >>> df = pd.DataFrame({

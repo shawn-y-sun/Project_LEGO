@@ -1,8 +1,9 @@
-numpy==1.24.4
-pandas==2.0.3
-scipy==1.10.1
-statsmodels==0.14.1
-matplotlib==3.7.5
-openpyxl==3.1.5
-PyYAML==6.0.2
-arch==5.6.0
+numpy
+pandas
+scipy
+statsmodels
+matplotlib
+openpyxl
+PyYAML
+arch
+tqdm
