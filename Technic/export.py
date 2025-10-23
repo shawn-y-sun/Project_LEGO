@@ -750,7 +750,30 @@ class OLSModelAdapter(ExportableModel):
             blocks.append(stacked_out)
  
         # Residuals (negate statsmodels convention to get fitted - actual)
-        blocks.append(self._build_ts_block(self.model.resid.index, model_id, SERIES_TYPE_RESIDUAL, 'Residual', -self.model.resid.values))
+        resid_series = getattr(self.model, 'resid', pd.Series(dtype=float))
+        if isinstance(resid_series, pd.Series) and not resid_series.empty:
+            blocks.append(self._build_ts_block(
+                resid_series.index,
+                model_id,
+                SERIES_TYPE_RESIDUAL,
+                'Residual',
+                -resid_series.values
+            ))
+
+        # Out-of-sample residuals when actuals are available
+        y_actual_out = getattr(self.model, 'y_out', pd.Series(dtype=float))
+        y_pred_out = getattr(self.model, 'y_pred_out', pd.Series(dtype=float))
+        if isinstance(y_pred_out, pd.Series) and not y_pred_out.empty and isinstance(y_actual_out, pd.Series):
+            aligned_actual_out = y_actual_out.reindex(y_pred_out.index)
+            residual_out = (y_pred_out - aligned_actual_out).dropna()
+            if not residual_out.empty:
+                blocks.append(self._build_ts_block(
+                    residual_out.index,
+                    model_id,
+                    SERIES_TYPE_RESIDUAL,
+                    'Residual',
+                    residual_out.values
+                ))
  
         # Base variable series if available
         y_base_full = getattr(self.model, 'y_base_full', None)
@@ -1024,24 +1047,13 @@ class OLSModelAdapter(ExportableModel):
         if base_data is not None and not base_data.empty:
             _add_summary_stats(base_data, 'Base')
         
-        # Independent variables summary statistics
-        # Combine in-sample and out-of-sample data for each feature
+        # Independent variables summary statistics (in-sample only)
         feature_data_in = self.model.X_in
-        feature_data_out = getattr(self.model, 'X_out', pd.DataFrame())
-        
+
         if not feature_data_in.empty:
             for var_name in feature_data_in.columns:
-                # Combine in-sample and out-of-sample data for this variable
                 var_series_in = feature_data_in[var_name]
-                var_series_out = feature_data_out.get(var_name, pd.Series(dtype=float))
-                
-                # Combine series if out-of-sample data exists
-                if not var_series_out.empty:
-                    combined_var_series = pd.concat([var_series_in, var_series_out]).sort_index()
-                else:
-                    combined_var_series = var_series_in
-                
-                _add_summary_stats(combined_var_series, var_name)
+                _add_summary_stats(var_series_in, var_name)
         
         # Create DataFrame efficiently
         return pd.DataFrame(stats_list)
@@ -1659,6 +1671,14 @@ class OLSModelAdapter(ExportableModel):
 
         results_df = getattr(sens_test, "results_df", None)
         if results_df is None or results_df.empty:
+            param_names = getattr(sens_test, "param_names", [])
+            if not param_names:
+                message = (
+                    f"Model {self._model_id} has no eligible variables for sensitivity testing "
+                    "(likely dummy-only)."
+                )
+                logger.info(message)
+                print(message)
             return None
 
         df = results_df.copy()

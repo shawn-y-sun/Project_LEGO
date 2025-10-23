@@ -1481,11 +1481,18 @@ class OLS(ModelBase):
         predictions = self.fitted.predict(Xc_new)
         return predictions
     
-    def predict_param_shock(self, X_new: pd.DataFrame, param: str, shock: int) -> pd.Series:
+    def predict_param_shock(
+        self,
+        X_new: pd.DataFrame,
+        param: str,
+        shock: int,
+        *,
+        se_override: Optional[pd.Series] = None
+    ) -> pd.Series:
         """
         Predict with parameter shock testing by applying standard error shocks to coefficients.
-        
-        This method adjusts a specific parameter's coefficient by adding a multiple of its 
+
+        This method adjusts a specific parameter's coefficient by adding a multiple of its
         standard error, then uses the adjusted coefficients to make predictions.
         
         Parameters
@@ -1497,6 +1504,9 @@ class OLS(ModelBase):
         shock : int
             Number of standard errors to apply (e.g., 1, 2, -1, -2).
             Positive values increase the coefficient, negative values decrease it.
+        se_override : pd.Series, optional
+            Optional series of standard errors to use instead of ``self.se``. When
+            provided, it must share parameter names with ``self.params``.
         
         Returns
         -------
@@ -1519,9 +1529,19 @@ class OLS(ModelBase):
         
         # Get current coefficients and create a copy
         coeffs = self.params.copy()
-        
+
+        # Determine which standard error series to use for shocks
+        se_values = None
+        if isinstance(se_override, pd.Series) and param in se_override.index:
+            se_values = se_override
+        else:
+            se_values = self.se
+
+        if se_values is None or param not in se_values.index:
+            raise ValueError(f"Standard error not available for parameter '{param}'")
+
         # Adjust the specified parameter's coefficient
-        coeffs[param] = coeffs[param] + shock * self.se[param]
+        coeffs[param] = coeffs[param] + shock * se_values[param]
         
         # Add constant to X_new
         Xc_new = sm.add_constant(X_new, has_constant='add')

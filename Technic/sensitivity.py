@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Union, Tuple
 import warnings
 import matplotlib.pyplot as plt
 import os
+import statsmodels.api as sm
 
 from .scenario import ScenManager
 from .model import ModelBase
@@ -128,6 +129,7 @@ class SensitivityTest:
         # Get scenario information for reference
         self.scenarios = list(scen_manager.y_scens.keys()) if scen_manager.y_scens else []
         self.scenario_colors = scen_manager.scenario_colors
+        self._param_se_in_sample: Optional[pd.Series] = None
 
     @property
     def param_names(self) -> List[str]:
@@ -198,12 +200,12 @@ class SensitivityTest:
         if not self.param_names:
             return pd.Series(dtype=float)
         
-        if not hasattr(self.dm, 'scen_p0') or self.dm.scen_p0 is None:
-            # If scen_p0 is not available, use all available data
-            X_data = self.model.X_full
-        else:
-            # Filter data up to scen_p0
-            X_data = self.model.X_full[self.model.X_full.index <= self.dm.scen_p0]
+        # Always start with in-sample design matrix
+        X_data = self.model.X_in.copy()
+
+        # Optionally respect scen_p0 cutoff when provided
+        if hasattr(self.dm, 'scen_p0') and self.dm.scen_p0 is not None and not X_data.empty:
+            X_data = X_data[X_data.index <= self.dm.scen_p0]
         
         # Calculate standard deviations for parameters in param_names
         std_values = {}
@@ -212,8 +214,54 @@ class SensitivityTest:
                 std_values[param] = X_data[param].std()
             else:
                 std_values[param] = 0.0  # Default to 0 if parameter not found
-        
+
         return pd.Series(std_values)
+
+    @property
+    def param_se_in_sample(self) -> pd.Series:
+        """Return in-sample coefficient standard errors for sensitivity shocks."""
+        if self._param_se_in_sample is not None:
+            return self._param_se_in_sample
+
+        if not self.param_names:
+            self._param_se_in_sample = pd.Series(dtype=float)
+            return self._param_se_in_sample
+
+        X_in = self.model.X_in
+        y_in = self.model.y_in
+
+        if X_in.empty or y_in.empty:
+            self._param_se_in_sample = pd.Series(dtype=float)
+            return self._param_se_in_sample
+
+        try:
+            X_design = sm.add_constant(X_in, has_constant='add')
+            results = sm.OLS(y_in, X_design).fit()
+
+            cov_type = getattr(self.model, 'cov_type', 'NR')
+            if isinstance(cov_type, str):
+                cov_type_upper = cov_type.upper()
+                if cov_type_upper.startswith('HC'):
+                    results = results.get_robustcov_results(cov_type=cov_type_upper)
+                elif cov_type_upper.startswith('HAC'):
+                    maxlags = None
+                    if '(' in cov_type_upper and ')' in cov_type_upper:
+                        try:
+                            maxlags = int(cov_type_upper.split('(', 1)[1].split(')', 1)[0])
+                        except ValueError:
+                            maxlags = None
+                    if maxlags is not None:
+                        results = results.get_robustcov_results(cov_type='HAC', maxlags=maxlags)
+                    else:
+                        results = results.get_robustcov_results(cov_type='HAC')
+
+            se_series = pd.Series(results.bse, index=results.params.index)
+        except Exception as exc:
+            warnings.warn(f"Failed to compute in-sample parameter standard errors: {exc}")
+            se_series = pd.Series(dtype=float)
+
+        self._param_se_in_sample = se_series
+        return self._param_se_in_sample
 
     def run_param_shock(self, X_new: pd.DataFrame, param: str) -> pd.DataFrame:
         """
@@ -251,21 +299,27 @@ class SensitivityTest:
         
         results = {}
         
+        param_se = self.param_se_in_sample
+
         # Loop through each shock value in self.param_shock
         for shock in self.param_shock:
             # Apply positive shock
             pos_shock_name = f"{param}+{shock}se"
             try:
-                pos_predictions = self.model.predict_param_shock(X_new, param, shock)
+                pos_predictions = self.model.predict_param_shock(
+                    X_new, param, shock, se_override=param_se
+                )
                 results[pos_shock_name] = pos_predictions
             except Exception as e:
                 warnings.warn(f"Failed to apply positive shock {shock} to parameter '{param}': {e}")
                 results[pos_shock_name] = pd.Series([np.nan] * len(X_new), index=X_new.index)
-            
+
             # Apply negative shock
             neg_shock_name = f"{param}-{shock}se"
             try:
-                neg_predictions = self.model.predict_param_shock(X_new, param, -shock)
+                neg_predictions = self.model.predict_param_shock(
+                    X_new, param, -shock, se_override=param_se
+                )
                 results[neg_shock_name] = neg_predictions
             except Exception as e:
                 warnings.warn(f"Failed to apply negative shock -{shock} to parameter '{param}': {e}")
