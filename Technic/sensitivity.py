@@ -178,8 +178,8 @@ class SensitivityTest:
         """
         Get standard deviations for all parameters suitable for input sensitivity testing.
         
-        Calculates standard deviations from self.model.X_full up to self.dm.scen_p0
-        for parameters in self.param_names.
+        Calculates standard deviations from the model's in-sample feature history
+        (with outliers removed) up to scen_p0 for parameters in self.param_names.
         
         Returns
         -------
@@ -198,12 +198,18 @@ class SensitivityTest:
         if not self.param_names:
             return pd.Series(dtype=float)
         
-        if not hasattr(self.dm, 'scen_p0') or self.dm.scen_p0 is None:
-            # If scen_p0 is not available, use all available data
-            X_data = self.model.X_full
-        else:
-            # Filter data up to scen_p0
-            X_data = self.model.X_full[self.model.X_full.index <= self.dm.scen_p0]
+        # Use in-sample features (already excludes outliers)
+        X_data = self.model.X_in.copy()
+
+        if X_data.empty:
+            return pd.Series(dtype=float)
+
+        # If scen_p0 is defined, ensure we only use observations up to that point
+        if hasattr(self.dm, 'scen_p0') and self.dm.scen_p0 is not None:
+            X_data = X_data[X_data.index <= self.dm.scen_p0]
+
+        if X_data.empty:
+            return pd.Series(dtype=float)
         
         # Calculate standard deviations for parameters in param_names
         std_values = {}
