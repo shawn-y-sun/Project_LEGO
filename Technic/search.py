@@ -651,114 +651,116 @@ class ModelSearch:
         top_models : list of CM
             The top_n CM instances sorted by composite score.
         """
-        forced = forced_in or []
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            forced = forced_in or []
 
-        legacy_max_periods = legacy_kwargs.pop("max_periods", None)
-        if legacy_kwargs:
-            unexpected = ", ".join(sorted(legacy_kwargs.keys()))
-            raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+            legacy_max_periods = legacy_kwargs.pop("max_periods", None)
+            if legacy_kwargs:
+                unexpected = ", ".join(sorted(legacy_kwargs.keys()))
+                raise TypeError(f"Unexpected keyword arguments: {unexpected}")
 
-        freq = getattr(self.dm, "freq", None)
-        resolved_periods = resolve_periods_argument(
-            freq,
-            periods,
-            legacy_max_periods=legacy_max_periods
-        )
-        if resolved_periods is None:
-            periods_summary = default_periods_for_freq(freq)
-        else:
-            periods_summary = resolved_periods
+            freq = getattr(self.dm, "freq", None)
+            resolved_periods = resolve_periods_argument(
+                freq,
+                periods,
+                legacy_max_periods=legacy_max_periods
+            )
+            if resolved_periods is None:
+                periods_summary = default_periods_for_freq(freq)
+            else:
+                periods_summary = resolved_periods
 
-        # 1. Configuration
-        print("=== ModelSearch Configuration ===")
-        print(f"Target          : {self.target}")
-        print(f"Model class     : {self.model_cls.__name__}")
-        print(f"Desired pool    : {desired_pool}")
-        print(f"Forced in       : {forced}")
-        print(f"Sample          : {sample}\n"
-              f"Max var num     : {max_var_num}\n"
-              f"Max lag         : {max_lag}\n"
-              f"Periods         : {periods_summary}\n"
-              f"Category limit  : {category_limit}\n"
-              f"Exp sign map    : {exp_sign_map}\n"
-              f"Top N           : {top_n}\n"
-              f"Rank weights    : {rank_weights}\n"
-              f"Test update func: {test_update_func}\n"
-              f"Outlier idx     : {outlier_idx}\n")
-        print("==================================\n")
+            # 1. Configuration
+            print("=== ModelSearch Configuration ===")
+            print(f"Target          : {self.target}")
+            print(f"Model class     : {self.model_cls.__name__}")
+            print(f"Desired pool    : {desired_pool}")
+            print(f"Forced in       : {forced}")
+            print(f"Sample          : {sample}\n"
+                  f"Max var num     : {max_var_num}\n"
+                  f"Max lag         : {max_lag}\n"
+                  f"Periods         : {periods_summary}\n"
+                  f"Category limit  : {category_limit}\n"
+                  f"Exp sign map    : {exp_sign_map}\n"
+                  f"Top N           : {top_n}\n"
+                  f"Rank weights    : {rank_weights}\n"
+                  f"Test update func: {test_update_func}\n"
+                  f"Outlier idx     : {outlier_idx}\n")
+            print("==================================\n")
         
-        # Warn about interpolated MEV variables within the candidate pool
-        def _flatten(items: Any) -> List[Union[str, TSFM]]:
-            flat: List[Union[str, TSFM]] = []
-            for it in items:
-                if isinstance(it, (str, TSFM)):
-                    flat.append(it)
-                elif isinstance(it, (list, tuple, set)):
-                    flat.extend(_flatten(it))
-            return flat
+            # Warn about interpolated MEV variables within the candidate pool
+            def _flatten(items: Any) -> List[Union[str, TSFM]]:
+                flat: List[Union[str, TSFM]] = []
+                for it in items:
+                    if isinstance(it, (str, TSFM)):
+                        flat.append(it)
+                    elif isinstance(it, (list, tuple, set)):
+                        flat.extend(_flatten(it))
+                return flat
 
-        vars_to_check = _flatten(forced + desired_pool)
-        interp_df = self.dm.interpolated_vars(vars_to_check)
-        if interp_df is not None:
-            print(interp_df.to_string(index=False))
-            print("")
+            vars_to_check = _flatten(forced + desired_pool)
+            interp_df = self.dm.interpolated_vars(vars_to_check)
+            if interp_df is not None:
+                print(interp_df.to_string(index=False))
+                print("")
             
-        # 2. Build specs
-        combos = self.build_spec_combos(
-            forced,
-            desired_pool,
-            max_var_num,
-            max_lag,
-            periods=resolved_periods,
-            category_limit=category_limit,
-            exp_sign_map=exp_sign_map,
-        )
-        print(f"Built {len(combos)} spec combinations.\n")
+            # 2. Build specs
+            combos = self.build_spec_combos(
+                forced,
+                desired_pool,
+                max_var_num,
+                max_lag,
+                periods=resolved_periods,
+                category_limit=category_limit,
+                exp_sign_map=exp_sign_map,
+            )
+            print(f"Built {len(combos)} spec combinations.\n")
 
-        # 3) Filter specs
-        passed, failed, errors = self.filter_specs(
-            sample=sample,
-            test_update_func=test_update_func,
-            outlier_idx=outlier_idx
-        )
-        # Print empty line after test info
-        print("")  # Empty line after test info
+            # 3) Filter specs
+            passed, failed, errors = self.filter_specs(
+                sample=sample,
+                test_update_func=test_update_func,
+                outlier_idx=outlier_idx
+            )
+            # Print empty line after test info
+            print("")  # Empty line after test info
         
-        self.passed_cms = passed
-        self.failed_info = failed
-        self.error_log = errors
-        # Early exit if nothing passed
-        if not self.passed_cms:
+            self.passed_cms = passed
+            self.failed_info = failed
+            self.error_log = errors
+            # Early exit if nothing passed
+            if not self.passed_cms:
+                print(f"Passed {len(passed)} combos; Failed {len(failed)} combos; {len(errors)} errors.\n")
+                print("\n⚠️  No candidate models passed the filter tests. Search terminated.\n")
+                return
             print(f"Passed {len(passed)} combos; Failed {len(failed)} combos; {len(errors)} errors.\n")
-            print("\n⚠️  No candidate models passed the filter tests. Search terminated.\n")
-            return
-        print(f"Passed {len(passed)} combos; Failed {len(failed)} combos; {len(errors)} errors.\n")
 
-        # 4. Rank models
-        df = ModelSearch.rank_cms(passed, sample, rank_weights)
-        # Identify and store top cms
-        ordered_ids = df['model_id'].tolist()
-        top_ids = ordered_ids[:top_n]
-        self.top_cms = [next(cm for cm in passed if cm.model_id == mid) for mid in top_ids]
+            # 4. Rank models
+            df = ModelSearch.rank_cms(passed, sample, rank_weights)
+            # Identify and store top cms
+            ordered_ids = df['model_id'].tolist()
+            top_ids = ordered_ids[:top_n]
+            self.top_cms = [next(cm for cm in passed if cm.model_id == mid) for mid in top_ids]
 
-        # Rename model_ids and update df_scores
-        new_ids = [f"cm{i+1}" for i in range(len(self.top_cms))]
-        for cm, new_id in zip(self.top_cms, new_ids):
-            cm.model_id = new_id
-        df_updated = df.copy()
-        for idx, new_id in enumerate(new_ids):
-            df_updated.at[idx, 'model_id'] = new_id
-        self.df_scores = df_updated
+            # Rename model_ids and update df_scores
+            new_ids = [f"cm{i+1}" for i in range(len(self.top_cms))]
+            for cm, new_id in zip(self.top_cms, new_ids):
+                cm.model_id = new_id
+            df_updated = df.copy()
+            for idx, new_id in enumerate(new_ids):
+                df_updated.at[idx, 'model_id'] = new_id
+            self.df_scores = df_updated
 
-        # Print updated rankings
-        print("=== Updated Ranked Results ===")
-        print(df_updated.head(top_n).to_string(index=False))
+            # Print updated rankings
+            print("=== Updated Ranked Results ===")
+            print(df_updated.head(top_n).to_string(index=False))
 
-        # Print top model formulas
-        print(f"\n=== Top {top_n} Model Formulas ===")
-        for cm in self.top_cms:
-            print(f"{cm.model_id}: {cm.formula}")
-        # No return; results are stored in self
+            # Print top model formulas
+            print(f"\n=== Top {top_n} Model Formulas ===")
+            for cm in self.top_cms:
+                print(f"{cm.model_id}: {cm.formula}")
+            # No return; results are stored in self
     
     def analyze_failures(self) -> None:
         """
