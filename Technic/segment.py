@@ -1491,6 +1491,8 @@ class Segment:
         add_in: bool = True,
         override: bool = False,
         re_rank: bool = True,
+        parallel: bool = False,
+        num_workers: Optional[int] = None,
         **legacy_kwargs: Any
     ) -> None:
         """
@@ -1547,6 +1549,13 @@ class Segment:
             If True and add_in=True and override=False, rank new top_cms
             along with pre-existing cms and update model_ids based on ranking.
             If False, simply append new cms with collision-resolved IDs.
+        parallel : bool, default False
+            When True, evaluate spec combinations concurrently using
+            multiple threads. Passed through to
+            :meth:`ModelSearch.run_search`.
+        num_workers : int, optional
+            Optional worker count when ``parallel`` is enabled. Defaults to
+            the number of logical CPUs available.
 
         Returns
         -------
@@ -1625,7 +1634,9 @@ class Segment:
             rank_weights=rank_weights,
             test_update_func=test_update_func,
             outlier_idx=outlier_idx,
-            exp_sign_map=exp_sign_map
+            exp_sign_map=exp_sign_map,
+            parallel=parallel,
+            num_workers=num_workers
         )
 
         # 3) Collect the top_n results from the searcher
