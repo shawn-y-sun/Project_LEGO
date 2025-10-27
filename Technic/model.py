@@ -76,13 +76,6 @@ class ModelBase(ABC):
         Model type instance for converting predictions to base variables.
     """
 
-    #: Hint for the search engine indicating whether this model spends its
-    #: heavy lifting inside NumPy/Statsmodels routines that release the GIL.
-    #: Leave as ``True`` for the built-in implementations; set to ``False`` in
-    #: custom subclasses that are primarily implemented in pure Python so the
-    #: searcher can automatically fall back to sequential execution.
-    thread_parallel_safe: bool = True
-
     def __init__(
         self,
         dm: Any = None,
