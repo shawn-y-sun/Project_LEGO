@@ -386,7 +386,10 @@ class ModelSearch:
         parallel : bool, default False
             When True, submit spec assessments to a thread pool so multiple
             models are evaluated concurrently. Expect a small (<1s) startup
-            cost for the worker pool before the first model completes.
+            cost for the worker pool before the first model completes. If the
+            chosen ``model_cls`` sets ``thread_parallel_safe=False`` the
+            searcher automatically falls back to sequential execution so that
+            CPU-bound pure-Python workloads avoid the GIL bottleneck.
         num_workers : int, optional
             Maximum number of worker threads to use when ``parallel`` is True.
             Defaults to ``min(32, os.cpu_count() + 4)`` as provided by
@@ -422,6 +425,16 @@ class ModelSearch:
             print("")
 
             stage_info: Optional[Dict[str, Any]] = None
+
+            thread_parallel_safe = getattr(self.model_cls, "thread_parallel_safe", False)
+            if parallel and not thread_parallel_safe:
+                print(
+                    f"⚠️  Parallel requested but {self.model_cls.__name__} sets "
+                    "thread_parallel_safe=False; running sequential to avoid GIL contention."
+                )
+                parallel = False
+
+            parallel_enabled = parallel and total > 1
 
             def _format_progress_line(title: str, processed: int, total_count: int, start_time: float) -> str:
                 elapsed = time.time() - start_time
@@ -581,7 +594,7 @@ class ModelSearch:
 
             _print_progress(processed_counts[0])
 
-            if parallel and total > 1:
+            if parallel_enabled:
                 _start_stage("Initializing worker pool")
                 launch_started = time.time()
                 executor = ThreadPoolExecutor(max_workers=num_workers)
@@ -812,9 +825,11 @@ class ModelSearch:
         outlier_idx : list, optional
             List of index labels corresponding to outliers to exclude.
         parallel : bool, default False
-            Enable concurrent spec assessment when True. Uses a thread pool.
-            Expect a small (<1s) startup to launch the workers before the
-            first model finishes.
+            Enable concurrent spec assessment when True. Uses a thread pool as
+            long as ``model_cls.thread_parallel_safe`` remains True; otherwise
+            the search falls back to sequential execution to avoid wasting
+            threads on GIL-bound workloads. Expect a small (<1s) startup to
+            launch the workers before the first model finishes.
         num_workers : int, optional
             Maximum number of worker threads when ``parallel`` is True. Defaults
             to :class:`~concurrent.futures.ThreadPoolExecutor` behaviour.
@@ -844,6 +859,14 @@ class ModelSearch:
             else:
                 periods_summary = resolved_periods
 
+            thread_parallel_safe = getattr(self.model_cls, "thread_parallel_safe", False)
+            if parallel and not thread_parallel_safe:
+                parallel_backend = "sequential (thread_parallel_safe=False)"
+            elif parallel:
+                parallel_backend = "threads"
+            else:
+                parallel_backend = "sequential"
+
             # 1. Configuration
             print("=== ModelSearch Configuration ===")
             print(f"Target          : {self.target}")
@@ -861,7 +884,9 @@ class ModelSearch:
                   f"Test update func: {test_update_func}\n"
                   f"Outlier idx     : {outlier_idx}\n"
                   f"Parallel        : {parallel}\n"
-                  f"Num workers     : {num_workers}\n")
+                  f"Num workers     : {num_workers}\n"
+                  f"Parallel backend: {parallel_backend}\n"
+                  f"Thread safe hint: {thread_parallel_safe}\n")
             print("==================================\n")
         
             # Warn about interpolated MEV variables within the candidate pool

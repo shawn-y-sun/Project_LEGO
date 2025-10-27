@@ -1542,6 +1542,10 @@ class Segment:
             List of index labels corresponding to outliers to exclude.
         parallel : bool, default False
             Enable concurrent spec assessment in :meth:`ModelSearch.filter_specs`.
+            Thread-based parallelism is only used when the selected model class
+            leaves ``thread_parallel_safe=True``; otherwise the search falls
+            back to sequential execution so CPU-bound pure-Python workloads do
+            not fight the GIL.
         num_workers : Optional[int], default None
             Maximum number of worker threads when ``parallel`` is True.
         add_in : bool, default True
