@@ -421,6 +421,41 @@ class ModelSearch:
             
             # Print initial empty line for spacing
             print("")
+
+            def render_progress(processed: int, status: Optional[str] = None) -> None:
+                elapsed = time.time() - start_time
+
+                if total <= 0:
+                    progress = 1.0
+                else:
+                    progress = processed / total
+                    progress = max(0.0, min(progress, 1.0))
+
+                if processed <= 0 or elapsed <= 0 or progress <= 0:
+                    speed = 0.0
+                    eta = "--"
+                else:
+                    est_total = elapsed / progress
+                    rem = max(0.0, est_total - elapsed)
+                    finish_dt = datetime.datetime.now() + datetime.timedelta(seconds=rem)
+                    eta = finish_dt.strftime('%Y-%m-%d %H:%M:%S')
+                    speed = processed / elapsed if elapsed > 0 else 0.0
+
+                progress_pct = int(progress * 100)
+                bar_width = 30
+                filled_width = int(bar_width * progress)
+                filled_width = max(0, min(bar_width, filled_width))
+                bar = '█' * filled_width + '-' * (bar_width - filled_width)
+                processed_count = f"{processed}/{total}"
+                progress_line = (
+                    f"Filtering Specs: {progress_pct:3d}%|{bar}| {processed_count} "
+                    f"[{elapsed:,.0f}s, {speed:.2f} it/s, estimated_finish={eta}]"
+                )
+
+                if status:
+                    progress_line = f"{progress_line} {status}"
+
+                print(f"\r{progress_line}", end='', flush=True)
             
             def run_assessment(index: int, specs: List[Any]) -> Tuple[int, List[Any], Optional[CM], Optional[Tuple[List[Any], List[str]]], Optional[Dict[str, Dict[str, str]]], Optional[Tuple[str, str]]]:
                 model_id = f"{model_id_prefix}{index}"
@@ -482,45 +517,28 @@ class ModelSearch:
                             test_info = batch_filter_test_infos.get(test_name)
                             if test_info:
                                 print(f"- {test_name}: filter_mode: {test_info['filter_mode']} | desc: {test_info['desc']}")
+                        render_progress(processed)
                     batch_filter_test_infos = {}
 
                 processed_counts[0] = processed
 
                 if processed % 10 == 0 or processed == 1 or processed == total:
-                    elapsed = time.time() - start_time
-                    progress = processed / total if total > 0 else 1
-                    if progress > 0:
-                        est_total = elapsed / progress
-                        rem = est_total - elapsed
-                        finish_dt = datetime.datetime.now() + datetime.timedelta(seconds=rem)
-                        eta = finish_dt.strftime('%Y-%m-%d %H:%M:%S')
-                    else:
-                        eta = ''
-
-                    progress_pct = int(progress * 100)
-                    bar_width = 30
-                    filled_width = int(bar_width * progress)
-                    bar = '█' * filled_width + '-' * (bar_width - filled_width)
-                    processed_count = f"{processed}/{total}"
-                    speed = processed / elapsed if elapsed > 0 else 0
-                    progress_line = f"Filtering Specs: {progress_pct:3d}%|{bar}| {processed_count} [{elapsed:,.0f}s, {speed:.2f}it/s, estimated_finish={eta}]"
-                    print(f"\r{progress_line}", end='', flush=True)
+                    render_progress(processed)
 
             processed_counts = [0]
+
+            # Render an initial progress bar so callers immediately see activity
+            render_progress(processed_counts[0], status="initializing...")
 
             if parallel and total > 1:
                 launch_started = time.time()
                 executor = ThreadPoolExecutor(max_workers=num_workers)
                 pool_ready_elapsed = time.time() - launch_started
                 worker_count = executor._max_workers  # type: ignore[attr-defined]
+                base_status = f"workers={worker_count}, init={pool_ready_elapsed:.2f}s"
                 try:
                     futures = [executor.submit(run_assessment, i, specs) for i, specs in enumerate(self.all_specs)]
-
-                    print(
-                        f"Parallel filtering enabled with {worker_count} workers "
-                        f"(pool ready in {pool_ready_elapsed:.2f}s). Waiting for first model...",
-                        flush=True
-                    )
+                    render_progress(processed_counts[0], status=f"{base_status}; waiting for first model...")
 
                     pending = set(futures)
                     wait_start = time.time()
@@ -536,16 +554,18 @@ class ModelSearch:
                             additional_ready.extend(done_list[1:])
                             break
                         elapsed = time.time() - wait_start
-                        print(
-                            f"Still waiting for the first model to finish ({elapsed:.1f}s elapsed)...",
-                            flush=True
+                        render_progress(
+                            processed_counts[0],
+                            status=f"{base_status}; waiting for first model... {elapsed:.1f}s elapsed",
                         )
 
                     if first_future is not None:
                         first_completion_elapsed = time.time() - wait_start
-                        print(
-                            f"First model finished after {first_completion_elapsed:.2f}s. Streaming progress below...",
-                            flush=True
+                        render_progress(
+                            processed_counts[0],
+                            status=(
+                                f"{base_status}; first model finished after {first_completion_elapsed:.2f}s"
+                            ),
                         )
                         index, specs, cm_result, failure_result, filter_info, error = first_future.result()
                         process_outcome(index, specs, cm_result, failure_result, filter_info, error)
