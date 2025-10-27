@@ -8,7 +8,7 @@ import sys
 import os
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 import pandas as pd
 from tqdm import tqdm
@@ -511,16 +511,50 @@ class ModelSearch:
             if parallel and total > 1:
                 launch_started = time.time()
                 executor = ThreadPoolExecutor(max_workers=num_workers)
-                init_elapsed = time.time() - launch_started
+                pool_ready_elapsed = time.time() - launch_started
                 worker_count = executor._max_workers  # type: ignore[attr-defined]
-                print(
-                    f"Parallel filtering enabled with {worker_count} workers "
-                    f"(startup {init_elapsed:.2f}s). First update appears once a model finishes.",
-                    flush=True
-                )
                 try:
                     futures = [executor.submit(run_assessment, i, specs) for i, specs in enumerate(self.all_specs)]
-                    for future in as_completed(futures):
+
+                    print(
+                        f"Parallel filtering enabled with {worker_count} workers "
+                        f"(pool ready in {pool_ready_elapsed:.2f}s). Waiting for first model...",
+                        flush=True
+                    )
+
+                    pending = set(futures)
+                    wait_start = time.time()
+                    status_interval = 15.0
+                    first_future = None
+                    additional_ready = []
+
+                    while pending and first_future is None:
+                        done, pending = wait(pending, timeout=status_interval, return_when=FIRST_COMPLETED)
+                        if done:
+                            done_list = list(done)
+                            first_future = done_list[0]
+                            additional_ready.extend(done_list[1:])
+                            break
+                        elapsed = time.time() - wait_start
+                        print(
+                            f"Still waiting for the first model to finish ({elapsed:.1f}s elapsed)...",
+                            flush=True
+                        )
+
+                    if first_future is not None:
+                        first_completion_elapsed = time.time() - wait_start
+                        print(
+                            f"First model finished after {first_completion_elapsed:.2f}s. Streaming progress below...",
+                            flush=True
+                        )
+                        index, specs, cm_result, failure_result, filter_info, error = first_future.result()
+                        process_outcome(index, specs, cm_result, failure_result, filter_info, error)
+
+                    for future in additional_ready:
+                        index, specs, cm_result, failure_result, filter_info, error = future.result()
+                        process_outcome(index, specs, cm_result, failure_result, filter_info, error)
+
+                    for future in as_completed(pending):
                         index, specs, cm_result, failure_result, filter_info, error = future.result()
                         process_outcome(index, specs, cm_result, failure_result, filter_info, error)
                 finally:
