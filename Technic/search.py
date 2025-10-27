@@ -417,18 +417,18 @@ class ModelSearch:
             batch_filter_test_infos: Dict[str, Dict[str, str]] = {}  # Collect all filter_test_info in current batch
             
             total = len(self.all_specs)
-            start_time = time.time()
-            
-            # Print initial empty line for spacing
+            overall_start = time.time()
+
             print("")
 
-            def render_progress(processed: int, status: Optional[str] = None) -> None:
-                elapsed = time.time() - start_time
+            stage_info: Optional[Dict[str, Any]] = None
 
-                if total <= 0:
+            def _format_progress_line(title: str, processed: int, total_count: int, start_time: float) -> str:
+                elapsed = time.time() - start_time
+                if total_count <= 0:
                     progress = 1.0
                 else:
-                    progress = processed / total
+                    progress = processed / total_count
                     progress = max(0.0, min(progress, 1.0))
 
                 if processed <= 0 or elapsed <= 0 or progress <= 0:
@@ -436,8 +436,8 @@ class ModelSearch:
                     eta = "--"
                 else:
                     est_total = elapsed / progress
-                    rem = max(0.0, est_total - elapsed)
-                    finish_dt = datetime.datetime.now() + datetime.timedelta(seconds=rem)
+                    remaining = max(0.0, est_total - elapsed)
+                    finish_dt = datetime.datetime.now() + datetime.timedelta(seconds=remaining)
                     eta = finish_dt.strftime('%Y-%m-%d %H:%M:%S')
                     speed = processed / elapsed if elapsed > 0 else 0.0
 
@@ -446,16 +446,67 @@ class ModelSearch:
                 filled_width = int(bar_width * progress)
                 filled_width = max(0, min(bar_width, filled_width))
                 bar = '█' * filled_width + '-' * (bar_width - filled_width)
-                processed_count = f"{processed}/{total}"
-                progress_line = (
-                    f"Filtering Specs: {progress_pct:3d}%|{bar}| {processed_count} "
-                    f"[{elapsed:,.0f}s, {speed:.2f} it/s, estimated_finish={eta}]"
+                processed_count = f"{processed}/{total_count}"
+                return (
+                    f"{title}: {progress_pct:3d}%|{bar}| {processed_count} "
+                    f"[{elapsed:,.0f}s, {speed:.2f} it/s, ETA={eta}]"
                 )
 
-                if status:
-                    progress_line = f"{progress_line} {status}"
+            def _print_progress(processed: int) -> None:
+                overall_line = _format_progress_line(
+                    "Filtering Specs",
+                    processed,
+                    total,
+                    overall_start,
+                )
+                print(overall_line)
 
-                print(f"\r{progress_line}", end='', flush=True)
+                if stage_info is not None:
+                    stage_title = f"Stage [{stage_info['name']}]"
+                    if stage_info.get('message'):
+                        stage_title = f"{stage_title} - {stage_info['message']}"
+                    stage_line = _format_progress_line(
+                        stage_title,
+                        stage_info['processed'],
+                        stage_info['total'],
+                        stage_info['start'],
+                    )
+                    print(stage_line)
+
+            def _start_stage(name: str, *, total_steps: int = 1, use_offset: bool = False, message: Optional[str] = None) -> None:
+                nonlocal stage_info
+                offset = None
+                steps = total_steps
+                if use_offset:
+                    offset = processed_counts[0]
+                    remaining = max(total - offset, 0)
+                    steps = remaining if remaining > 0 else 1
+                stage_info = {
+                    'name': name,
+                    'processed': 0,
+                    'total': max(1, steps),
+                    'start': time.time(),
+                    'offset': offset,
+                    'message': message,
+                }
+                print(f"Current stage: {name}")
+                _print_progress(processed_counts[0])
+
+            def _complete_stage(message: Optional[str] = None) -> None:
+                if stage_info is None:
+                    return
+                stage_info['processed'] = stage_info['total']
+                stage_info['message'] = message or stage_info.get('message')
+                _print_progress(processed_counts[0])
+
+            def _refresh_stage_progress() -> None:
+                if stage_info is None:
+                    return
+                offset = stage_info.get('offset')
+                if offset is None:
+                    return
+                completed_in_stage = max(0, processed_counts[0] - offset)
+                stage_info['processed'] = min(stage_info['total'], completed_in_stage)
             
             def run_assessment(index: int, specs: List[Any]) -> Tuple[int, List[Any], Optional[CM], Optional[Tuple[List[Any], List[str]]], Optional[Dict[str, Dict[str, str]]], Optional[Tuple[str, str]]]:
                 model_id = f"{model_id_prefix}{index}"
@@ -509,7 +560,6 @@ class ModelSearch:
                     seen_test_names.update(new_test_names)
 
                     if new_test_names:
-                        print("\r" + " " * 120, end="\r")
                         if not test_info_header_printed:
                             print("--- Active Tests of Filtering ---")
                             test_info_header_printed = True
@@ -517,28 +567,33 @@ class ModelSearch:
                             test_info = batch_filter_test_infos.get(test_name)
                             if test_info:
                                 print(f"- {test_name}: filter_mode: {test_info['filter_mode']} | desc: {test_info['desc']}")
-                        render_progress(processed)
+                        _print_progress(processed)
                     batch_filter_test_infos = {}
 
                 processed_counts[0] = processed
 
+                _refresh_stage_progress()
+
                 if processed % 10 == 0 or processed == 1 or processed == total:
-                    render_progress(processed)
+                    _print_progress(processed)
 
             processed_counts = [0]
 
-            # Render an initial progress bar so callers immediately see activity
-            render_progress(processed_counts[0], status="initializing...")
+            _print_progress(processed_counts[0])
 
             if parallel and total > 1:
+                _start_stage("Initializing worker pool")
                 launch_started = time.time()
                 executor = ThreadPoolExecutor(max_workers=num_workers)
                 pool_ready_elapsed = time.time() - launch_started
                 worker_count = executor._max_workers  # type: ignore[attr-defined]
-                base_status = f"workers={worker_count}, init={pool_ready_elapsed:.2f}s"
+                _complete_stage(message=f"completed in {pool_ready_elapsed:.2f}s; workers={worker_count}")
+                _start_stage(
+                    "Waiting for first model",
+                    message=f"{worker_count} workers ready",
+                )
                 try:
                     futures = [executor.submit(run_assessment, i, specs) for i, specs in enumerate(self.all_specs)]
-                    render_progress(processed_counts[0], status=f"{base_status}; waiting for first model...")
 
                     pending = set(futures)
                     wait_start = time.time()
@@ -554,21 +609,22 @@ class ModelSearch:
                             additional_ready.extend(done_list[1:])
                             break
                         elapsed = time.time() - wait_start
-                        render_progress(
-                            processed_counts[0],
-                            status=f"{base_status}; waiting for first model... {elapsed:.1f}s elapsed",
-                        )
+                        if stage_info is not None:
+                            stage_info['message'] = f"{worker_count} workers ready; {elapsed:.1f}s elapsed"
+                            _print_progress(processed_counts[0])
 
                     if first_future is not None:
                         first_completion_elapsed = time.time() - wait_start
-                        render_progress(
-                            processed_counts[0],
-                            status=(
-                                f"{base_status}; first model finished after {first_completion_elapsed:.2f}s"
-                            ),
+                        _complete_stage(
+                            message=f"first model finished in {first_completion_elapsed:.2f}s"
                         )
                         index, specs, cm_result, failure_result, filter_info, error = first_future.result()
                         process_outcome(index, specs, cm_result, failure_result, filter_info, error)
+                        _start_stage(
+                            "Parallel assessment",
+                            use_offset=True,
+                            message=f"{worker_count} workers active",
+                        )
 
                     for future in additional_ready:
                         index, specs, cm_result, failure_result, filter_info, error = future.result()
@@ -584,12 +640,15 @@ class ModelSearch:
                     index, specs, cm_result, failure_result, filter_info, error = run_assessment(i, specs)
                     process_outcome(index, specs, cm_result, failure_result, filter_info, error)
 
+            if stage_info is not None and stage_info.get('offset') is not None:
+                stage_elapsed = time.time() - stage_info['start']
+                _complete_stage(message=f"completed in {stage_elapsed:.2f}s")
+
             # Flush any remaining filter info that might not have been printed yet
             if batch_filter_test_infos:
                 batch_test_names = set(batch_filter_test_infos.keys())
                 new_test_names = batch_test_names - seen_test_names
                 if new_test_names:
-                    print("\r" + " " * 120, end="\r")
                     if not test_info_header_printed:
                         print("--- Active Tests of Filtering ---")
                         test_info_header_printed = True
