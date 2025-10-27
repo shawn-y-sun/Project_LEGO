@@ -75,6 +75,7 @@ class ModelBase(ABC):
     base_predictor : Any, optional
         Model type instance for converting predictions to base variables.
     """
+
     def __init__(
         self,
         dm: Any = None,
