@@ -1,4 +1,4 @@
-from typing import List, Union, Tuple, Type, Any, Optional, Callable, Dict, Sequence
+from typing import List, Union, Tuple, Type, Any, Optional, Callable, Dict, Sequence, Set
 import itertools
 import time
 import datetime
@@ -9,6 +9,7 @@ import os
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
+import threading
 
 import pandas as pd
 from tqdm import tqdm
@@ -415,7 +416,7 @@ class ModelSearch:
             seen_test_names: set = set()
             test_info_header_printed = False
             batch_filter_test_infos: Dict[str, Dict[str, str]] = {}  # Collect all filter_test_info in current batch
-            
+
             total = len(self.all_specs)
             overall_start = time.time()
 
@@ -424,6 +425,7 @@ class ModelSearch:
             stage_info: Optional[Dict[str, Any]] = None
 
             parallel_enabled = parallel and total > 1
+            workers_seen: Set[str] = set()
 
             def _format_progress_line(title: str, processed: int, total_count: int, start_time: float) -> str:
                 elapsed = time.time() - start_time
@@ -510,8 +512,20 @@ class ModelSearch:
                 completed_in_stage = max(0, processed_counts[0] - offset)
                 stage_info['processed'] = min(stage_info['total'], completed_in_stage)
             
-            def run_assessment(index: int, specs: List[Any]) -> Tuple[int, List[Any], Optional[CM], Optional[Tuple[List[Any], List[str]]], Optional[Dict[str, Dict[str, str]]], Optional[Tuple[str, str]]]:
+            def run_assessment(
+                index: int,
+                specs: List[Any]
+            ) -> Tuple[
+                int,
+                List[Any],
+                Optional[CM],
+                Optional[Tuple[List[Any], List[str]]],
+                Optional[Dict[str, Dict[str, str]]],
+                Optional[Tuple[str, str]],
+                str
+            ]:
                 model_id = f"{model_id_prefix}{index}"
+                worker_name = threading.current_thread().name
                 try:
                     with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
                         result = self.assess_spec(
@@ -524,12 +538,12 @@ class ModelSearch:
 
                     if isinstance(result, CM):
                         mdl = result.model_in if sample == 'in' else result.model_full
-                        return index, specs, result, None, mdl.testset.filter_test_info, None
+                        return index, specs, result, None, mdl.testset.filter_test_info, None, worker_name
 
                     specs_failed, failed_tests, filter_test_info = result
-                    return index, specs, None, (specs_failed, failed_tests), filter_test_info, None
+                    return index, specs, None, (specs_failed, failed_tests), filter_test_info, None, worker_name
                 except Exception as exc:  # pragma: no cover - defensive branch
-                    return index, specs, None, None, None, (type(exc).__name__, str(exc))
+                    return index, specs, None, None, None, (type(exc).__name__, str(exc)), worker_name
 
             def process_outcome(
                 index: int,
@@ -537,7 +551,8 @@ class ModelSearch:
                 cm_result: Optional[CM],
                 failure_result: Optional[Tuple[List[Any], List[str]]],
                 filter_info: Optional[Dict[str, Dict[str, str]]],
-                error: Optional[Tuple[str, str]]
+                error: Optional[Tuple[str, str]],
+                worker_name: Optional[str]
             ) -> None:
                 nonlocal batch_filter_test_infos, test_info_header_printed, seen_test_names
                 processed = processed_counts[0] + 1
@@ -549,6 +564,9 @@ class ModelSearch:
                 elif failure_result is not None:
                     failed_specs, failed_tests = failure_result
                     failed_info.append((failed_specs, failed_tests))
+
+                if worker_name:
+                    workers_seen.add(worker_name)
 
                 if filter_info:
                     batch_filter_test_infos.update(filter_info)
@@ -595,52 +613,58 @@ class ModelSearch:
                     message=f"{worker_count} workers ready",
                 )
                 try:
-                    futures = [executor.submit(run_assessment, i, specs) for i, specs in enumerate(self.all_specs)]
-
-                    pending = set(futures)
+                    pending = {
+                        executor.submit(run_assessment, i, specs)
+                        for i, specs in enumerate(self.all_specs)
+                    }
                     wait_start = time.time()
                     status_interval = 15.0
                     first_future = None
-                    additional_ready = []
+                    done = set()
 
                     while pending and first_future is None:
                         done, pending = wait(pending, timeout=status_interval, return_when=FIRST_COMPLETED)
                         if done:
-                            done_list = list(done)
-                            first_future = done_list[0]
-                            additional_ready.extend(done_list[1:])
-                            break
-                        elapsed = time.time() - wait_start
-                        if stage_info is not None:
-                            stage_info['message'] = f"{worker_count} workers ready; {elapsed:.1f}s elapsed"
-                            _print_progress(processed_counts[0])
+                            first_future = next(iter(done))
+                        else:
+                            elapsed = time.time() - wait_start
+                            if stage_info is not None:
+                                stage_info['message'] = f"{worker_count} workers ready; {elapsed:.1f}s elapsed"
+                                _print_progress(processed_counts[0])
 
                     if first_future is not None:
                         first_completion_elapsed = time.time() - wait_start
                         _complete_stage(
                             message=f"first model finished in {first_completion_elapsed:.2f}s"
                         )
-                        index, specs, cm_result, failure_result, filter_info, error = first_future.result()
-                        process_outcome(index, specs, cm_result, failure_result, filter_info, error)
-                        _start_stage(
-                            "Parallel assessment",
-                            use_offset=True,
-                            message=f"{worker_count} workers active",
-                        )
+                        index, specs, cm_result, failure_result, filter_info, error, worker_name = first_future.result()
+                        process_outcome(index, specs, cm_result, failure_result, filter_info, error, worker_name)
+                        pending.discard(first_future)
 
-                    for future in additional_ready:
-                        index, specs, cm_result, failure_result, filter_info, error = future.result()
-                        process_outcome(index, specs, cm_result, failure_result, filter_info, error)
+                        additional_done = done - {first_future}
+                        for future in additional_done:
+                            index, specs, cm_result, failure_result, filter_info, error, worker_name = future.result()
+                            process_outcome(index, specs, cm_result, failure_result, filter_info, error, worker_name)
+                            pending.discard(future)
 
-                    for future in as_completed(pending):
-                        index, specs, cm_result, failure_result, filter_info, error = future.result()
-                        process_outcome(index, specs, cm_result, failure_result, filter_info, error)
+                        if pending:
+                            _start_stage(
+                                "Parallel assessment",
+                                use_offset=True,
+                                message=f"{worker_count} workers active",
+                            )
+
+                    remaining_futures = list(pending)
+                    for future in as_completed(remaining_futures):
+                        index, specs, cm_result, failure_result, filter_info, error, worker_name = future.result()
+                        process_outcome(index, specs, cm_result, failure_result, filter_info, error, worker_name)
+                        pending.discard(future)
                 finally:
                     executor.shutdown(wait=True)
             else:
                 for i, specs in enumerate(self.all_specs):
-                    index, specs, cm_result, failure_result, filter_info, error = run_assessment(i, specs)
-                    process_outcome(index, specs, cm_result, failure_result, filter_info, error)
+                    index, specs, cm_result, failure_result, filter_info, error, worker_name = run_assessment(i, specs)
+                    process_outcome(index, specs, cm_result, failure_result, filter_info, error, worker_name)
 
             if stage_info is not None and stage_info.get('offset') is not None:
                 stage_elapsed = time.time() - stage_info['start']
@@ -658,6 +682,16 @@ class ModelSearch:
                         test_info = batch_filter_test_infos.get(test_name)
                         if test_info:
                             print(f"- {test_name}: filter_mode: {test_info['filter_mode']} | desc: {test_info['desc']}")
+
+            if parallel_enabled and workers_seen:
+                main_thread_name = threading.current_thread().name
+                display_workers = sorted(
+                    name for name in workers_seen if name != main_thread_name
+                )
+                if not display_workers:
+                    display_workers = sorted(workers_seen)
+                worker_list = ", ".join(display_workers)
+                print(f"Parallel filtering engaged {len(workers_seen)} worker threads: {worker_list}")
 
             # Final newline after progress bar
             print("")
