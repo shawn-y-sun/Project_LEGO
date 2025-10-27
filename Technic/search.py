@@ -8,6 +8,7 @@ import sys
 import os
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 from tqdm import tqdm
@@ -360,11 +361,14 @@ class ModelSearch:
         model_id_prefix: str = 'cm',
         sample: str = 'in',
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
-        outlier_idx: Optional[List[Any]] = None
+        outlier_idx: Optional[List[Any]] = None,
+        parallel: bool = False,
+        num_workers: Optional[int] = None
     ) -> Tuple[List[CM], List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]], List[Tuple[List[Any], str, str]]]:
         """
         Assess all built spec combos and separate passed and failed results,
-        using multithreading and a single progress bar update.
+        optionally leveraging multithreading while keeping shared-state
+        mutations confined to the parent thread.
 
         Parameters
         ----------
@@ -379,6 +383,13 @@ class ModelSearch:
             records to remove from the in-sample data. If provided and `build_in`
             is True, each label must exist within the in-sample period; otherwise,
             a ValueError is raised.
+        parallel : bool, default False
+            When True, submit spec assessments to a thread pool so multiple
+            models are evaluated concurrently.
+        num_workers : int, optional
+            Maximum number of worker threads to use when ``parallel`` is True.
+            Defaults to ``min(32, os.cpu_count() + 4)`` as provided by
+            :class:`~concurrent.futures.ThreadPoolExecutor` when not specified.
 
         Returns
         -------
@@ -408,10 +419,9 @@ class ModelSearch:
             # Print initial empty line for spacing
             print("")
             
-            for i, specs in enumerate(self.all_specs):
-                model_id = f"{model_id_prefix}{i}"
+            def run_assessment(index: int, specs: List[Any]) -> Tuple[int, List[Any], Optional[CM], Optional[Tuple[List[Any], List[str]]], Optional[Dict[str, Dict[str, str]]], Optional[Tuple[str, str]]]:
+                model_id = f"{model_id_prefix}{index}"
                 try:
-                    # Suppress all output during assessment
                     with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
                         result = self.assess_spec(
                             model_id,
@@ -420,59 +430,60 @@ class ModelSearch:
                             test_update_func,
                             outlier_idx=outlier_idx
                         )
-                    
+
                     if isinstance(result, CM):
-                        passed_cms.append(result)
-                        # Get filter test info from successful CM
                         mdl = result.model_in if sample == 'in' else result.model_full
-                        filter_test_info = mdl.testset.filter_test_info
-                    else:
-                        # Extract specs, failed_tests, and filter_test_info from failed result
-                        specs_failed, failed_tests, filter_test_info = result
-                        failed_info.append((specs_failed, failed_tests))
-                    
-                    # Update batch filter_test_info (will overwrite duplicates)
-                    batch_filter_test_infos.update(filter_test_info)
-                    
-                    # Determine batch size based on progress
-                    batch_size = 100 if i < 10000 else 10000
-                    
-                    # Process batch based on dynamic batch size or on first run
-                    if (i + 1) % batch_size == 0 or i == 0:
-                        # Get all test names from the current batch
-                        batch_test_names = set(batch_filter_test_infos.keys())
-                        
-                        # Find new test names not seen before
-                        new_test_names = batch_test_names - seen_test_names
-                        seen_test_names.update(new_test_names)
-                        
-                        if new_test_names:
-                            # Clear current line completely
-                            print("\r" + " " * 120, end="\r")
-                            
-                            # Print header and empty lines only for the first batch
-                            if not test_info_header_printed:
-                                print("--- Active Tests of Filtering ---")
-                                test_info_header_printed = True
-                            
-                            # Print test info lines seamlessly
-                            for test_name in sorted(new_test_names):
-                                if test_name in batch_filter_test_infos:
-                                    test_info = batch_filter_test_infos[test_name]
-                                    print(f"- {test_name}: filter_mode: {test_info['filter_mode']} | desc: {test_info['desc']}")
-                            
-                            # Print empty line after test info
-                            # print("")  # Empty line after test info
-                        
-                        # Clear batch memory for next batch
-                        batch_filter_test_infos = {}
-                            
-                except Exception as e:
-                    error_log.append((specs, type(e).__name__, str(e)))
-     
-                # Progress and ETA update (only every 10 iterations to reduce interference)
-                if (i + 1) % 10 == 0 or i == 0 or i == len(self.all_specs) - 1:
-                    processed = i + 1
+                        return index, specs, result, None, mdl.testset.filter_test_info, None
+
+                    specs_failed, failed_tests, filter_test_info = result
+                    return index, specs, None, (specs_failed, failed_tests), filter_test_info, None
+                except Exception as exc:  # pragma: no cover - defensive branch
+                    return index, specs, None, None, None, (type(exc).__name__, str(exc))
+
+            def process_outcome(
+                index: int,
+                specs: List[Any],
+                cm_result: Optional[CM],
+                failure_result: Optional[Tuple[List[Any], List[str]]],
+                filter_info: Optional[Dict[str, Dict[str, str]]],
+                error: Optional[Tuple[str, str]]
+            ) -> None:
+                nonlocal batch_filter_test_infos, test_info_header_printed, seen_test_names
+                processed = processed_counts[0] + 1
+
+                if error:
+                    error_log.append((specs, error[0], error[1]))
+                elif cm_result is not None:
+                    passed_cms.append(cm_result)
+                elif failure_result is not None:
+                    failed_specs, failed_tests = failure_result
+                    failed_info.append((failed_specs, failed_tests))
+
+                if filter_info:
+                    batch_filter_test_infos.update(filter_info)
+
+                # Determine batch size based on progress position
+                current_index = processed - 1
+                batch_size = 100 if current_index < 10000 else 10000
+                if batch_filter_test_infos and (processed % batch_size == 0 or processed == 1 or processed == total):
+                    batch_test_names = set(batch_filter_test_infos.keys())
+                    new_test_names = batch_test_names - seen_test_names
+                    seen_test_names.update(new_test_names)
+
+                    if new_test_names:
+                        print("\r" + " " * 120, end="\r")
+                        if not test_info_header_printed:
+                            print("--- Active Tests of Filtering ---")
+                            test_info_header_printed = True
+                        for test_name in sorted(new_test_names):
+                            test_info = batch_filter_test_infos.get(test_name)
+                            if test_info:
+                                print(f"- {test_name}: filter_mode: {test_info['filter_mode']} | desc: {test_info['desc']}")
+                    batch_filter_test_infos = {}
+
+                processed_counts[0] = processed
+
+                if processed % 10 == 0 or processed == 1 or processed == total:
                     elapsed = time.time() - start_time
                     progress = processed / total if total > 0 else 1
                     if progress > 0:
@@ -482,8 +493,7 @@ class ModelSearch:
                         eta = finish_dt.strftime('%Y-%m-%d %H:%M:%S')
                     else:
                         eta = ''
-                        
-                    # Update progress display
+
                     progress_pct = int(progress * 100)
                     bar_width = 30
                     filled_width = int(bar_width * progress)
@@ -492,7 +502,34 @@ class ModelSearch:
                     speed = processed / elapsed if elapsed > 0 else 0
                     progress_line = f"Filtering Specs: {progress_pct:3d}%|{bar}| {processed_count} [{elapsed:,.0f}s, {speed:.2f}it/s, estimated_finish={eta}]"
                     print(f"\r{progress_line}", end='', flush=True)
-            
+
+            processed_counts = [0]
+
+            if parallel and total > 1:
+                with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                    futures = [executor.submit(run_assessment, i, specs) for i, specs in enumerate(self.all_specs)]
+                    for future in as_completed(futures):
+                        index, specs, cm_result, failure_result, filter_info, error = future.result()
+                        process_outcome(index, specs, cm_result, failure_result, filter_info, error)
+            else:
+                for i, specs in enumerate(self.all_specs):
+                    index, specs, cm_result, failure_result, filter_info, error = run_assessment(i, specs)
+                    process_outcome(index, specs, cm_result, failure_result, filter_info, error)
+
+            # Flush any remaining filter info that might not have been printed yet
+            if batch_filter_test_infos:
+                batch_test_names = set(batch_filter_test_infos.keys())
+                new_test_names = batch_test_names - seen_test_names
+                if new_test_names:
+                    print("\r" + " " * 120, end="\r")
+                    if not test_info_header_printed:
+                        print("--- Active Tests of Filtering ---")
+                        test_info_header_printed = True
+                    for test_name in sorted(new_test_names):
+                        test_info = batch_filter_test_infos.get(test_name)
+                        if test_info:
+                            print(f"- {test_name}: filter_mode: {test_info['filter_mode']} | desc: {test_info['desc']}")
+
             # Final newline after progress bar
             print("")
             return passed_cms, failed_info, error_log
@@ -599,6 +636,8 @@ class ModelSearch:
         rank_weights: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
         outlier_idx: Optional[List[Any]] = None,
+        parallel: bool = False,
+        num_workers: Optional[int] = None,
         **legacy_kwargs: Any
     ) -> List[CM]:
         """
@@ -645,6 +684,11 @@ class ModelSearch:
             Optional function to update each CM's test set.
         outlier_idx : list, optional
             List of index labels corresponding to outliers to exclude.
+        parallel : bool, default False
+            Enable concurrent spec assessment when True. Uses a thread pool.
+        num_workers : int, optional
+            Maximum number of worker threads when ``parallel`` is True. Defaults
+            to :class:`~concurrent.futures.ThreadPoolExecutor` behaviour.
 
         Returns
         -------
@@ -686,7 +730,9 @@ class ModelSearch:
                   f"Top N           : {top_n}\n"
                   f"Rank weights    : {rank_weights}\n"
                   f"Test update func: {test_update_func}\n"
-                  f"Outlier idx     : {outlier_idx}\n")
+                  f"Outlier idx     : {outlier_idx}\n"
+                  f"Parallel        : {parallel}\n"
+                  f"Num workers     : {num_workers}\n")
             print("==================================\n")
         
             # Warn about interpolated MEV variables within the candidate pool
@@ -721,7 +767,9 @@ class ModelSearch:
             passed, failed, errors = self.filter_specs(
                 sample=sample,
                 test_update_func=test_update_func,
-                outlier_idx=outlier_idx
+                outlier_idx=outlier_idx,
+                parallel=parallel,
+                num_workers=num_workers
             )
             # Print empty line after test info
             print("")  # Empty line after test info
