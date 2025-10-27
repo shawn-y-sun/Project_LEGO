@@ -6,9 +6,11 @@ from collections import defaultdict
 import warnings
 import sys
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
+from queue import Queue
 
 import pandas as pd
 from tqdm import tqdm
@@ -410,7 +412,12 @@ class ModelSearch:
             failed_info: List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]] = []
             error_log: List[Tuple[List[Any], str, str]] = []
 
-            def _print_progress(processed: int, total: int, start_time: float) -> None:
+            def _print_progress(
+                processed: int,
+                total: int,
+                start_time: float,
+                thread_stats: Optional[List[Dict[str, Any]]] = None
+            ) -> None:
                 if total == 0:
                     return
                 elapsed = time.time() - start_time
@@ -432,7 +439,27 @@ class ModelSearch:
                     f"Filtering Specs: {progress_pct:3d}%|{bar}| {processed_count} "
                     f"[{elapsed:,.0f}s, {speed:.2f}it/s, estimated_finish={eta}]"
                 )
-                print(f"\r{progress_line}", end='', flush=True)
+
+                thread_line = ""
+                if thread_stats:
+                    segments = []
+                    bar_width = 10
+                    for worker_id, stats in enumerate(thread_stats):
+                        assigned = stats.get('assigned', 0)
+                        completed = stats.get('completed', 0)
+                        name = stats.get('name') or f"Worker-{worker_id}"
+                        if assigned <= 0:
+                            worker_progress = 1.0
+                        else:
+                            worker_progress = min(1.0, completed / assigned)
+                        filled_width = int(bar_width * worker_progress)
+                        worker_bar = '█' * filled_width + '-' * (bar_width - filled_width)
+                        segments.append(f"{name}:{completed}/{assigned} {worker_bar}")
+
+                    if segments:
+                        thread_line = " | " + "  ".join(segments)
+
+                print(f"\r{progress_line}{thread_line}", end='', flush=True)
 
             # Test info tracking
             seen_test_names: Set[str] = set()
@@ -450,28 +477,77 @@ class ModelSearch:
                 if max_workers is None or max_workers <= 0:
                     max_workers = 1
 
-                print(f"Running filter_specs in parallel with {max_workers} worker threads...\n")
+                actual_workers = max(1, min(max_workers, total))
 
-                def _worker(idx: int, specs: List[Any]):
-                    model_id = f"{model_id_prefix}{idx}"
-                    try:
-                        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-                            result = self.assess_spec(
-                                model_id,
-                                specs,
-                                sample,
-                                test_update_func,
-                                outlier_idx=outlier_idx
-                            )
-                        return idx, specs, result, None
-                    except Exception as exc:  # pragma: no cover - defensive
-                        return idx, specs, None, exc
+                print(
+                    f"Running filter_specs in parallel with {actual_workers} worker threads...\n"
+                )
 
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = [executor.submit(_worker, idx, specs) for idx, specs in enumerate(self.all_specs)]
+                worker_jobs: List[List[Tuple[int, List[Any]]]] = [
+                    [] for _ in range(actual_workers)
+                ]
 
-                    for processed, future in enumerate(as_completed(futures), start=1):
-                        idx, specs, result, exc = future.result()
+                for idx, specs in enumerate(self.all_specs):
+                    worker_jobs[idx % actual_workers].append((idx, specs))
+
+                thread_stats: List[Dict[str, Any]] = [
+                    {
+                        'assigned': len(jobs),
+                        'completed': 0,
+                        'name': None
+                    }
+                    for jobs in worker_jobs
+                ]
+
+                result_queue: Queue = Queue()
+
+                def _worker(worker_id: int, jobs: List[Tuple[int, List[Any]]]) -> None:
+                    thread_name = threading.current_thread().name
+                    result_queue.put(("start", worker_id, thread_name))
+
+                    for idx, specs in jobs:
+                        model_id = f"{model_id_prefix}{idx}"
+                        try:
+                            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                                result = self.assess_spec(
+                                    model_id,
+                                    specs,
+                                    sample,
+                                    test_update_func,
+                                    outlier_idx=outlier_idx
+                                )
+                            result_queue.put(("result", worker_id, idx, specs, result, None))
+                        except Exception as exc:  # pragma: no cover - defensive
+                            result_queue.put(("result", worker_id, idx, specs, None, exc))
+
+                    result_queue.put(("done", worker_id))
+
+                with ThreadPoolExecutor(max_workers=actual_workers) as executor:
+                    for worker_id, jobs in enumerate(worker_jobs):
+                        executor.submit(_worker, worker_id, jobs)
+
+                    processed = 0
+                    finished_workers = 0
+
+                    while finished_workers < actual_workers:
+                        message = result_queue.get()
+                        kind = message[0]
+
+                        if kind == "start":
+                            _, worker_id, thread_name = message
+                            if 0 <= worker_id < len(thread_stats):
+                                thread_stats[worker_id]['name'] = thread_name
+                            continue
+
+                        if kind == "done":
+                            finished_workers += 1
+                            continue
+
+                        _, worker_id, idx, specs, result, exc = message
+                        processed += 1
+                        if 0 <= worker_id < len(thread_stats):
+                            thread_stats[worker_id]['completed'] += 1
+
                         if exc is not None:
                             error_log.append((specs, type(exc).__name__, str(exc)))
                         else:
@@ -511,7 +587,7 @@ class ModelSearch:
 
                                 batch_filter_test_infos = {}
 
-                        _print_progress(processed, total, start_time)
+                        _print_progress(processed, total, start_time, thread_stats)
 
                 print("")
             else:
