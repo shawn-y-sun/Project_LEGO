@@ -385,11 +385,14 @@ class ModelSearch:
             a ValueError is raised.
         parallel : bool, default False
             When True, submit spec assessments to a thread pool so multiple
-            models are evaluated concurrently.
+            models are evaluated concurrently. Expect a small (<1s) startup
+            cost for the worker pool before the first model completes.
         num_workers : int, optional
             Maximum number of worker threads to use when ``parallel`` is True.
             Defaults to ``min(32, os.cpu_count() + 4)`` as provided by
             :class:`~concurrent.futures.ThreadPoolExecutor` when not specified.
+            The configured value (or resolved default) is reported when the
+            worker pool starts.
 
         Returns
         -------
@@ -506,11 +509,22 @@ class ModelSearch:
             processed_counts = [0]
 
             if parallel and total > 1:
-                with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                launch_started = time.time()
+                executor = ThreadPoolExecutor(max_workers=num_workers)
+                init_elapsed = time.time() - launch_started
+                worker_count = executor._max_workers  # type: ignore[attr-defined]
+                print(
+                    f"Parallel filtering enabled with {worker_count} workers "
+                    f"(startup {init_elapsed:.2f}s). First update appears once a model finishes.",
+                    flush=True
+                )
+                try:
                     futures = [executor.submit(run_assessment, i, specs) for i, specs in enumerate(self.all_specs)]
                     for future in as_completed(futures):
                         index, specs, cm_result, failure_result, filter_info, error = future.result()
                         process_outcome(index, specs, cm_result, failure_result, filter_info, error)
+                finally:
+                    executor.shutdown(wait=True)
             else:
                 for i, specs in enumerate(self.all_specs):
                     index, specs, cm_result, failure_result, filter_info, error = run_assessment(i, specs)
@@ -686,6 +700,8 @@ class ModelSearch:
             List of index labels corresponding to outliers to exclude.
         parallel : bool, default False
             Enable concurrent spec assessment when True. Uses a thread pool.
+            Expect a small (<1s) startup to launch the workers before the
+            first model finishes.
         num_workers : int, optional
             Maximum number of worker threads when ``parallel`` is True. Defaults
             to :class:`~concurrent.futures.ThreadPoolExecutor` behaviour.
