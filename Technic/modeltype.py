@@ -1,6 +1,8 @@
 # =============================================================================
 # module: modeltype.py
 # Purpose: Model type classes for handling different modeling approaches and conversions
+# Key Types/Classes: ModelType, TimeModelType, Growth, Change, RateLevel, BalanceLevel, Ratio
+# Key Functions: None
 # Dependencies: pandas, numpy, abc
 # =============================================================================
 
@@ -111,7 +113,7 @@ class TimeModelType(ModelType):
         self,
         y_pred: pd.Series,
         p0: pd.Timestamp,
-        reset: bool = False
+        anchor: bool = False
     ) -> pd.Series:
         """
         Convert predicted target values back to base variable of interest.
@@ -122,7 +124,7 @@ class TimeModelType(ModelType):
             Series of predicted target values from the model
         p0 : pd.Timestamp
             Date index to use as the starting point for conversion
-        reset : bool, default False
+        anchor : bool, default False
             If True, use the actual base from the previous period for each
             prediction rather than the recursively predicted base.
             
@@ -204,7 +206,7 @@ class Growth(TimeModelType):
         self,
         y_pred: pd.Series,
         p0: pd.Timestamp,
-        reset: bool = False
+        anchor: bool = False
     ) -> pd.Series:
         """
         Convert growth rate predictions to level predictions using compound growth.
@@ -215,7 +217,7 @@ class Growth(TimeModelType):
             Series of predicted growth rates
         p0 : pd.Timestamp
             Starting date for conversion (uses level at this date)
-        reset : bool, default False
+        anchor : bool, default False
             If True, use the actual base from the previous period for each
             prediction rather than recursively compounding from predictions.
             
@@ -223,7 +225,12 @@ class Growth(TimeModelType):
         -------
         pd.Series
             Series of predicted levels for the base variable
-            
+
+        Notes
+        -----
+        When ``anchor=True``, the predicted base for period ``t`` equals the
+        actual base at ``t-1`` multiplied by ``(1 + y_pred[t])``.
+
         Example
         -------
         >>> # Growth rates: 2%, 2.5%, 3%
@@ -239,7 +246,7 @@ class Growth(TimeModelType):
         # Get base variable data
         base_data = self.dm.internal_data[self.target_base]
 
-        if reset:
+        if anchor:
             # Use actual base from previous period for each prediction
             prev_actual = base_data.shift(1).reindex(y_pred.index)
             if prev_actual.isna().any():
@@ -322,7 +329,7 @@ class Change(TimeModelType):
         self,
         y_pred: pd.Series,
         p0: pd.Timestamp,
-        reset: bool = False
+        anchor: bool = False
     ) -> pd.Series:
         """
         Convert change predictions to level predictions using cumulative addition.
@@ -333,7 +340,7 @@ class Change(TimeModelType):
             Series of predicted changes
         p0 : pd.Timestamp
             Starting date for conversion (uses level at this date)
-        reset : bool, default False
+        anchor : bool, default False
             If True, use the actual base from the previous period for each
             prediction rather than recursively summing from predictions.
             
@@ -341,7 +348,12 @@ class Change(TimeModelType):
         -------
         pd.Series
             Series of predicted levels for the base variable
-            
+
+        Notes
+        -----
+        When ``anchor=True``, the predicted base for period ``t`` equals the
+        actual base at ``t-1`` plus ``y_pred[t]``.
+
         Example
         -------
         >>> # Changes: +100, +150, -50
@@ -357,7 +369,7 @@ class Change(TimeModelType):
         # Get base variable data
         base_data = self.dm.internal_data[self.target_base]
 
-        if reset:
+        if anchor:
             prev_actual = base_data.shift(1).reindex(y_pred.index)
             if prev_actual.isna().any():
                 missing = prev_actual[prev_actual.isna()].index
@@ -434,7 +446,7 @@ class RateLevel(TimeModelType):
         self,
         y_pred: pd.Series,
         p0: pd.Timestamp,
-        reset: bool = False
+        anchor: bool = False
     ) -> pd.Series:
         """
         Convert rate predictions using difference approach for comparability.
@@ -445,7 +457,7 @@ class RateLevel(TimeModelType):
             Series of predicted rates
         p0 : pd.Timestamp
             Starting date for conversion (uses rate at this date)
-        reset : bool, default False
+        anchor : bool, default False
             Present for interface consistency; not used for RateLevel models.
             
         Returns
@@ -543,7 +555,7 @@ class BalanceLevel(TimeModelType):
         self,
         y_pred: pd.Series,
         p0: pd.Timestamp,
-        reset: bool = False
+        anchor: bool = False
     ) -> pd.Series:
         """
         Convert balance predictions using growth rate approach for comparability.
@@ -554,7 +566,7 @@ class BalanceLevel(TimeModelType):
             Series of predicted balances
         p0 : pd.Timestamp
             Starting date for conversion (uses balance at this date)
-        reset : bool, default False
+        anchor : bool, default False
             Present for interface consistency; not used for BalanceLevel models.
             
         Returns
@@ -671,7 +683,7 @@ class Ratio(TimeModelType):
         self,
         y_pred: pd.Series,
         p0: pd.Timestamp,
-        reset: bool = False
+        anchor: bool = False
     ) -> pd.Series:
         """
         Convert ratio predictions to level predictions using exposure variable.
@@ -683,7 +695,7 @@ class Ratio(TimeModelType):
         p0 : pd.Timestamp
             Starting date for conversion (not directly used for jumpoff,
             but used to validate date availability)
-        reset : bool, default False
+        anchor : bool, default False
             Present for interface consistency; not used for Ratio models.
             
         Returns

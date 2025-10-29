@@ -5,7 +5,7 @@
 ![Project LEGO](https://img.shields.io/badge/Project-LEGO-blue)
 ![Python](https://img.shields.io/badge/Python-3.7%2B-blue)
 ![License](https://img.shields.io/badge/License-Proprietary-black)
-![Version](https://img.shields.io/badge/Version-Beta%20v2.0-orange)
+![Version](https://img.shields.io/badge/Version-Beta%20v2.3-orange)
 
 **Build models like LEGO: a modular Python framework for automated search, rigorous evaluation, and scenario forecasting**
 
@@ -194,7 +194,7 @@ exp_sign_map = {'CAGOV12M': 1, 'CAONR': -1}
 seg.search_cms(
     desired_pool=desired_pool,
     max_var_num=3,
-    max_periods=2,
+    periods=[1, 2],
     exp_sign_map=exp_sign_map,
     top_n=10
 )

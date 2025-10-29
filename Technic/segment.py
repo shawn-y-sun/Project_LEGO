@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import math
-from typing import Type, Dict, List, Optional, Any, Union, Callable, Tuple, Set
+from typing import Type, Dict, List, Optional, Any, Union, Callable, Tuple, Set, Sequence
 from pathlib import Path
 
 from .cm import CM
@@ -25,6 +25,7 @@ from .export import (
     OLSModelAdapter,
     ExportManager
 )
+from .periods import resolve_periods_argument
 
 
 class Segment:
@@ -126,13 +127,14 @@ class Segment:
         self,
         cm_id: str,
         specs: Any,
-        sample: str = 'both'
+        sample: str = 'in',
+        outlier_idx: Optional[Sequence[Any]] = None
     ) -> CM:
         """
-        Instantiate and fit a Candidate Model (CM) with given specifications.
+        Build and fit a Candidate Model (CM) for this segment.
 
-        This method creates a new CM instance, fits it to the data according to the
-        provided specifications, and stores it in the segment's collection.
+        The method creates a CM, fits it with the supplied specifications, and
+        keeps the fitted model in the segment registry.
 
         Parameters
         ----------
@@ -145,11 +147,20 @@ class Segment:
             - List of variable names
             - Transformation specifications
             - Lag specifications
-        sample : str, default 'both'
+        sample : str, default 'in'
             Which sample to build the model on:
-            - 'in': in-sample only
+            - 'in': in-sample only (default)
             - 'full': full sample
-            - 'both': both in-sample and full sample (default)
+            - 'both': both in-sample and full sample
+        outlier_idx : Sequence[Any], optional
+            Iterable of row labels to skip when fitting the in-sample model.
+            Provide the labels exactly as they appear in the DataFrame index.
+
+        Raises
+        ------
+        TypeError
+            If ``outlier_idx`` is given as a string or any value that cannot be
+            iterated over.
 
         Returns
         -------
@@ -161,8 +172,7 @@ class Segment:
         >>> # Build a simple model with two variables
         >>> cm = segment.build_cm(
         ...     cm_id="model_1",
-        ...     specs=["gdp_lag1", "inflation"],
-        ...     sample="both"
+        ...     specs=["gdp_lag1", "inflation"]
         ... )
         >>> 
         >>> # Build a model with transformations
@@ -173,7 +183,31 @@ class Segment:
         ...         "transforms": ["diff", "pct_change"]
         ...     }
         ... )
+        >>>
+        >>> # Build a model while excluding specific outlier observations
+        >>> cm = segment.build_cm(
+        ...     cm_id="model_3",
+        ...     specs=["gdp", "cpi"],
+        ...     outlier_idx=["2020-03-31", "2020-04-30"]
+        ... )
         """
+        if isinstance(outlier_idx, (str, bytes)):
+            raise TypeError(
+                "outlier_idx must be a list (or other iterable) of index labels. "
+                "Use ['label'] if you need to skip a single observation."
+            )
+
+        cleaned_outliers: Optional[List[Any]] = None
+        if outlier_idx is not None:
+            try:
+                cleaned_outliers = list(outlier_idx)
+            except TypeError as exc:
+                raise TypeError(
+                    "outlier_idx must be a list (or other iterable) of index "
+                    "labels. Use ['label'] if you need to skip a single "
+                    "observation."
+                ) from exc
+
         cm = CM(
             model_id=cm_id,
             target=self.target,
@@ -185,7 +219,7 @@ class Segment:
             scen_cls=self.scen_cls,
             qtr_method=self.qtr_method,
         )
-        cm.build(specs, sample=sample)
+        cm.build(specs, sample=sample, outlier_idx=cleaned_outliers)
         self.cms[cm_id] = cm
         return cm
     
@@ -419,8 +453,8 @@ class Segment:
         ...     date_range=("2020-01-01", "2022-12-31")
         ... )
         """
-        # Generate transformations for each variable (no lags, no periods)
-        var_dfs = self.dm.build_search_vars(vars_list, max_lag=0, max_periods=1)
+        # Generate transformations for each variable (no lags, minimal periods)
+        var_dfs = self.dm.build_search_vars(vars_list, max_lag=0, periods=[1])
         
         # Get target data based on sample
         if sample == 'in':
@@ -550,10 +584,11 @@ class Segment:
         self,
         vars_list: List[str],
         max_lag: int = 3,
-        max_periods: int = 12,
+        periods: Optional[Sequence[int]] = None,
         sample: str = 'full',
         plot_type: str = 'line',
-        date_range: Optional[Tuple[str, str]] = None
+        date_range: Optional[Tuple[str, str]] = None,
+        **legacy_kwargs: Any
     ) -> pd.DataFrame:
         """
         Explore variables by creating plots and returning correlation analysis.
@@ -568,11 +603,18 @@ class Segment:
             List of variable names to analyze and transform.
         max_lag : int, default 3
             Maximum lag to consider in transformation specifications.
-        max_periods : int, default 12
-            Maximum number of periods to consider in transformations.
+        periods : Sequence[int], optional
+            Period configuration forwarded to
+            :meth:`DataManager.build_search_vars`. Provide a list of positive
+            integers to explicitly control period-based transforms.
+            Recommended choices include ``[1, 2, 3, 6, 9, 12]`` for monthly
+            data and ``[1, 2, 3, 4]`` for quarterly data. When ``None``
+            (default), frequency-aware defaults are applied automatically. The
+            deprecated ``max_periods`` keyword is still accepted for backward
+            compatibility.
         sample : str, default 'full'
             Which sample to use:
-            - 'in': use in-sample data only  
+            - 'in': use in-sample data only
             - 'full': use full sample data (in-sample + out-sample)
         plot_type : str, default 'line'
             Type of plot to create ('line' or 'scatter').
@@ -599,6 +641,7 @@ class Segment:
         >>> corr_df = segment.explore_vars(
         ...     vars_list=['GDP', 'UNRATE'],
         ...     plot_type='scatter',
+        ...     periods=[1, 3, 6, 12],
         ...     date_range=('2020-01-01', '2022-12-31')
         ... )
         """
@@ -609,13 +652,25 @@ class Segment:
             sample=sample,
             date_range=date_range
         )
-        
-        # Adjust max_periods for quarterly data if needed
-        if self.dm.freq == 'Q' and max_periods <= 4:
-            max_periods = 4
-        
+
+        legacy_max_periods = legacy_kwargs.pop("max_periods", None)
+        if legacy_kwargs:
+            unexpected = ", ".join(sorted(legacy_kwargs.keys()))
+            raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+
+        resolved_periods = resolve_periods_argument(
+            self.dm.freq,
+            periods,
+            legacy_max_periods=legacy_max_periods,
+            ensure_quarterly_floor=True
+        )
+
         # Generate all possible transformations for each variable
-        var_dfs = self.dm.build_search_vars(vars_list, max_lag=max_lag, max_periods=max_periods)
+        var_dfs = self.dm.build_search_vars(
+            vars_list,
+            max_lag=max_lag,
+            periods=resolved_periods
+        )
         
         # Get target data based on sample
         if sample == 'in':
@@ -1292,8 +1347,9 @@ class Segment:
         self,
         vars_list: List[str],
         max_lag: int = 3,
-        max_periods: int = 12,
-        sample: str = 'full'
+        periods: Optional[Sequence[int]] = None,
+        sample: str = 'full',
+        **legacy_kwargs: Any
     ) -> pd.DataFrame:
         """
         Rank variables and their transformations by correlation with the target variable.
@@ -1308,9 +1364,15 @@ class Segment:
             List of variable names to analyze and transform.
         max_lag : int, default 3
             Maximum lag to consider in transformation specifications.
-        max_periods : int, default 12
-            Maximum number of periods to consider in transformations.
-            For quarterly data, automatically adjusted to 4 if not specified > 4.
+        periods : Sequence[int], optional
+            Period configuration forwarded to
+            :meth:`DataManager.build_search_vars`. Provide a list of positive
+            integers to explicitly control period-based transforms.
+            Recommended choices include ``[1, 2, 3, 6, 9, 12]`` for monthly
+            data and ``[1, 2, 3, 4]`` for quarterly data. When ``None``
+            (default), frequency-aware defaults are applied automatically. The
+            deprecated ``max_periods`` keyword is still accepted for backward
+            compatibility.
         sample : str, default 'full'
             Which sample to use for correlation calculation:
             - 'in': in-sample period
@@ -1335,7 +1397,7 @@ class Segment:
         >>> corr_df = segment.get_corr(
         ...     vars_list=['GDP', 'UNRATE'],
         ...     max_lag=2,
-        ...     max_periods=8,  # Will be adjusted to 4 for quarterly data
+        ...     periods=[1, 2, 3, 4],
         ...     sample='in'
         ... )
         >>> 
@@ -1345,22 +1407,23 @@ class Segment:
         if sample not in ['in', 'full']:
             raise ValueError("sample must be 'in' or 'full'")
 
-        # Check if internal data is quarterly and adjust max_periods if needed
-        try:
-            internal_freq = pd.infer_freq(self.dm.internal_data.index)
-            if internal_freq and internal_freq.startswith('Q'):
-                # For quarterly data, if user didn't specify max_periods > 4, set to 4
-                if max_periods <= 4:
-                    max_periods = 4
-        except (AttributeError, TypeError):
-            # If frequency detection fails, use original max_periods
-            pass
+        legacy_max_periods = legacy_kwargs.pop("max_periods", None)
+        if legacy_kwargs:
+            unexpected = ", ".join(sorted(legacy_kwargs.keys()))
+            raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+
+        resolved_periods = resolve_periods_argument(
+            self.dm.freq,
+            periods,
+            legacy_max_periods=legacy_max_periods,
+            ensure_quarterly_floor=True
+        )
 
         # Build all possible transformations for the variables
         var_dfs = self.dm.build_search_vars(
             vars_list,
             max_lag=max_lag,
-            max_periods=max_periods
+            periods=resolved_periods
         )
 
         # Get target variable for the specified sample using index properties
@@ -1419,7 +1482,7 @@ class Segment:
         sample: str = 'in',
         max_var_num: int = 5,
         max_lag: int = 3,
-        max_periods: int = 3,
+        periods: Optional[Sequence[int]] = None,
         category_limit: int = 1,
         exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1, 1, 1),
@@ -1427,7 +1490,8 @@ class Segment:
         outlier_idx: Optional[List[Any]] = None,
         add_in: bool = True,
         override: bool = False,
-        re_rank: bool = True
+        re_rank: bool = True,
+        **legacy_kwargs: Any
     ) -> None:
         """
         Run an exhaustive search to find the best performing model specifications.
@@ -1454,12 +1518,14 @@ class Segment:
             Maximum number of features allowed in each model.
         max_lag : int, default 3
             Maximum lag to consider in transformation specifications.
-        max_periods : int, default 3
-            Maximum number of periods to consider in transformations.
-            Note: Can be set to 12 for monthly target variables, or 4 for quarterly 
-            target variables if user wants to expand the coverage of this exhaustive 
-            search for more model options. For monthly data, periods > 3 will 
-            automatically include only multiples of 3 (e.g., 6, 9, 12).
+        periods : Sequence[int], optional
+            Period configuration forwarded to :meth:`ModelSearch.run_search`.
+            Provide a list of positive integers to explicitly control
+            period-based transforms. Recommended choices include
+            ``[1, 2, 3, 6, 9, 12]`` for monthly data and ``[1, 2, 3, 4]`` for
+            quarterly data. When ``None`` (default), frequency-aware defaults
+            are applied automatically. The deprecated ``max_periods`` keyword is
+            still accepted for backward compatibility.
         category_limit : int, default 1
             Maximum number of variables from each MEV category per combo.
             Only applies to top-level strings and TSFM instances in desired_pool.
@@ -1535,6 +1601,17 @@ class Segment:
             )
         searcher = self.searcher
 
+        legacy_max_periods = legacy_kwargs.pop("max_periods", None)
+        if legacy_kwargs:
+            unexpected = ", ".join(sorted(legacy_kwargs.keys()))
+            raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+
+        resolved_periods = resolve_periods_argument(
+            self.dm.freq,
+            periods,
+            legacy_max_periods=legacy_max_periods
+        )
+
         # 2) Run the search (populates searcher.top_cms; no return value)
         searcher.run_search(
             desired_pool=desired_pool,
@@ -1543,7 +1620,7 @@ class Segment:
             sample=sample,
             max_var_num=max_var_num,
             max_lag=max_lag,
-            max_periods=max_periods,
+            periods=resolved_periods,
             category_limit=category_limit,
             rank_weights=rank_weights,
             test_update_func=test_update_func,

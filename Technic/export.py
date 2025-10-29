@@ -19,9 +19,11 @@ import pandas as pd
 from pathlib import Path
 import numpy as np
 import logging
+import warnings
 
 # Module logger
 logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 # Shared column schemas
 TIMESERIES_COLUMNS = ['date', 'model', 'series_type', 'value_type', 'value']
@@ -297,78 +299,122 @@ class CSVFormatHandler(ExportFormatHandler):
 
 class ExportManager:
     """Orchestrates the export process."""
-    
-    def __init__(self, strategy: ExportStrategy, format_handler: ExportFormatHandler):
+
+    def __init__(
+        self,
+        strategy: ExportStrategy,
+        format_handler: ExportFormatHandler,
+    ):
+        """Create a new export manager.
+
+        Args:
+            strategy: Export strategy that orchestrates how data is exported.
+            format_handler: Concrete handler that knows how to persist exported data.
+        """
         self.strategy = strategy
         self.format_handler = format_handler
+
+    def _log_warning(self, message: str) -> None:
+        """Emit muted warning information via debug logging."""
+        logger.debug(message)
+
+    @staticmethod
+    def _log_error(message: str) -> None:
+        """Emit an error level log message."""
+        logger.error(message)
     
     def export_models(self, models: List[ExportableModel], output_dir: Path) -> None:
         """Export multiple models to consolidated CSV files.
-        
+
         Args:
             models: List of ExportableModel instances to export
             output_dir: Directory to save the consolidated CSV files
+
+        Notes:
+            All library warnings are suppressed during the export process to
+            avoid noisy output when optional data is missing.
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Process each model
-        for model in models:
-            try:
-                if self.strategy.should_export('timeseries_data'):
-                    try:
-                        self.strategy.export_timeseries_data(model, output_dir)
-                    except Exception as e:
-                        print(f"Warning: Failed to export timeseries_data for {model.get_model_id()}: {e}")
-                
-                if self.strategy.should_export('staticStats'):
-                    try:
-                        self.strategy.export_statistics(model, output_dir)
-                    except Exception as e:
-                        print(f"Warning: Failed to export staticStats for {model.get_model_id()}: {e}")
-                
-                if self.strategy.should_export('scenario_testing'):
-                    try:
-                        self.strategy.export_scenarios(model, output_dir)
-                    except Exception as e:
-                        print(f"Warning: Failed to export scenario_testing for {model.get_model_id()}: {e}")
-                
-                if self.strategy.should_export('test_results'):
-                    try:
-                        self.strategy.export_test_results(model, output_dir)
-                    except Exception as e:
-                        print(f"Warning: Failed to export test_results for {model.get_model_id()}: {e}")
-                
-                if self.strategy.should_export('sensitivity_testing'):
-                    try:
-                        self.strategy.export_sensitivity_results(model, output_dir)
-                    except Exception as e:
-                        print(f"Warning: Failed to export sensitivity_testing for {model.get_model_id()}: {e}")
-                
-                if self.strategy.should_export('stability_testing'):
-                    try:
-                        self.strategy.export_stability_results(model, output_dir)
-                    except Exception as e:
-                        print(f"Warning: Failed to export stability_testing for {model.get_model_id()}: {e}")
-                
-                if self.strategy.should_export('stability_testing_stats'):
-                    try:
-                        self.strategy.export_stability_stats(model, output_dir)
-                    except Exception as e:
-                        print(f"Warning: Failed to export stability_testing_stats for {model.get_model_id()}: {e}")
-                
-                if self.strategy.should_export('scenario_testing_stats'):
-                    try:
-                        self.strategy.export_scenario_stats(model, output_dir)
-                    except Exception as e:
-                        print(f"Warning: Failed to export scenario_testing_stats for {model.get_model_id()}: {e}")
-                        
-            except Exception as e:
-                print(f"Error: Failed to process model {model.get_model_id()}: {e}")
-                continue
-        
-        # Save consolidated results
-        self.strategy.save_consolidated_results(output_dir)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+
+            # Process each model
+            for model in models:
+                try:
+                    if self.strategy.should_export('timeseries_data'):
+                        try:
+                            self.strategy.export_timeseries_data(model, output_dir)
+                        except Exception as e:
+                            self._log_warning(
+                                f"Failed to export timeseries_data for {model.get_model_id()}: {e}"
+                            )
+
+                    if self.strategy.should_export('staticStats'):
+                        try:
+                            self.strategy.export_statistics(model, output_dir)
+                        except Exception as e:
+                            self._log_warning(
+                                f"Failed to export staticStats for {model.get_model_id()}: {e}"
+                            )
+
+                    if self.strategy.should_export('scenario_testing'):
+                        try:
+                            self.strategy.export_scenarios(model, output_dir)
+                        except Exception as e:
+                            self._log_warning(
+                                f"Failed to export scenario_testing for {model.get_model_id()}: {e}"
+                            )
+
+                    if self.strategy.should_export('test_results'):
+                        try:
+                            self.strategy.export_test_results(model, output_dir)
+                        except Exception as e:
+                            self._log_warning(
+                                f"Failed to export test_results for {model.get_model_id()}: {e}"
+                            )
+
+                    if self.strategy.should_export('sensitivity_testing'):
+                        try:
+                            self.strategy.export_sensitivity_results(model, output_dir)
+                        except Exception as e:
+                            self._log_warning(
+                                f"Failed to export sensitivity_testing for {model.get_model_id()}: {e}"
+                            )
+
+                    if self.strategy.should_export('stability_testing'):
+                        try:
+                            self.strategy.export_stability_results(model, output_dir)
+                        except Exception as e:
+                            self._log_warning(
+                                f"Failed to export stability_testing for {model.get_model_id()}: {e}"
+                            )
+
+                    if self.strategy.should_export('stability_testing_stats'):
+                        try:
+                            self.strategy.export_stability_stats(model, output_dir)
+                        except Exception as e:
+                            self._log_warning(
+                                f"Failed to export stability_testing_stats for {model.get_model_id()}: {e}"
+                            )
+
+                    if self.strategy.should_export('scenario_testing_stats'):
+                        try:
+                            self.strategy.export_scenario_stats(model, output_dir)
+                        except Exception as e:
+                            self._log_warning(
+                                f"Failed to export scenario_testing_stats for {model.get_model_id()}: {e}"
+                            )
+
+                except Exception as e:
+                    self._log_error(
+                        f"Failed to process model {model.get_model_id()}: {e}"
+                    )
+                    continue
+
+            # Save consolidated results
+            self.strategy.save_consolidated_results(output_dir)
 
 class OLSExportStrategy(ExportStrategy):
     """Export strategy for OLS models with optimized performance."""
@@ -750,7 +796,30 @@ class OLSModelAdapter(ExportableModel):
             blocks.append(stacked_out)
  
         # Residuals (negate statsmodels convention to get fitted - actual)
-        blocks.append(self._build_ts_block(self.model.resid.index, model_id, SERIES_TYPE_RESIDUAL, 'Residual', -self.model.resid.values))
+        resid_series = getattr(self.model, 'resid', pd.Series(dtype=float))
+        if isinstance(resid_series, pd.Series) and not resid_series.empty:
+            blocks.append(self._build_ts_block(
+                resid_series.index,
+                model_id,
+                SERIES_TYPE_RESIDUAL,
+                'Residual',
+                -resid_series.values
+            ))
+
+        # Out-of-sample residuals when actuals are available
+        y_actual_out = getattr(self.model, 'y_out', pd.Series(dtype=float))
+        y_pred_out = getattr(self.model, 'y_pred_out', pd.Series(dtype=float))
+        if isinstance(y_pred_out, pd.Series) and not y_pred_out.empty and isinstance(y_actual_out, pd.Series):
+            aligned_actual_out = y_actual_out.reindex(y_pred_out.index)
+            residual_out = (y_pred_out - aligned_actual_out).dropna()
+            if not residual_out.empty:
+                blocks.append(self._build_ts_block(
+                    residual_out.index,
+                    model_id,
+                    SERIES_TYPE_RESIDUAL,
+                    'Residual',
+                    residual_out.values
+                ))
  
         # Base variable series if available
         y_base_full = getattr(self.model, 'y_base_full', None)
@@ -1024,24 +1093,13 @@ class OLSModelAdapter(ExportableModel):
         if base_data is not None and not base_data.empty:
             _add_summary_stats(base_data, 'Base')
         
-        # Independent variables summary statistics
-        # Combine in-sample and out-of-sample data for each feature
+        # Independent variables summary statistics (in-sample only)
         feature_data_in = self.model.X_in
-        feature_data_out = getattr(self.model, 'X_out', pd.DataFrame())
-        
+
         if not feature_data_in.empty:
             for var_name in feature_data_in.columns:
-                # Combine in-sample and out-of-sample data for this variable
                 var_series_in = feature_data_in[var_name]
-                var_series_out = feature_data_out.get(var_name, pd.Series(dtype=float))
-                
-                # Combine series if out-of-sample data exists
-                if not var_series_out.empty:
-                    combined_var_series = pd.concat([var_series_in, var_series_out]).sort_index()
-                else:
-                    combined_var_series = var_series_in
-                
-                _add_summary_stats(combined_var_series, var_name)
+                _add_summary_stats(var_series_in, var_name)
         
         # Create DataFrame efficiently
         return pd.DataFrame(stats_list)
@@ -1659,6 +1717,13 @@ class OLSModelAdapter(ExportableModel):
 
         results_df = getattr(sens_test, "results_df", None)
         if results_df is None or results_df.empty:
+            param_names = getattr(sens_test, "param_names", [])
+            if not param_names:
+                message = (
+                    f"Model {self._model_id} has no eligible variables for sensitivity testing "
+                    "(likely dummy-only)."
+                )
+                logger.info(message)
             return None
 
         df = results_df.copy()
