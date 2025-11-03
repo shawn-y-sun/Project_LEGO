@@ -1,7 +1,5 @@
 from typing import List, Union, Tuple, Type, Any, Optional, Callable, Dict, Sequence, Set
 import itertools
-import time
-import datetime
 from collections import defaultdict
 import warnings
 import sys
@@ -409,32 +407,14 @@ class ModelSearch:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             total = len(self.all_specs)
-            start_time = time.time()
-
-            def _update_progress(processed: int) -> None:
-                if total == 0:
-                    return
-                elapsed = time.time() - start_time
-                progress = processed / total if total > 0 else 1
-                if progress > 0 and elapsed > 0:
-                    est_total = elapsed / progress
-                    rem = est_total - elapsed
-                    finish_dt = datetime.datetime.now() + datetime.timedelta(seconds=rem)
-                    eta = finish_dt.strftime('%Y-%m-%d %H:%M:%S')
-                    speed = processed / elapsed
-                else:
-                    eta = ''
-                    speed = 0.0
-                progress_pct = int(progress * 100)
-                bar_width = 30
-                filled_width = int(bar_width * progress)
-                bar = '█' * filled_width + '-' * (bar_width - filled_width)
-                processed_count = f"{processed}/{total}"
-                progress_line = (
-                    f"Filtering Specs: {progress_pct:3d}%|{bar}| {processed_count} "
-                    f"[{elapsed:,.0f}s, {speed:.2f}it/s, estimated_finish={eta}]"
-                )
-                print(f"\r{progress_line}", end='', flush=True)
+            progress_bar = tqdm(
+                total=total,
+                desc="Filtering Specs",
+                unit="spec",
+                leave=False,
+                dynamic_ncols=True,
+                file=sys.stdout,
+            )
 
             def _finalize_results(records: List[Dict[str, Any]]) -> Tuple[List[CM], List[Tuple[List[Any], List[str]]], List[Tuple[List[Any], str, str]]]:
                 passed: List[CM] = []
@@ -529,8 +509,8 @@ class ModelSearch:
                         record = future.result()
                         records.append(record)
                         processed += 1
-                        _update_progress(processed)
-                print("")
+                        progress_bar.update(1)
+                progress_bar.close()
                 return _finalize_results(records)
 
             # Serial fallback
@@ -575,10 +555,9 @@ class ModelSearch:
                         }
                     )
 
-                if (i + 1) % 10 == 0 or i == 0 or i == total - 1:
-                    _update_progress(i + 1)
+                progress_bar.update(1)
 
-            print("")
+            progress_bar.close()
             return _finalize_results(records)
 
     @staticmethod
