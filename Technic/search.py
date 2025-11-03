@@ -233,26 +233,10 @@ class ModelSearch:
         # can be evaluated directly before enumeration.
         feature_test = self._prepare_feature_pretest()
         pretest_cache: Dict[str, bool] = {}
-        excluded_variants: List[Any] = []
-        excluded_variant_keys: Set[str] = set()
-        excluded_groups: List[Any] = []
-        excluded_group_keys: Set[str] = set()
-
-        def _record_variant(candidate: Any) -> None:
-            """Capture removed leaf candidates while preserving order."""
-
-            key = repr(candidate)
-            if key not in excluded_variant_keys:
-                excluded_variants.append(candidate)
-                excluded_variant_keys.add(key)
-
-        def _record_group(candidate: Any) -> None:
-            """Capture composite structures removed by the pre-test."""
-
-            key = repr(candidate)
-            if key not in excluded_group_keys:
-                excluded_groups.append(candidate)
-                excluded_group_keys.add(key)
+        excluded_variant_labels: List[str] = []
+        excluded_variant_seen: Set[str] = set()
+        excluded_group_labels: List[str] = []
+        excluded_group_seen: Set[str] = set()
 
         def _passes_feature(candidate: Any) -> bool:
             """Return ``True`` when ``candidate`` satisfies the feature pre-test."""
@@ -272,7 +256,10 @@ class ModelSearch:
                             break
                     pretest_cache[cache_key] = passes
                 if not passes:
-                    _record_group(candidate)
+                    key = repr(candidate)
+                    if key not in excluded_group_seen:
+                        excluded_group_labels.append(key)
+                        excluded_group_seen.add(key)
                 return passes
 
             cache_key = repr(candidate)
@@ -296,7 +283,9 @@ class ModelSearch:
                 pretest_cache[cache_key] = passes
 
             if not passes:
-                _record_variant(candidate)
+                if cache_key not in excluded_variant_seen:
+                    excluded_variant_labels.append(cache_key)
+                    excluded_variant_seen.add(cache_key)
             return passes
 
         # Handle forced_in being optional
@@ -460,16 +449,20 @@ class ModelSearch:
                 sorted_prod = _sort_specs_with_dummies_first(list(prod))
                 expanded.append(sorted_prod)
 
-        if (feature_test is not None) and (excluded_variants or excluded_groups):
+        if (feature_test is not None) and (excluded_variant_labels or excluded_group_labels):
             print("--- Feature Pre-Test Exclusions ---")
-            if excluded_variants:
-                print("Failed variants:")
-                for feat in excluded_variants:
-                    print(f"  - {feat!r}")
-            if excluded_groups:
-                print("Removed grouped candidates:")
-                for group in excluded_groups:
-                    print(f"  - {group!r}")
+            if excluded_variant_labels:
+                print(
+                    "Excluded "
+                    f"{len(excluded_variant_labels)} variant(s): "
+                    + ", ".join(excluded_variant_labels)
+                )
+            if excluded_group_labels:
+                print(
+                    "Removed "
+                    f"{len(excluded_group_labels)} grouped candidate(s): "
+                    + ", ".join(excluded_group_labels)
+                )
             print("")
 
         self.all_specs = expanded
