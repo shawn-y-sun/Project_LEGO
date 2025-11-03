@@ -324,7 +324,8 @@ def ppnr_ols_target_test_func(
     KeyError
         If ``target`` is not present in the internal data.
     ValueError
-        If ``sample`` is not one of the supported options.
+        If ``sample`` is not one of the supported options or if the target
+        lacks numeric observations after coercion.
 
     Examples
     --------
@@ -362,7 +363,8 @@ def ppnr_ols_target_test_func(
             out_sample_series = target_series.loc[out_sample_idx]
             scoped_series = pd.concat([in_sample_series, out_sample_series])
 
-    stationarity_test = StationarityTest(series=scoped_series)
+    cleaned_series = _coerce_numeric_series(scoped_series, f"Target '{target}'")
+    stationarity_test = StationarityTest(series=cleaned_series)
     result = stationarity_test.test_result
     # Preserve the descriptive text so upstream callers can surface it prior to
     # displaying the full diagnostic table.
@@ -413,6 +415,36 @@ def _coerce_target_result(target_result: Optional[Any]) -> Optional[bool]:
         return None
 
 
+def _coerce_numeric_series(series: pd.Series, context_label: str) -> pd.Series:
+    """Coerce series values to numeric for stationarity diagnostics.
+
+    Parameters
+    ----------
+    series : pd.Series
+        Observations to evaluate for stationarity.
+    context_label : str
+        Human-readable label describing the series for error reporting.
+
+    Returns
+    -------
+    pd.Series
+        Numeric observations with missing values removed.
+
+    Raises
+    ------
+    ValueError
+        If no numeric observations remain after coercion.
+    """
+
+    coerced = pd.to_numeric(series, errors="coerce")
+    non_null = coerced.dropna()
+    if non_null.empty:
+        raise ValueError(
+            f"{context_label} does not contain numeric observations after coercion."
+        )
+    return non_null
+
+
 def ppnr_ols_feature_test_func(
     feature: Union[str, Feature, TSFM],
     dm: DataManager,
@@ -442,7 +474,8 @@ def ppnr_ols_feature_test_func(
     -------
     bool
         ``True`` when the feature satisfies the stationarity preference implied
-        by the target test outcome.
+        by the target test outcome. Columns that cannot be coerced to numeric
+        are ignored when computing the outcome.
 
     Raises
     ------
@@ -492,8 +525,10 @@ def ppnr_ols_feature_test_func(
     else:
         scoped_frame = feature_frame.sort_index()
 
-    eligible_columns = [
-        col for col in scoped_frame.columns if ":" not in str(col)
+    numeric_frame = scoped_frame.apply(pd.to_numeric, errors="coerce")
+
+    candidate_columns = [
+        col for col in numeric_frame.columns if ":" not in str(col)
     ]
 
     if isinstance(feature, Feature):
@@ -501,24 +536,34 @@ def ppnr_ols_feature_test_func(
             name for name in feature.output_names if ":" not in str(name)
         ]
         if desired_columns:
-            eligible_columns = [
-                col for col in eligible_columns if col in desired_columns
+            candidate_columns = [
+                col for col in candidate_columns if col in desired_columns
             ]
 
-    if not eligible_columns:
+    usable_columns = []
+    for column in candidate_columns:
+        series = numeric_frame[column].dropna()
+        if series.empty:
+            continue
+        usable_columns.append((column, series))
+
+    if not usable_columns:
         # Nothing qualifies for stationarity testing, so accept by default.
         return True
 
     # Each feature invocation yields a single logical output set, so iterate
     # directly over the filtered columns in their materialized order.
     column_outcomes = []
-    for column in eligible_columns:
-        series = scoped_frame[column].dropna()
-        if series.empty:
-            column_outcomes.append(False)
+    for column, series in usable_columns:
+        try:
+            cleaned_series = _coerce_numeric_series(
+                series, f"Feature column '{column}'"
+            )
+        except ValueError:
+            # Skip columns that still lack numeric data after coercion.
             continue
 
-        stationarity_test = StationarityTest(series=series)
+        stationarity_test = StationarityTest(series=cleaned_series)
         result_df = stationarity_test.test_result
         column_pass = _summarize_stationarity_result(result_df)
         column_outcomes.append(False if column_pass is None else column_pass)
