@@ -3,7 +3,7 @@
 # Purpose: Define base and OLS regression models with testing and reporting hooks
 # Key Types/Classes: ModelBase, OLS, FixedOLS
 # Key Functions: train, predict, y_base_fitted_in, y_base_pred_out
-# Dependencies: pandas, numpy, statsmodels, typing, .testset.TestSet, .report.OLS_ModelReport
+# Dependencies: pandas, numpy, statsmodels, typing, .testset.TestSet, .report.OLS_ModelReport, .pretest.PreTestSet
 # =============================================================================
 
 from abc import ABC, abstractmethod
@@ -16,6 +16,7 @@ from statsmodels.stats.outliers_influence import variance_inflation_factor
 from .test import *
 from .report import ModelReportBase, OLS_ModelReport
 from .testset import ppnr_ols_testset_func, TestSet
+from .pretest import PreTestSet, ppnr_ols_pretestset
 from .modeltype import RateLevel, BalanceLevel
 
 class ModelBase(ABC):
@@ -53,6 +54,11 @@ class ModelBase(ABC):
         Updates or adds tests post initial mapping.
     testset_cls : type, default TestSet
         Class for aggregating ModelTestBase instances into a TestSet.
+    pretestset : PreTestSet, optional
+        Optional collection of pre-fitting validation tests executed before
+        the main model search pipeline. When provided, callers can reuse
+        standardized target, feature, and specification checks prior to
+        invoking more expensive fitting steps.
     scen_cls : type, optional
         Class to use for scenario management. If None, defaults to ScenManager.
     report_cls : type, optional
@@ -88,6 +94,7 @@ class ModelBase(ABC):
         testset_func: Optional[Callable[['ModelBase'], Dict[str, ModelTestBase]]] = None,
         test_update_func: Optional[Callable[['ModelBase'], Dict[str, Any]]] = None,
         testset_cls: Type = TestSet,
+        pretestset: Optional[PreTestSet] = None,
         scen_cls: Optional[Type] = None,
         report_cls: Optional[Type] = None,
         stability_test_cls: Optional[Type] = None,
@@ -132,6 +139,9 @@ class ModelBase(ABC):
         self.test_update_func = test_update_func
         self.testset_cls = testset_cls
         self.testset: Optional[TestSet] = None
+        if pretestset is not None and not isinstance(pretestset, PreTestSet):
+            raise TypeError("pretestset must be an instance of PreTestSet or None")
+        self.pretestset = pretestset
         
         # Scenario management
         if scen_cls is None:
@@ -1311,6 +1321,7 @@ class OLS(ModelBase):
         testset_func: Callable[['ModelBase'], Dict[str, ModelTestBase]] = ppnr_ols_testset_func,
         test_update_func: Optional[Callable[['ModelBase'], Dict[str, Any]]] = None,
         testset_cls: Type = TestSet,
+        pretestset: Optional[PreTestSet] = ppnr_ols_pretestset,
         scen_cls: Optional[Type] = None,
         model_type: Optional[Type] = None,
         target_base: Optional[str] = None,
@@ -1337,6 +1348,7 @@ class OLS(ModelBase):
             testset_func=testset_func,
             test_update_func=test_update_func,
             testset_cls=testset_cls,
+            pretestset=pretestset,
             scen_cls=scen_cls,
             model_type=model_type,
             target_base=target_base,
