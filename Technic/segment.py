@@ -1488,6 +1488,8 @@ class Segment:
         rank_weights: Tuple[float, float, float] = (1, 1, 1),
         test_update_func: Optional[Callable] = None,
         outlier_idx: Optional[List[Any]] = None,
+        parallel: bool = False,
+        core: Optional[int] = None,
         add_in: bool = True,
         override: bool = False,
         re_rank: bool = True,
@@ -1538,6 +1540,17 @@ class Segment:
             Optional function to update each CM's test set.
         outlier_idx : Optional[List[Any]], default None
             List of index labels corresponding to outliers to exclude.
+        parallel : bool, default False
+            When True, evaluate candidate specifications concurrently using
+            threads within this segment. The shared DataManager is assumed to be
+            read-only during the search, matching the option 2 design. Because
+            threading honours the Python GIL, only parts of the workflow that
+            drop into NumPy/pandas/statsmodels C extensions will make use of
+            multiple CPU cores; pure-Python feature preparation still runs
+            serially.
+        core : Optional[int], default None
+            Maximum number of worker threads to use when ``parallel`` is True.
+            ``None`` or non-positive values fall back to the executor default.
         add_in : bool, default True
             If True, add the resulting top CMs to self.cms.
         override : bool, default False
@@ -1625,7 +1638,9 @@ class Segment:
             rank_weights=rank_weights,
             test_update_func=test_update_func,
             outlier_idx=outlier_idx,
-            exp_sign_map=exp_sign_map
+            exp_sign_map=exp_sign_map,
+            parallel=parallel,
+            max_workers=core if core and core > 0 else None
         )
 
         # 3) Collect the top_n results from the searcher
