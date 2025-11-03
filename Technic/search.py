@@ -4,6 +4,8 @@ from collections import defaultdict
 import warnings
 import sys
 import os
+import copy
+import time
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -152,7 +154,7 @@ class ModelSearch:
             Each combo is a list including str, TSFM, Feature, or tuple elements.
         """
         # Handle forced_in being optional
-        forced_specs = (forced_in or []).copy()
+        forced_specs_template = forced_in or []
 
         # Step 1: Build raw combos from desired_pool with category constraints
         # Separate constrained and unconstrained items
@@ -243,13 +245,15 @@ class ModelSearch:
 
         # Step 2: Prepend forced_in-only combo if any forced specs exist
         combos: List[List[Any]] = []
-        if forced_specs and len(forced_specs) <= max_var_num:
-            combos.append(forced_specs.copy())
+        if forced_specs_template and len(forced_specs_template) <= max_var_num:
+            combos.append(self._clone_spec_list(forced_specs_template))
 
         # Mix forced with each raw combo within max_var_num
         for rc in raw_combos:
-            if len(forced_specs) + len(rc) <= max_var_num:
-                combos.append(forced_specs + rc)
+            if len(forced_specs_template) + len(rc) <= max_var_num:
+                combo = self._clone_spec_list(forced_specs_template)
+                combo.extend(self._clone_spec_list(rc))
+                combos.append(combo)
 
         # Step 3: Expand only top-level strings into TSFM variants
         # Gather unique strings to expand
@@ -289,7 +293,7 @@ class ModelSearch:
             for prod in itertools.product(*variant_lists):
                 # Sort each spec list so quarterly and monthly dummies come first
                 sorted_prod = _sort_specs_with_dummies_first(list(prod))
-                expanded.append(sorted_prod)
+                expanded.append(self._clone_spec_list(sorted_prod))
 
         self.all_specs = expanded
         return expanded
@@ -300,7 +304,8 @@ class ModelSearch:
         specs: List[Union[str, TSFM, Feature, Tuple[Any, ...]]],
         sample: str = 'in',
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
-        outlier_idx: Optional[List[Any]] = None
+        outlier_idx: Optional[List[Any]] = None,
+        timing: Optional[Dict[str, float]] = None
     ) -> Union[CM, Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str], Dict[str, Dict[str, str]]]]:
         """
         Build and assess a single spec combo via CM.build(), reload tests, and TestSet.filter_pass().
@@ -320,19 +325,12 @@ class ModelSearch:
             records to remove from the in-sample data. If provided and `build_in`
             is True, each label must exist within the in-sample period; otherwise,
             a ValueError is raised.
-        parallel : bool, default False
-            When True, evaluate spec assessments concurrently using a
-            ThreadPoolExecutor. Parallel execution assumes read-only access to the
-            shared DataManager caches and is best suited for the pre-built feature
-            workflow described in option 2. The executor relies on CPython's
-            cooperative scheduling, so only the sections of ``assess_spec`` that
-            enter NumPy/pandas/statsmodels C extensions (which release the GIL)
-            will fan out across CPU cores. Pure-Python feature engineering code
-            still runs serially even when ``parallel`` is enabled.
-        max_workers : int, optional
-            Upper bound on the number of worker threads to launch when
-            ``parallel`` is True. ``None`` (default) lets ``ThreadPoolExecutor``
-            pick an appropriate value; values <= 0 are treated as ``None``.
+        timing : dict, optional
+            Mutable dictionary that will be populated with timing information when
+            provided. Keys include ``build`` (time spent in ``CM.build``),
+            ``testset`` (time building/updating the test set), ``filter`` (time
+            evaluating ``TestSet.filter_pass``), and ``total`` (overall elapsed time
+            measured by the caller).
 
         Returns
         -------
@@ -344,25 +342,35 @@ class ModelSearch:
         if sample not in {'in', 'full'}:
             raise ValueError("`sample` must be either 'in' or 'full'.")
 
+        t_build_start = time.perf_counter() if timing is not None else None
+
         # Build the candidate model
         cm = CM(
-            model_id=model_id, 
-            target=self.target, 
+            model_id=model_id,
+            target=self.target,
             model_type=self.model_type,
             target_base=self.target_base,
             target_exposure=self.target_exposure,
-            model_cls=self.model_cls, 
+            model_cls=self.model_cls,
             data_manager=self.dm,
             qtr_method=self.qtr_method
         )
         cm.build(specs, sample=sample, outlier_idx=outlier_idx)
+        if timing is not None and t_build_start is not None:
+            timing['build'] = time.perf_counter() - t_build_start
         mdl = cm.model_in if sample == 'in' else cm.model_full
 
         # Reload testset, applying update if provided
+        t_testset_start = time.perf_counter() if timing is not None else None
         mdl.load_testset(test_update_func=test_update_func)
+        if timing is not None and t_testset_start is not None:
+            timing['testset'] = time.perf_counter() - t_testset_start
 
         # Run filtering on updated testset (fast mode to short-circuit on first failure)
+        t_filter_start = time.perf_counter() if timing is not None else None
         passed, failed = mdl.testset.filter_pass(fast_filter=True)
+        if timing is not None and t_filter_start is not None:
+            timing['filter'] = time.perf_counter() - t_filter_start
         if passed:
             return cm
         return specs, failed, mdl.testset.filter_test_info
@@ -416,6 +424,8 @@ class ModelSearch:
                 file=sys.stdout,
             )
 
+            capture_timings = os.getenv("LEGO_SEARCH_TIMING", "").strip().lower() in {"1", "true", "yes", "on"}
+
             def _finalize_results(records: List[Dict[str, Any]]) -> Tuple[List[CM], List[Tuple[List[Any], List[str]]], List[Tuple[List[Any], str, str]]]:
                 passed: List[CM] = []
                 failed: List[Tuple[List[Any], List[str]]] = []
@@ -448,6 +458,29 @@ class ModelSearch:
 
                 return passed, failed, errors
 
+            def _print_timing_summary(records: List[Dict[str, Any]]) -> None:
+                if not capture_timings:
+                    return
+                phase_totals: Dict[str, List[float]] = defaultdict(list)
+                for rec in records:
+                    timing_info = rec.get("timing")
+                    if not timing_info:
+                        continue
+                    for phase, value in timing_info.items():
+                        if value is not None:
+                            phase_totals[phase].append(value)
+                if not phase_totals:
+                    return
+                print("\n--- Timing diagnostics (seconds) ---")
+                for phase in ("total", "build", "testset", "filter"):
+                    vals = phase_totals.get(phase)
+                    if not vals:
+                        continue
+                    avg = sum(vals) / len(vals)
+                    mx = max(vals)
+                    print(f"{phase:>8}: avg {avg:.3f} | max {mx:.3f} | n={len(vals)}")
+                print("")
+
             # Print initial empty line for spacing
             print("")
 
@@ -462,12 +495,14 @@ class ModelSearch:
                 # measuring CPU utilisation is advised before assuming linear
                 # speed-ups from the threaded path.
                 worker_args = [
-                    (i, specs, f"{model_id_prefix}{i}")
+                    (i, self._clone_spec_list(specs), f"{model_id_prefix}{i}")
                     for i, specs in enumerate(self.all_specs)
                 ]
 
                 def _evaluate(args: Tuple[int, List[Any], str]) -> Dict[str, Any]:
                     idx, specs_local, model_id = args
+                    timings: Optional[Dict[str, float]] = {} if capture_timings else None
+                    start = time.perf_counter() if timings is not None else None
                     try:
                         with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
                             outcome = self.assess_spec(
@@ -475,8 +510,11 @@ class ModelSearch:
                                 specs_local,
                                 sample,
                                 test_update_func,
-                                outlier_idx=outlier_idx
+                                outlier_idx=outlier_idx,
+                                timing=timings
                             )
+                        if timings is not None and start is not None:
+                            timings['total'] = time.perf_counter() - start
                         if isinstance(outcome, CM):
                             mdl = outcome.model_in if sample == 'in' else outcome.model_full
                             filter_info = dict(mdl.testset.filter_test_info or {})
@@ -485,6 +523,7 @@ class ModelSearch:
                                 "status": "passed",
                                 "payload": outcome,
                                 "filter_info": filter_info,
+                                "timing": timings,
                             }
                         specs_failed, failed_tests, filter_info = outcome
                         return {
@@ -492,13 +531,17 @@ class ModelSearch:
                             "status": "failed",
                             "payload": (specs_failed, failed_tests),
                             "filter_info": dict(filter_info or {}),
+                            "timing": timings,
                         }
                     except Exception as exc:
+                        if timings is not None and start is not None:
+                            timings['total'] = time.perf_counter() - start
                         return {
                             "index": idx,
                             "status": "error",
                             "payload": (specs_local, type(exc).__name__, str(exc)),
                             "filter_info": {},
+                            "timing": timings,
                         }
 
                 workers = max_workers if max_workers and max_workers > 0 else None
@@ -511,20 +554,28 @@ class ModelSearch:
                         processed += 1
                         progress_bar.update(1)
                 progress_bar.close()
-                return _finalize_results(records)
+                results = _finalize_results(records)
+                _print_timing_summary(records)
+                return results
 
             # Serial fallback
             for i, specs in enumerate(self.all_specs):
                 model_id = f"{model_id_prefix}{i}"
+                specs_for_build = self._clone_spec_list(specs)
+                timings: Optional[Dict[str, float]] = {} if capture_timings else None
+                start = time.perf_counter() if timings is not None else None
                 try:
                     with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
                         result = self.assess_spec(
                             model_id,
-                            specs,
+                            specs_for_build,
                             sample,
                             test_update_func,
-                            outlier_idx=outlier_idx
+                            outlier_idx=outlier_idx,
+                            timing=timings
                         )
+                    if timings is not None and start is not None:
+                        timings['total'] = time.perf_counter() - start
                     if isinstance(result, CM):
                         mdl = result.model_in if sample == 'in' else result.model_full
                         records.append(
@@ -533,6 +584,7 @@ class ModelSearch:
                                 "status": "passed",
                                 "payload": result,
                                 "filter_info": dict(mdl.testset.filter_test_info or {}),
+                                "timing": timings,
                             }
                         )
                     else:
@@ -543,22 +595,42 @@ class ModelSearch:
                                 "status": "failed",
                                 "payload": (specs_failed, failed_tests),
                                 "filter_info": dict(filter_info or {}),
+                                "timing": timings,
                             }
                         )
                 except Exception as e:
+                    if timings is not None and start is not None:
+                        timings['total'] = time.perf_counter() - start
                     records.append(
                         {
                             "index": i,
                             "status": "error",
-                            "payload": (specs, type(e).__name__, str(e)),
+                            "payload": (specs_for_build, type(e).__name__, str(e)),
                             "filter_info": {},
+                            "timing": timings,
                         }
                     )
 
                 progress_bar.update(1)
 
             progress_bar.close()
-            return _finalize_results(records)
+            results = _finalize_results(records)
+            _print_timing_summary(records)
+            return results
+
+    @staticmethod
+    def _clone_spec_item(item: Any) -> Any:
+        if isinstance(item, Feature):
+            return copy.deepcopy(item)
+        if isinstance(item, tuple):
+            return tuple(ModelSearch._clone_spec_item(sub) for sub in item)
+        if isinstance(item, list):
+            return [ModelSearch._clone_spec_item(sub) for sub in item]
+        return item
+
+    @classmethod
+    def _clone_spec_list(cls, specs: Sequence[Any]) -> List[Any]:
+        return [cls._clone_spec_item(spec) for spec in specs]
 
     @staticmethod
     def rank_cms(
