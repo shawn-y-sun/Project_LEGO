@@ -464,487 +464,487 @@ class ModelSearch:
         self.all_specs = expanded
         return expanded
     
-        def assess_spec(
-            self,
-            model_id: str,
-            specs: List[Union[str, TSFM, Feature, Tuple[Any, ...]]],
-            sample: str = 'in',
-            test_update_func: Optional[Callable[[ModelBase], dict]] = None,
-            outlier_idx: Optional[List[Any]] = None,
-            timing: Optional[Dict[str, float]] = None
-        ) -> Union[CM, Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str], Dict[str, Dict[str, str]]]]:
-            """
-            Build and assess a single spec combo via CM.build(), reload tests, and TestSet.filter_pass().
+    def assess_spec(
+        self,
+        model_id: str,
+        specs: List[Union[str, TSFM, Feature, Tuple[Any, ...]]],
+        sample: str = 'in',
+        test_update_func: Optional[Callable[[ModelBase], dict]] = None,
+        outlier_idx: Optional[List[Any]] = None,
+        timing: Optional[Dict[str, float]] = None
+    ) -> Union[CM, Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str], Dict[str, Dict[str, str]]]]:
+        """
+        Build and assess a single spec combo via CM.build(), reload tests, and TestSet.filter_pass().
     
-            Parameters
-            ----------
-            model_id : str
-                Unique identifier for this candidate model.
-            specs : list
-                Feature-specs for CM.build (str, TSFM, Feature, or tuple grouping).
-            sample : {'in','full'}
-                Which sample to fit and test; do not use 'both'.
-            test_update_func : callable, optional
-                Function to update/regenerate the testset for the fitted model.
-            outlier_idx : List[Any], optional
-                List of index labels (e.g. timestamps or keys) corresponding to outlier
-                records to remove from the in-sample data. If provided and `build_in`
-                is True, each label must exist within the in-sample period; otherwise,
-                a ValueError is raised.
-            timing : dict, optional
-                Mutable dictionary that will be populated with timing information when
-                provided. Keys include ``build`` (time spent in ``CM.build``),
-                ``testset`` (time building/updating the test set), ``filter`` (time
-                evaluating ``TestSet.filter_pass``), and ``total`` (overall elapsed time
-                measured by the caller).
+        Parameters
+        ----------
+        model_id : str
+            Unique identifier for this candidate model.
+        specs : list
+            Feature-specs for CM.build (str, TSFM, Feature, or tuple grouping).
+        sample : {'in','full'}
+            Which sample to fit and test; do not use 'both'.
+        test_update_func : callable, optional
+            Function to update/regenerate the testset for the fitted model.
+        outlier_idx : List[Any], optional
+            List of index labels (e.g. timestamps or keys) corresponding to outlier
+            records to remove from the in-sample data. If provided and `build_in`
+            is True, each label must exist within the in-sample period; otherwise,
+            a ValueError is raised.
+        timing : dict, optional
+            Mutable dictionary that will be populated with timing information when
+            provided. Keys include ``build`` (time spent in ``CM.build``),
+            ``testset`` (time building/updating the test set), ``filter`` (time
+            evaluating ``TestSet.filter_pass``), and ``total`` (overall elapsed time
+            measured by the caller).
     
-            Returns
-            -------
-            CM
-                The fitted CM instance if all active tests pass.
-            (specs, failed_tests, test_info)
-                Tuple of the input specs, list of failed test names, and test info dict if any test fails.
-            """
-            if sample not in {'in', 'full'}:
-                raise ValueError("`sample` must be either 'in' or 'full'.")
+        Returns
+        -------
+        CM
+            The fitted CM instance if all active tests pass.
+        (specs, failed_tests, test_info)
+            Tuple of the input specs, list of failed test names, and test info dict if any test fails.
+        """
+        if sample not in {'in', 'full'}:
+            raise ValueError("`sample` must be either 'in' or 'full'.")
     
-            t_build_start = time.perf_counter() if timing is not None else None
+        t_build_start = time.perf_counter() if timing is not None else None
     
-            # Build the candidate model
-            cm = CM(
-                model_id=model_id,
-                target=self.target,
-                model_type=self.model_type,
-                target_base=self.target_base,
-                target_exposure=self.target_exposure,
-                model_cls=self.model_cls,
-                data_manager=self.dm,
-                qtr_method=self.qtr_method
-            )
-            cm.build(specs, sample=sample, outlier_idx=outlier_idx)
-            if timing is not None and t_build_start is not None:
-                timing['build'] = time.perf_counter() - t_build_start
-            mdl = cm.model_in if sample == 'in' else cm.model_full
+        # Build the candidate model
+        cm = CM(
+            model_id=model_id,
+            target=self.target,
+            model_type=self.model_type,
+            target_base=self.target_base,
+            target_exposure=self.target_exposure,
+            model_cls=self.model_cls,
+            data_manager=self.dm,
+            qtr_method=self.qtr_method
+        )
+        cm.build(specs, sample=sample, outlier_idx=outlier_idx)
+        if timing is not None and t_build_start is not None:
+            timing['build'] = time.perf_counter() - t_build_start
+        mdl = cm.model_in if sample == 'in' else cm.model_full
     
-            # Reload testset, applying update if provided
-            t_testset_start = time.perf_counter() if timing is not None else None
-            mdl.load_testset(test_update_func=test_update_func)
-            if timing is not None and t_testset_start is not None:
-                timing['testset'] = time.perf_counter() - t_testset_start
+        # Reload testset, applying update if provided
+        t_testset_start = time.perf_counter() if timing is not None else None
+        mdl.load_testset(test_update_func=test_update_func)
+        if timing is not None and t_testset_start is not None:
+            timing['testset'] = time.perf_counter() - t_testset_start
     
-            # Run filtering on updated testset (fast mode to short-circuit on first failure)
-            t_filter_start = time.perf_counter() if timing is not None else None
-            passed, failed = mdl.testset.filter_pass(fast_filter=True)
-            if timing is not None and t_filter_start is not None:
-                timing['filter'] = time.perf_counter() - t_filter_start
-            if passed:
-                return cm
-            return specs, failed, mdl.testset.filter_test_info
+        # Run filtering on updated testset (fast mode to short-circuit on first failure)
+        t_filter_start = time.perf_counter() if timing is not None else None
+        passed, failed = mdl.testset.filter_pass(fast_filter=True)
+        if timing is not None and t_filter_start is not None:
+            timing['filter'] = time.perf_counter() - t_filter_start
+        if passed:
+            return cm
+        return specs, failed, mdl.testset.filter_test_info
     
-        def filter_specs(
-            self,
-            model_id_prefix: str = 'cm',
-            sample: str = 'in',
-            test_update_func: Optional[Callable[[ModelBase], dict]] = None,
-            outlier_idx: Optional[List[Any]] = None,
-            parallel: bool = False,
-            max_workers: Optional[int] = None
-        ) -> Tuple[List[CM], List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]], List[Tuple[List[Any], str, str]]]:
-            """
-            Assess all built spec combos and separate passed and failed results,
-            using multiprocessing and a single progress bar update.
+    def filter_specs(
+        self,
+        model_id_prefix: str = 'cm',
+        sample: str = 'in',
+        test_update_func: Optional[Callable[[ModelBase], dict]] = None,
+        outlier_idx: Optional[List[Any]] = None,
+        parallel: bool = False,
+        max_workers: Optional[int] = None
+    ) -> Tuple[List[CM], List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]], List[Tuple[List[Any], str, str]]]:
+        """
+        Assess all built spec combos and separate passed and failed results,
+        using multiprocessing and a single progress bar update.
     
-            Parameters
-            ----------
-            model_id_prefix : str, default 'cm'
-                Prefix for auto-generated model IDs (appended with index).
-            sample : {'in','full'}
-                Sample to use for all assessments (default 'in').
-            test_update_func : callable, optional
-                Function to update/regenerate the testset for each model.
-            outlier_idx : List[Any], optional
-                List of index labels (e.g. timestamps or keys) corresponding to outlier
-                records to remove from the in-sample data. If provided and `build_in`
-                is True, each label must exist within the in-sample period; otherwise,
-                a ValueError is raised.
+        Parameters
+        ----------
+        model_id_prefix : str, default 'cm'
+            Prefix for auto-generated model IDs (appended with index).
+        sample : {'in','full'}
+            Sample to use for all assessments (default 'in').
+        test_update_func : callable, optional
+            Function to update/regenerate the testset for each model.
+        outlier_idx : List[Any], optional
+            List of index labels (e.g. timestamps or keys) corresponding to outlier
+            records to remove from the in-sample data. If provided and `build_in`
+            is True, each label must exist within the in-sample period; otherwise,
+            a ValueError is raised.
     
-            Returns
-            -------
-            passed_cms : list of CM
-                CM instances that passed all active tests.
-            failed_info : list of (specs, failed_tests)
-                Spec combos and test names for combos that failed.
-            error_log : list of (specs, error_type, error_message)
-                Spec combos that raised errors during assessment.
-            """
-            # Suppress all warnings and output for the entire filtering process
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                try:
-                    total = len(self.all_specs)
-                    progress_bar = tqdm(
-                        total=total,
-                        desc="Filtering Specs",
-                        unit="spec",
-                        leave=False,
-                        dynamic_ncols=True,
-                        file=sys.stdout,
+        Returns
+        -------
+        passed_cms : list of CM
+            CM instances that passed all active tests.
+        failed_info : list of (specs, failed_tests)
+            Spec combos and test names for combos that failed.
+        error_log : list of (specs, error_type, error_message)
+            Spec combos that raised errors during assessment.
+        """
+        # Suppress all warnings and output for the entire filtering process
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                total = len(self.all_specs)
+                progress_bar = tqdm(
+                    total=total,
+                    desc="Filtering Specs",
+                    unit="spec",
+                    leave=False,
+                    dynamic_ncols=True,
+                    file=sys.stdout,
+                )
+                progress_start = time.perf_counter()
+    
+                def _update_progress_postfix(processed: int) -> None:
+                    """Update tqdm postfix with an estimated finish timestamp."""
+    
+                    if total == 0:
+                        progress_bar.set_postfix(estimated_finish="n/a")
+                        return
+                    if processed <= 0:
+                        progress_bar.set_postfix(estimated_finish="calculating")
+                        return
+                    elapsed = time.perf_counter() - progress_start
+                    if elapsed <= 0:
+                        progress_bar.set_postfix(estimated_finish="calculating")
+                        return
+                    remaining = max(0.0, (elapsed / processed) * (total - processed))
+                    finish_time = datetime.now() + timedelta(seconds=remaining)
+                    progress_bar.set_postfix(
+                        estimated_finish=finish_time.strftime("%Y-%m-%d %H:%M:%S")
                     )
-                    progress_start = time.perf_counter()
-        
-                    def _update_progress_postfix(processed: int) -> None:
-                        """Update tqdm postfix with an estimated finish timestamp."""
-        
-                        if total == 0:
-                            progress_bar.set_postfix(estimated_finish="n/a")
-                            return
-                        if processed <= 0:
-                            progress_bar.set_postfix(estimated_finish="calculating")
-                            return
-                        elapsed = time.perf_counter() - progress_start
-                        if elapsed <= 0:
-                            progress_bar.set_postfix(estimated_finish="calculating")
-                            return
-                        remaining = max(0.0, (elapsed / processed) * (total - processed))
-                        finish_time = datetime.now() + timedelta(seconds=remaining)
-                        progress_bar.set_postfix(
-                            estimated_finish=finish_time.strftime("%Y-%m-%d %H:%M:%S")
-                        )
-        
-                    _update_progress_postfix(0)
-        
-                    capture_timings = os.getenv("LEGO_SEARCH_TIMING", "").strip().lower() in {"1", "true", "yes", "on"}
-                    parallel_debug_enabled = os.getenv("LEGO_SEARCH_PARALLEL_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
-        
-                    def _finalize_results(records: List[Dict[str, Any]]) -> Tuple[List[CM], List[Tuple[List[Any], List[str]]], List[Tuple[List[Any], str, str]]]:
-                        passed: List[CM] = []
-                        failed: List[Tuple[List[Any], List[str]]] = []
-                        errors: List[Tuple[List[Any], str, str]] = []
-                        seen_test_names: Set[str] = set()
-                        header_printed = False
-        
-                        for rec in sorted(records, key=lambda r: r["index"]):
-                            status = rec["status"]
-                            payload = rec["payload"]
-                            filter_info = rec.get("filter_info") or {}
-        
-                            if status == "passed":
-                                passed.append(payload)
-                            elif status == "failed":
-                                failed.append(payload)
-                            elif status == "error":
-                                errors.append(payload)
-                                continue
-        
-                            new_test_names = set(filter_info.keys()) - seen_test_names
-                            if new_test_names:
-                                if not header_printed:
-                                    print("--- Active Tests of Filtering ---")
-                                    header_printed = True
-                                for test_name in sorted(new_test_names):
-                                    info = filter_info[test_name]
-                                    print(f"- {test_name}: filter_mode: {info['filter_mode']} | desc: {info['desc']}")
-                                seen_test_names.update(new_test_names)
-        
-                        return passed, failed, errors
-        
-                    def _print_timing_summary(records: List[Dict[str, Any]]) -> None:
-                        if not capture_timings:
-                            return
-                        phase_totals: Dict[str, List[float]] = defaultdict(list)
-                        for rec in records:
-                            timing_info = rec.get("timing")
-                            if not timing_info:
-                                continue
-                            for phase, value in timing_info.items():
-                                if value is not None:
-                                    phase_totals[phase].append(value)
-                        if not phase_totals:
-                            return
-                        print("\n--- Timing diagnostics (seconds) ---")
-                        for phase in ("total", "build", "testset", "filter"):
-                            vals = phase_totals.get(phase)
-                            if not vals:
-                                continue
-                            avg = sum(vals) / len(vals)
-                            mx = max(vals)
-                            print(f"{phase:>8}: avg {avg:.3f} | max {mx:.3f} | n={len(vals)}")
-                        print("")
-        
-                    # Print initial empty line for spacing
+    
+                _update_progress_postfix(0)
+    
+                capture_timings = os.getenv("LEGO_SEARCH_TIMING", "").strip().lower() in {"1", "true", "yes", "on"}
+                parallel_debug_enabled = os.getenv("LEGO_SEARCH_PARALLEL_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+    
+                def _finalize_results(records: List[Dict[str, Any]]) -> Tuple[List[CM], List[Tuple[List[Any], List[str]]], List[Tuple[List[Any], str, str]]]:
+                    passed: List[CM] = []
+                    failed: List[Tuple[List[Any], List[str]]] = []
+                    errors: List[Tuple[List[Any], str, str]] = []
+                    seen_test_names: Set[str] = set()
+                    header_printed = False
+    
+                    for rec in sorted(records, key=lambda r: r["index"]):
+                        status = rec["status"]
+                        payload = rec["payload"]
+                        filter_info = rec.get("filter_info") or {}
+    
+                        if status == "passed":
+                            passed.append(payload)
+                        elif status == "failed":
+                            failed.append(payload)
+                        elif status == "error":
+                            errors.append(payload)
+                            continue
+    
+                        new_test_names = set(filter_info.keys()) - seen_test_names
+                        if new_test_names:
+                            if not header_printed:
+                                print("--- Active Tests of Filtering ---")
+                                header_printed = True
+                            for test_name in sorted(new_test_names):
+                                info = filter_info[test_name]
+                                print(f"- {test_name}: filter_mode: {info['filter_mode']} | desc: {info['desc']}")
+                            seen_test_names.update(new_test_names)
+    
+                    return passed, failed, errors
+    
+                def _print_timing_summary(records: List[Dict[str, Any]]) -> None:
+                    if not capture_timings:
+                        return
+                    phase_totals: Dict[str, List[float]] = defaultdict(list)
+                    for rec in records:
+                        timing_info = rec.get("timing")
+                        if not timing_info:
+                            continue
+                        for phase, value in timing_info.items():
+                            if value is not None:
+                                phase_totals[phase].append(value)
+                    if not phase_totals:
+                        return
+                    print("\n--- Timing diagnostics (seconds) ---")
+                    for phase in ("total", "build", "testset", "filter"):
+                        vals = phase_totals.get(phase)
+                        if not vals:
+                            continue
+                        avg = sum(vals) / len(vals)
+                        mx = max(vals)
+                        print(f"{phase:>8}: avg {avg:.3f} | max {mx:.3f} | n={len(vals)}")
                     print("")
-        
-                    records: List[Dict[str, Any]] = []
-        
-                    use_parallel = parallel and total > 1
+    
+                # Print initial empty line for spacing
+                print("")
+    
+                records: List[Dict[str, Any]] = []
+    
+                use_parallel = parallel and total > 1
 
-                    if parallel_debug_enabled and (not parallel or total <= 1):
-                        reason = "parallel flag disabled" if not parallel else "only one spec to evaluate"
-                        print(f"[parallel-debug] {reason}; running serial path.")
+                if parallel_debug_enabled and (not parallel or total <= 1):
+                    reason = "parallel flag disabled" if not parallel else "only one spec to evaluate"
+                    print(f"[parallel-debug] {reason}; running serial path.")
 
-                    mp_context = None
-                    if use_parallel:
-                        try:
-                            mp_context = multiprocessing.get_context("fork")
-                        except ValueError:
-                            print(
-                                "[parallel] 'fork' start method unavailable; falling back to serial execution."
-                            )
-                            use_parallel = False
-
-                    if use_parallel:
-                        unique_specs, feature_columns = self._materialize_parallel_feature_pool()
-                        if unique_specs:
-                            print(
-                                f"[parallel] Created feature cache from {unique_specs} unique spec elements "
-                                f"covering {feature_columns} column(s)."
-                            )
-                        else:
-                            print("[parallel] No feature materialization needed (specs empty).")
-                        cache_info = self.dm.prepare_parallel_feature_caches()
+                mp_context = None
+                if use_parallel:
+                    try:
+                        mp_context = multiprocessing.get_context("fork")
+                    except ValueError:
                         print(
-                            "[parallel] DataManager caches ready: "
-                            f"internal_cols={cache_info['internal_cols']} | "
-                            f"mev_cols={cache_info['mev_cols']}"
+                            "[parallel] 'fork' start method unavailable; falling back to serial execution."
                         )
-                        self.dm.lock_parallel_read_only()
-                        dm_locked = True
-                        print("[parallel] DataManager locked for read-only process execution.")
-        
-                        if max_workers and max_workers > 0:
-                            worker_count = max(1, min(max_workers, total))
-                        else:
-                            default_workers = os.cpu_count() or 1
-                            worker_count = max(1, min(default_workers, total))
+                        use_parallel = False
 
-                        assignments: List[int] = []
-                        if worker_count > 0:
-                            base = total // worker_count
-                            remainder = total % worker_count
-                            assignments = [base + (1 if idx < remainder else 0) for idx in range(worker_count)]
-                        print(f"[parallel] Launching {worker_count} worker processes for {total} specs.")
-                        if assignments:
-                            print(f"[parallel] Process spec allocation: {assignments}")
-
-                        processed = 0
-                        raw_records: List[Dict[str, Any]] = []
-                        _set_process_worker_context(
-                            _ProcessWorkerContext(
-                                search=self,
-                                sample=sample,
-                                test_update_func=test_update_func,
-                                outlier_idx=outlier_idx,
-                                capture_timings=capture_timings,
-                                parallel_debug_enabled=parallel_debug_enabled,
-                            )
+                if use_parallel:
+                    unique_specs, feature_columns = self._materialize_parallel_feature_pool()
+                    if unique_specs:
+                        print(
+                            f"[parallel] Created feature cache from {unique_specs} unique spec elements "
+                            f"covering {feature_columns} column(s)."
                         )
-                        executor_kwargs: Dict[str, Any] = {"max_workers": worker_count}
-                        if mp_context is not None:
-                            executor_kwargs["mp_context"] = mp_context
-                        try:
-                            with ProcessPoolExecutor(**executor_kwargs) as executor:
-                                futures = [
-                                    executor.submit(
-                                        _evaluate_spec_in_process, (i, f"{model_id_prefix}{i}")
-                                    )
-                                    for i in range(total)
-                                ]
-                                for future in as_completed(futures):
-                                    record = future.result()
-                                    raw_records.append(record)
-                                    processed += 1
-                                    progress_bar.update(1)
-                                    _update_progress_postfix(processed)
-                        finally:
-                            _clear_process_worker_context()
+                    else:
+                        print("[parallel] No feature materialization needed (specs empty).")
+                    cache_info = self.dm.prepare_parallel_feature_caches()
+                    print(
+                        "[parallel] DataManager caches ready: "
+                        f"internal_cols={cache_info['internal_cols']} | "
+                        f"mev_cols={cache_info['mev_cols']}"
+                    )
+                    self.dm.lock_parallel_read_only()
+                    dm_locked = True
+                    print("[parallel] DataManager locked for read-only process execution.")
+    
+                    if max_workers and max_workers > 0:
+                        worker_count = max(1, min(max_workers, total))
+                    else:
+                        default_workers = os.cpu_count() or 1
+                        worker_count = max(1, min(default_workers, total))
 
-                        if parallel_debug_enabled:
-                            debug_events: List[Tuple[float, str]] = []
-                            actor_ids: Set[str] = set()
-                            for rec in raw_records:
-                                dbg = rec.get("debug") if isinstance(rec, dict) else None
-                                if not dbg:
-                                    continue
-                                start = dbg.get("start")
-                                end = dbg.get("end")
-                                pid = dbg.get("pid")
-                                if start is None or end is None:
-                                    continue
-                                debug_events.append((start, "start"))
-                                debug_events.append((end, "end"))
-                                if pid is not None:
-                                    actor_ids.add(str(pid))
-                            if debug_events:
-                                debug_events.sort(key=lambda item: item[0])
-                                active = 0
-                                debug_max_active = 0
-                                for _, kind in debug_events:
-                                    if kind == "start":
-                                        active += 1
-                                        debug_max_active = max(debug_max_active, active)
-                                    else:
-                                        active -= 1
-                                summary = _summarize_parallel_events(
-                                    debug_events,
-                                    debug_max_active,
-                                    actor_ids,
-                                    [],
-                                    actor_label="processes",
+                    assignments: List[int] = []
+                    if worker_count > 0:
+                        base = total // worker_count
+                        remainder = total % worker_count
+                        assignments = [base + (1 if idx < remainder else 0) for idx in range(worker_count)]
+                    print(f"[parallel] Launching {worker_count} worker processes for {total} specs.")
+                    if assignments:
+                        print(f"[parallel] Process spec allocation: {assignments}")
+
+                    processed = 0
+                    raw_records: List[Dict[str, Any]] = []
+                    _set_process_worker_context(
+                        _ProcessWorkerContext(
+                            search=self,
+                            sample=sample,
+                            test_update_func=test_update_func,
+                            outlier_idx=outlier_idx,
+                            capture_timings=capture_timings,
+                            parallel_debug_enabled=parallel_debug_enabled,
+                        )
+                    )
+                    executor_kwargs: Dict[str, Any] = {"max_workers": worker_count}
+                    if mp_context is not None:
+                        executor_kwargs["mp_context"] = mp_context
+                    try:
+                        with ProcessPoolExecutor(**executor_kwargs) as executor:
+                            futures = [
+                                executor.submit(
+                                    _evaluate_spec_in_process, (i, f"{model_id_prefix}{i}")
                                 )
-                                print(summary)
-                            else:
-                                print("[parallel-debug] No debug timing data returned from workers.")
+                                for i in range(total)
+                            ]
+                            for future in as_completed(futures):
+                                record = future.result()
+                                raw_records.append(record)
+                                processed += 1
+                                progress_bar.update(1)
+                                _update_progress_postfix(processed)
+                    finally:
+                        _clear_process_worker_context()
 
-                        records = []
+                    if parallel_debug_enabled:
+                        debug_events: List[Tuple[float, str]] = []
+                        actor_ids: Set[str] = set()
                         for rec in raw_records:
-                            idx = rec["index"]
-                            status = rec["status"]
-                            timing_info = rec.get("timing")
-                            filter_info = rec.get("filter_info") or {}
-                            debug_payload = rec.get("debug")
-                            if status == "passed":
-                                specs_for_build = self._clone_spec_list(self.all_specs[idx])
-                                model_id = f"{model_id_prefix}{idx}"
-                                with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-                                    cm_result = self.assess_spec(
-                                        model_id,
-                                        specs_for_build,
-                                        sample,
-                                        test_update_func,
-                                        outlier_idx=outlier_idx,
-                                        timing=None,
-                                    )
-                                if not isinstance(cm_result, CM):
-                                    # Should not happen; treat as failure fallback.
-                                    specs_failed, failed_tests, filter_info_secondary = cm_result
-                                    records.append(
-                                        {
-                                            "index": idx,
-                                            "status": "failed",
-                                            "payload": (
-                                                specs_failed,
-                                                failed_tests,
-                                            ),
-                                            "filter_info": filter_info_secondary,
-                                            "timing": timing_info,
-                                            "debug": debug_payload,
-                                        }
-                                    )
-                                    continue
-                                mdl = cm_result.model_in if sample == "in" else cm_result.model_full
-                                effective_filter = filter_info or dict(mdl.testset.filter_test_info or {})
-                                records.append(
-                                    {
-                                        "index": idx,
-                                        "status": "passed",
-                                        "payload": cm_result,
-                                        "filter_info": effective_filter,
-                                        "timing": timing_info,
-                                        "debug": debug_payload,
-                                    }
-                                )
-                            elif status == "failed":
-                                specs_failed = self._clone_spec_list(self.all_specs[idx])
-                                failed_tests = rec.get("failed_tests") or []
-                                records.append(
-                                    {
-                                        "index": idx,
-                                        "status": "failed",
-                                        "payload": (specs_failed, failed_tests),
-                                        "filter_info": filter_info,
-                                        "timing": timing_info,
-                                        "debug": debug_payload,
-                                    }
-                                )
-                            elif status == "error":
-                                specs_error = self._clone_spec_list(self.all_specs[idx])
-                                err_type, err_msg = rec.get("error", ("Error", "Unknown error"))
-                                records.append(
-                                    {
-                                        "index": idx,
-                                        "status": "error",
-                                        "payload": (specs_error, err_type, err_msg),
-                                        "filter_info": filter_info,
-                                        "timing": timing_info,
-                                        "debug": debug_payload,
-                                    }
-                                )
+                            dbg = rec.get("debug") if isinstance(rec, dict) else None
+                            if not dbg:
+                                continue
+                            start = dbg.get("start")
+                            end = dbg.get("end")
+                            pid = dbg.get("pid")
+                            if start is None or end is None:
+                                continue
+                            debug_events.append((start, "start"))
+                            debug_events.append((end, "end"))
+                            if pid is not None:
+                                actor_ids.add(str(pid))
+                        if debug_events:
+                            debug_events.sort(key=lambda item: item[0])
+                            active = 0
+                            debug_max_active = 0
+                            for _, kind in debug_events:
+                                if kind == "start":
+                                    active += 1
+                                    debug_max_active = max(debug_max_active, active)
+                                else:
+                                    active -= 1
+                            summary = _summarize_parallel_events(
+                                debug_events,
+                                debug_max_active,
+                                actor_ids,
+                                [],
+                                actor_label="processes",
+                            )
+                            print(summary)
+                        else:
+                            print("[parallel-debug] No debug timing data returned from workers.")
 
-                        progress_bar.close()
-                        results = _finalize_results(records)
-                        _print_timing_summary(records)
-                        return results
-        
-                    # Serial fallback
-                    processed_serial = 0
-                    for i, specs in enumerate(self.all_specs):
-                        model_id = f"{model_id_prefix}{i}"
-                        specs_for_build = self._clone_spec_list(specs)
-                        timings: Optional[Dict[str, float]] = {} if capture_timings else None
-                        start = time.perf_counter() if timings is not None else None
-                        try:
+                    records = []
+                    for rec in raw_records:
+                        idx = rec["index"]
+                        status = rec["status"]
+                        timing_info = rec.get("timing")
+                        filter_info = rec.get("filter_info") or {}
+                        debug_payload = rec.get("debug")
+                        if status == "passed":
+                            specs_for_build = self._clone_spec_list(self.all_specs[idx])
+                            model_id = f"{model_id_prefix}{idx}"
                             with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-                                result = self.assess_spec(
+                                cm_result = self.assess_spec(
                                     model_id,
                                     specs_for_build,
                                     sample,
                                     test_update_func,
                                     outlier_idx=outlier_idx,
-                                    timing=timings
+                                    timing=None,
                                 )
-                            if timings is not None and start is not None:
-                                timings['total'] = time.perf_counter() - start
-                            if isinstance(result, CM):
-                                mdl = result.model_in if sample == 'in' else result.model_full
+                            if not isinstance(cm_result, CM):
+                                # Should not happen; treat as failure fallback.
+                                specs_failed, failed_tests, filter_info_secondary = cm_result
                                 records.append(
                                     {
-                                        "index": i,
-                                        "status": "passed",
-                                        "payload": result,
-                                        "filter_info": dict(mdl.testset.filter_test_info or {}),
-                                        "timing": timings,
-                                    }
-                                )
-                            else:
-                                specs_failed, failed_tests, filter_info = result
-                                records.append(
-                                    {
-                                        "index": i,
+                                        "index": idx,
                                         "status": "failed",
-                                        "payload": (specs_failed, failed_tests),
-                                        "filter_info": dict(filter_info or {}),
-                                        "timing": timings,
+                                        "payload": (
+                                            specs_failed,
+                                            failed_tests,
+                                        ),
+                                        "filter_info": filter_info_secondary,
+                                        "timing": timing_info,
+                                        "debug": debug_payload,
                                     }
                                 )
-                        except Exception as e:
-                            if timings is not None and start is not None:
-                                timings['total'] = time.perf_counter() - start
+                                continue
+                            mdl = cm_result.model_in if sample == "in" else cm_result.model_full
+                            effective_filter = filter_info or dict(mdl.testset.filter_test_info or {})
                             records.append(
                                 {
-                                    "index": i,
-                                    "status": "error",
-                                    "payload": (specs_for_build, type(e).__name__, str(e)),
-                                    "filter_info": {},
-                                    "timing": timings,
+                                    "index": idx,
+                                    "status": "passed",
+                                    "payload": cm_result,
+                                    "filter_info": effective_filter,
+                                    "timing": timing_info,
+                                    "debug": debug_payload,
                                 }
                             )
-        
-                        processed_serial += 1
-                        progress_bar.update(1)
-                        _update_progress_postfix(processed_serial)
-        
+                        elif status == "failed":
+                            specs_failed = self._clone_spec_list(self.all_specs[idx])
+                            failed_tests = rec.get("failed_tests") or []
+                            records.append(
+                                {
+                                    "index": idx,
+                                    "status": "failed",
+                                    "payload": (specs_failed, failed_tests),
+                                    "filter_info": filter_info,
+                                    "timing": timing_info,
+                                    "debug": debug_payload,
+                                }
+                            )
+                        elif status == "error":
+                            specs_error = self._clone_spec_list(self.all_specs[idx])
+                            err_type, err_msg = rec.get("error", ("Error", "Unknown error"))
+                            records.append(
+                                {
+                                    "index": idx,
+                                    "status": "error",
+                                    "payload": (specs_error, err_type, err_msg),
+                                    "filter_info": filter_info,
+                                    "timing": timing_info,
+                                    "debug": debug_payload,
+                                }
+                            )
+
                     progress_bar.close()
                     results = _finalize_results(records)
                     _print_timing_summary(records)
                     return results
-        
-                finally:
-                    if dm_locked:
-                        try:
-                            self.dm.unlock_parallel_read_only()
-                            print("[parallel] DataManager read-only lock released.")
-                        except Exception as exc:
-                            print(f"[parallel] Warning: failed to release DataManager lock ({exc}).")
+    
+                # Serial fallback
+                processed_serial = 0
+                for i, specs in enumerate(self.all_specs):
+                    model_id = f"{model_id_prefix}{i}"
+                    specs_for_build = self._clone_spec_list(specs)
+                    timings: Optional[Dict[str, float]] = {} if capture_timings else None
+                    start = time.perf_counter() if timings is not None else None
+                    try:
+                        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                            result = self.assess_spec(
+                                model_id,
+                                specs_for_build,
+                                sample,
+                                test_update_func,
+                                outlier_idx=outlier_idx,
+                                timing=timings
+                            )
+                        if timings is not None and start is not None:
+                            timings['total'] = time.perf_counter() - start
+                        if isinstance(result, CM):
+                            mdl = result.model_in if sample == 'in' else result.model_full
+                            records.append(
+                                {
+                                    "index": i,
+                                    "status": "passed",
+                                    "payload": result,
+                                    "filter_info": dict(mdl.testset.filter_test_info or {}),
+                                    "timing": timings,
+                                }
+                            )
+                        else:
+                            specs_failed, failed_tests, filter_info = result
+                            records.append(
+                                {
+                                    "index": i,
+                                    "status": "failed",
+                                    "payload": (specs_failed, failed_tests),
+                                    "filter_info": dict(filter_info or {}),
+                                    "timing": timings,
+                                }
+                            )
+                    except Exception as e:
+                        if timings is not None and start is not None:
+                            timings['total'] = time.perf_counter() - start
+                        records.append(
+                            {
+                                "index": i,
+                                "status": "error",
+                                "payload": (specs_for_build, type(e).__name__, str(e)),
+                                "filter_info": {},
+                                "timing": timings,
+                            }
+                        )
+    
+                    processed_serial += 1
+                    progress_bar.update(1)
+                    _update_progress_postfix(processed_serial)
+    
+                progress_bar.close()
+                results = _finalize_results(records)
+                _print_timing_summary(records)
+                return results
+    
+            finally:
+                if dm_locked:
+                    try:
+                        self.dm.unlock_parallel_read_only()
+                        print("[parallel] DataManager read-only lock released.")
+                    except Exception as exc:
+                        print(f"[parallel] Warning: failed to release DataManager lock ({exc}).")
     @staticmethod
     def _clone_spec_item(item: Any) -> Any:
         if isinstance(item, Feature):
