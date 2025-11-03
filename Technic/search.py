@@ -6,6 +6,7 @@ import sys
 import os
 import copy
 import time
+import threading
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -60,6 +61,55 @@ def _sort_specs_with_dummies_first(spec_list: List[Any]) -> List[Any]:
     
     # Sort by priority, keeping relative order for items with same priority
     return sorted(spec_list, key=lambda x: (get_dummy_priority(x), str(x)))
+
+
+def _summarize_parallel_events(
+    events: List[Tuple[float, str]],
+    max_active: int,
+    threads: Set[str],
+    cpu_samples: List[float],
+) -> str:
+    """Create a human-readable summary of parallel execution diagnostics."""
+
+    if not events:
+        return ""
+
+    events_sorted = sorted(events, key=lambda item: item[0])
+    first_ts = events_sorted[0][0]
+    last_ts = events_sorted[-1][0]
+    active = 0
+    last_time = first_ts
+    overlap = 0.0
+
+    for ts, kind in events_sorted:
+        if ts > last_time and active > 1:
+            overlap += ts - last_time
+        if kind == "start":
+            active += 1
+        else:
+            active -= 1
+        last_time = ts
+
+    total_elapsed = max(0.0, last_ts - first_ts)
+    summary_lines = [
+        "--- Parallel debug summary ---",
+        f"threads used: {len(threads)} | max concurrent tasks: {max_active}",
+        f"elapsed (first start -> last end): {total_elapsed:.3f}s",
+        f"time with >1 active task: {overlap:.3f}s",
+    ]
+
+    if cpu_samples:
+        avg_cpu = sum(cpu_samples) / len(cpu_samples)
+        peak_cpu = max(cpu_samples)
+        summary_lines.append(
+            f"process CPU% avg {avg_cpu:.1f} | peak {peak_cpu:.1f} (psutil sampling)"
+        )
+    else:
+        summary_lines.append(
+            "process CPU%: n/a (psutil not installed or sampling disabled)"
+        )
+
+    return "\n".join(summary_lines)
 
 
 class ModelSearch:
@@ -425,6 +475,7 @@ class ModelSearch:
             )
 
             capture_timings = os.getenv("LEGO_SEARCH_TIMING", "").strip().lower() in {"1", "true", "yes", "on"}
+            parallel_debug_enabled = os.getenv("LEGO_SEARCH_PARALLEL_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 
             def _finalize_results(records: List[Dict[str, Any]]) -> Tuple[List[CM], List[Tuple[List[Any], List[str]]], List[Tuple[List[Any], str, str]]]:
                 passed: List[CM] = []
@@ -486,6 +537,10 @@ class ModelSearch:
 
             records: List[Dict[str, Any]] = []
 
+            if parallel_debug_enabled and (not parallel or total <= 1):
+                reason = "parallel flag disabled" if not parallel else "only one spec to evaluate"
+                print(f"[parallel-debug] {reason}; running serial path.")
+
             if parallel and total > 1:
                 # NOTE: The ThreadPoolExecutor shares the interpreter lock. Heavy
                 # work inside ``assess_spec`` (e.g., statsmodels OLS fitting or
@@ -494,6 +549,50 @@ class ModelSearch:
                 # Python loops in feature construction will still serialize, so
                 # measuring CPU utilisation is advised before assuming linear
                 # speed-ups from the threaded path.
+                debug_lock = threading.Lock()
+                debug_active = 0
+                debug_max_active = 0
+                debug_events: List[Tuple[float, str]] = []
+                debug_threads: Set[str] = set()
+                cpu_samples: List[float] = []
+                cpu_monitor_error: Optional[str] = None
+                cpu_monitor_stop = False
+
+                def _record_event(kind: str, thread_name: str) -> None:
+                    nonlocal debug_active, debug_max_active
+                    now = time.perf_counter()
+                    with debug_lock:
+                        if kind == "start":
+                            debug_active += 1
+                            debug_max_active = max(debug_max_active, debug_active)
+                        else:
+                            debug_active -= 1
+                        debug_events.append((now, kind))
+                        debug_threads.add(thread_name)
+
+                def _start_cpu_monitor() -> Optional[threading.Thread]:
+                    nonlocal cpu_monitor_error
+                    if not parallel_debug_enabled:
+                        return None
+                    try:
+                        import psutil  # type: ignore
+                    except Exception as exc:  # pragma: no cover - optional dependency
+                        cpu_monitor_error = f"psutil unavailable: {exc}"
+                        return None
+
+                    proc = psutil.Process()
+                    proc.cpu_percent(interval=None)
+
+                    def _poll_cpu() -> None:
+                        while not cpu_monitor_stop:
+                            cpu_samples.append(proc.cpu_percent(interval=0.3))
+
+                    thread = threading.Thread(target=_poll_cpu, name="cpu-monitor", daemon=True)
+                    thread.start()
+                    return thread
+
+                cpu_thread = _start_cpu_monitor()
+
                 worker_args = [
                     (i, self._clone_spec_list(specs), f"{model_id_prefix}{i}")
                     for i, specs in enumerate(self.all_specs)
@@ -503,6 +602,9 @@ class ModelSearch:
                     idx, specs_local, model_id = args
                     timings: Optional[Dict[str, float]] = {} if capture_timings else None
                     start = time.perf_counter() if timings is not None else None
+                    thread_name = threading.current_thread().name
+                    if parallel_debug_enabled:
+                        _record_event("start", thread_name)
                     try:
                         with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
                             outcome = self.assess_spec(
@@ -543,6 +645,9 @@ class ModelSearch:
                             "filter_info": {},
                             "timing": timings,
                         }
+                    finally:
+                        if parallel_debug_enabled:
+                            _record_event("end", thread_name)
 
                 workers = max_workers if max_workers and max_workers > 0 else None
                 processed = 0
@@ -553,6 +658,19 @@ class ModelSearch:
                         records.append(record)
                         processed += 1
                         progress_bar.update(1)
+                if cpu_thread is not None:
+                    cpu_monitor_stop = True
+                    cpu_thread.join(timeout=1)
+                elif parallel_debug_enabled and cpu_monitor_error:
+                    print(f"[parallel-debug] {cpu_monitor_error}")
+                if parallel_debug_enabled and debug_events:
+                    debug_summary = _summarize_parallel_events(
+                        debug_events,
+                        debug_max_active,
+                        debug_threads,
+                        cpu_samples,
+                    )
+                    print(debug_summary)
                 progress_bar.close()
                 results = _finalize_results(records)
                 _print_timing_summary(records)
