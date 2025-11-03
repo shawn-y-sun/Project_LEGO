@@ -168,6 +168,9 @@ class DataManager:
         self._scen_internal_data_cache: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None
         self._model_mev_cache: Optional[pd.DataFrame] = None
         self._scen_mevs_cache: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None
+
+        # Parallel execution state
+        self._parallel_read_only = False
         
         # Frequency cache
         self._freq_cache: Optional[str] = None
@@ -626,7 +629,30 @@ class DataManager:
             
         return self._scen_mevs_cache
 
-     # Modeling in‑sample/out‑of‑sample splits
+    # ------------------------------------------------------------------
+    # Parallel search helpers
+    # ------------------------------------------------------------------
+    def prepare_parallel_feature_caches(self) -> Dict[str, int]:
+        """Ensure key caches are materialised and return a simple summary."""
+
+        internal = self.internal_data
+        model_mev = self.model_mev
+        return {
+            "internal_cols": 0 if internal is None else internal.shape[1],
+            "mev_cols": 0 if model_mev is None else model_mev.shape[1],
+        }
+
+    def lock_parallel_read_only(self) -> None:
+        """Mark caches as read-only for parallel search execution."""
+
+        self._parallel_read_only = True
+
+    def unlock_parallel_read_only(self) -> None:
+        """Release the read-only marker set for parallel search."""
+
+        self._parallel_read_only = False
+
+    # Modeling in‑sample/out-of-sample splits
     @property
     def internal_in(self) -> pd.DataFrame:
         """
