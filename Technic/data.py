@@ -7,7 +7,7 @@
 # =============================================================================
 import pandas as pd
 import warnings
-from typing import Any, Dict, List, Optional, Callable, Union, Tuple
+from typing import Any, Dict, List, Optional, Callable, Union, Tuple, Set
 import numpy as np
 from scipy.interpolate import CubicSpline
 import copy
@@ -139,6 +139,8 @@ class DataManager:
     - The class provides dynamic access to cached data, ensuring consistency
     - Sample splits are managed by the internal_loader and accessed through properties
     - Use refresh() to update cached data after loader modifications or to replace loaders
+    - Use clear_feature_cache() to drop any feature columns cached during
+      build_features()
 
     See Also
     --------
@@ -162,15 +164,19 @@ class DataManager:
         # Cache for interpolated MEV data
         self._mev_cache: Dict[str, pd.DataFrame] = {}
         self._scen_cache: Dict[str, Dict[str, pd.DataFrame]] = {}
-        
+
         # Cache for data copies that can be modified
         self._internal_data_cache: Optional[pd.DataFrame] = None
         self._scen_internal_data_cache: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None
         self._model_mev_cache: Optional[pd.DataFrame] = None
         self._scen_mevs_cache: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None
-        
+
         # Frequency cache
         self._freq_cache: Optional[str] = None
+
+        # Track feature columns cached on internal/MEV data
+        self._cached_feature_columns_internal: Set[str] = set()
+        self._cached_feature_columns_mev: Set[str] = set()
         
         # Check if both monthly and quarterly MEVs exist
         if not (self._mev_loader.model_mev_mth.empty or self._mev_loader.model_mev_qtr.empty):
@@ -241,6 +247,8 @@ class DataManager:
         self._model_mev_cache = None
         self._scen_mevs_cache = None
         self._freq_cache = None
+        self._cached_feature_columns_internal.clear()
+        self._cached_feature_columns_mev.clear()
 
     @property
     def internal_data(self) -> pd.DataFrame:
@@ -323,9 +331,9 @@ class DataManager:
     def poos_periods(self) -> List[int]:
         """
         Get the pseudo-out-of-sample periods for Walk Forward Test.
-        
+
         Returns frequency-based defaults if not specified at initialization:
-        - For quarterly data (freq='Q'): [4, 8, 12] 
+        - For quarterly data (freq='Q'): [4, 8, 12]
         - For monthly data (freq='M'): [3, 6, 12]
         
         Returns
@@ -348,6 +356,251 @@ class DataManager:
             return [4, 8, 12]
         else:  # 'M'
             return [3, 6, 12]
+
+    def _determine_feature_target(
+        self,
+        feature: Feature,
+        internal_df: pd.DataFrame,
+        mev_df: pd.DataFrame
+    ) -> str:
+        """
+        Infer which cached DataFrame a feature primarily relies on.
+
+        Parameters
+        ----------
+        feature : Feature
+            Feature specification being evaluated.
+        internal_df : pandas.DataFrame
+            Current internal data cache used for lookup ordering.
+        mev_df : pandas.DataFrame
+            Current MEV data cache used for lookup ordering.
+
+        Returns
+        -------
+        str
+            ``"internal"`` if at least one lookup resolves on the internal data and
+            none require MEV data exclusively, otherwise ``"mev"``.
+
+        Notes
+        -----
+        The lookup ordering mirrors :meth:`Feature.lookup`, preferring internal
+        variables when a code appears in both datasets. Mixed dependencies default
+        to caching on the internal DataFrame to preserve entity/date alignment.
+        """
+        lookup_sources: List[str] = []
+
+        try:
+            lookup_items = feature.lookup_map().items()
+        except Exception:
+            lookup_items = []
+
+        for _, var_name in lookup_items:
+            if not isinstance(var_name, str):
+                continue
+            if var_name in internal_df.columns:
+                lookup_sources.append("internal")
+            elif var_name in mev_df.columns:
+                lookup_sources.append("mev")
+
+        if lookup_sources and all(src == "mev" for src in lookup_sources):
+            return "mev"
+        return "internal"
+
+    def _get_cached_feature_piece(
+        self,
+        feature: Feature,
+        target_source: str,
+        internal_df: pd.DataFrame,
+        mev_df: pd.DataFrame,
+        is_panel: bool,
+        entity_col: Optional[str],
+        date_col: Optional[str]
+    ) -> Optional[Union[pd.Series, pd.DataFrame]]:
+        """
+        Retrieve a previously cached feature slice when available.
+
+        Parameters
+        ----------
+        feature : Feature
+            Feature specification with populated ``output_names``.
+        target_source : str
+            Either ``"internal"`` or ``"mev"`` indicating the cache to search.
+        internal_df : pandas.DataFrame
+            Internal data cache that may contain feature columns.
+        mev_df : pandas.DataFrame
+            MEV data cache that may contain feature columns.
+        is_panel : bool
+            Flag indicating whether panel alignment is required.
+        entity_col : str, optional
+            Entity identifier column for panel datasets.
+        date_col : str, optional
+            Date column for panel datasets.
+
+        Returns
+        -------
+        pandas.Series or pandas.DataFrame or None
+            Cached feature data aligned to the calling context, or ``None`` when the
+            feature is not yet cached or alignment metadata is unavailable.
+        """
+        output_names = getattr(feature, "output_names", None) or []
+        if not output_names:
+            return None
+
+        target_df = internal_df if target_source == "internal" else mev_df
+        if any(name not in target_df.columns for name in output_names):
+            return None
+
+        if is_panel and target_source == "internal":
+            if not entity_col or not date_col:
+                return None
+            if entity_col not in internal_df.columns or date_col not in internal_df.columns:
+                return None
+            cols = [entity_col, date_col] + output_names
+            return internal_df[cols].copy()
+
+        cached_slice = target_df[output_names].copy()
+        if len(output_names) == 1:
+            return cached_slice[output_names[0]].copy()
+        return cached_slice
+
+    def _prepare_panel_feature_result(
+        self,
+        feature_result: Union[pd.Series, pd.DataFrame],
+        internal_df: pd.DataFrame,
+        entity_col: str,
+        date_col: str
+    ) -> pd.DataFrame:
+        """
+        Align feature outputs with panel entity-date structure.
+
+        Parameters
+        ----------
+        feature_result : pandas.Series or pandas.DataFrame
+            Raw feature output from :meth:`Feature.apply`.
+        internal_df : pandas.DataFrame
+            Internal panel data providing entity/date ordering.
+        entity_col : str
+            Column identifying entities in the panel dataset.
+        date_col : str
+            Column identifying timestamps in the panel dataset.
+
+        Returns
+        -------
+        pandas.DataFrame
+            DataFrame containing ``entity_col``, ``date_col``, and feature columns ready
+            for merging back into the panel structure.
+        """
+        if isinstance(feature_result, pd.Series):
+            feature_df = feature_result.to_frame(name=feature_result.name)
+        else:
+            feature_df = feature_result.copy()
+
+        if date_col not in feature_df.columns:
+            # Preserve original ordering from the panel cache to maintain alignment.
+            aligned = internal_df[[entity_col, date_col]].copy()
+            for col in feature_df.columns:
+                aligned[col] = feature_df[col].values
+            feature_df = aligned
+
+        return feature_df
+
+    def _cache_feature_result(
+        self,
+        feature: Feature,
+        target_source: str,
+        raw_result: Optional[Union[pd.Series, pd.DataFrame]],
+        panel_result: Optional[pd.DataFrame],
+        internal_df: pd.DataFrame,
+        mev_df: pd.DataFrame,
+        is_panel: bool,
+        entity_col: Optional[str],
+        date_col: Optional[str]
+    ) -> None:
+        """
+        Persist newly generated feature columns on the managed caches.
+
+        Parameters
+        ----------
+        feature : Feature
+            Feature specification that produced the output.
+        target_source : str
+            Either ``"internal"`` or ``"mev"`` indicating which cache to update.
+        raw_result : pandas.Series or pandas.DataFrame, optional
+            Direct output from :meth:`Feature.apply`, used for time-series caching.
+        panel_result : pandas.DataFrame, optional
+            Entity-date aligned feature data for panel datasets.
+        internal_df : pandas.DataFrame
+            Internal data cache to update when ``target_source`` is ``"internal"``.
+        mev_df : pandas.DataFrame
+            MEV data cache to update when ``target_source`` is ``"mev"``.
+        is_panel : bool
+            Flag indicating whether panel alignment is required.
+        entity_col : str, optional
+            Entity identifier column for panel datasets.
+        date_col : str, optional
+            Date column for panel datasets.
+
+        Notes
+        -----
+        Only columns with string names are cached. Existing columns are never
+        overwritten—repeated invocations simply reuse stored data.
+        """
+        if target_source == "internal" and is_panel:
+            if panel_result is None or not entity_col or not date_col:
+                return
+
+            feature_df = panel_result.copy()
+            feature_cols = [
+                col for col in feature_df.columns if col not in {entity_col, date_col}
+            ]
+            new_cols = [col for col in feature_cols if col not in internal_df.columns]
+            if not new_cols:
+                return
+
+            # Align feature rows to the internal panel order before assignment.
+            aligned_df = feature_df[[entity_col, date_col] + new_cols].copy()
+            aligned_df[date_col] = pd.to_datetime(aligned_df[date_col]).dt.normalize()
+            feature_indexed = aligned_df.set_index([entity_col, date_col])
+
+            base_dates = pd.to_datetime(internal_df[date_col]).dt.normalize()
+            base_index = pd.MultiIndex.from_arrays(
+                [internal_df[entity_col].to_numpy(), base_dates.to_numpy()],
+                names=[entity_col, date_col]
+            )
+            aligned = feature_indexed.reindex(base_index)
+
+            for col in new_cols:
+                internal_df[col] = aligned[col].to_numpy()
+
+            self._cached_feature_columns_internal.update(new_cols)
+            return
+
+        target_df = internal_df if target_source == "internal" else mev_df
+        if target_df is None or raw_result is None:
+            return
+
+        if isinstance(raw_result, pd.Series):
+            result_df = raw_result.to_frame(name=raw_result.name)
+        elif isinstance(raw_result, pd.DataFrame):
+            result_df = raw_result.copy()
+        else:
+            return
+
+        valid_columns = [
+            col for col in result_df.columns if isinstance(col, str) and col
+        ]
+        new_cols = [col for col in valid_columns if col not in target_df.columns]
+        if not new_cols:
+            return
+
+        assign_df = result_df[new_cols].copy()
+        for col in new_cols:
+            target_df[col] = assign_df[col]
+
+        if target_source == "internal":
+            self._cached_feature_columns_internal.update(new_cols)
+        else:
+            self._cached_feature_columns_mev.update(new_cols)
 
     def _combine_mevs(self, qtr_data: pd.DataFrame, mth_data: pd.DataFrame) -> pd.DataFrame:
         """
@@ -725,6 +978,9 @@ class DataManager:
         - Transform features may introduce additional NaN values
         - The method flattens nested lists/tuples in specs
         - Entity and date columns are used internally for alignment but removed from final output
+        - When ``internal_df`` and ``mev_df`` are not provided, generated feature
+          columns are cached on the managed data. Invoke ``clear_feature_cache()``
+          to restore the original data frames.
         """
         data_int = internal_df if internal_df is not None else self.internal_data
         data_mev = mev_df if mev_df is not None else self.model_mev
@@ -750,6 +1006,8 @@ class DataManager:
         mev_pieces = []
         feature_pieces = []
         
+        caching_allowed = internal_df is None and mev_df is None
+
         for spec in flat_specs:
             if isinstance(spec, Feature):
                 # For TSFM instances, ensure frequency consistency
@@ -764,29 +1022,56 @@ class DataManager:
                             UserWarning
                         )
                         spec.freq = self.freq
-                
-                # For Features, we need to handle the result differently based on data type
-                feature_result = spec.apply(data_int, data_mev)
-                
+
+                target_source = self._determine_feature_target(spec, data_int, data_mev)
+
+                if caching_allowed:
+                    cached_piece = self._get_cached_feature_piece(
+                        feature=spec,
+                        target_source=target_source,
+                        internal_df=data_int,
+                        mev_df=data_mev,
+                        is_panel=is_panel,
+                        entity_col=entity_col,
+                        date_col=date_col
+                    )
+                    if cached_piece is not None:
+                        feature_pieces.append(cached_piece)
+                        continue
+
+                # Generate feature output and align for panel data when needed
+                feature_result_raw = spec.apply(data_int, data_mev)
+                panel_aligned_result: Optional[pd.DataFrame] = None
+
                 if is_panel:
-                    # For panel data, we need to ensure we have the entity and date columns
-                    if isinstance(feature_result, pd.Series):
-                        # Convert Series to DataFrame
-                        feature_result = feature_result.to_frame()
-                    
-                    if isinstance(feature_result, pd.DataFrame):
-                        if date_col not in feature_result.columns:
-                            # For panel data, we need to preserve the original entity-date structure
-                            # Create a mapping DataFrame with entity and date columns
-                            date_mapping = data_int[[entity_col, date_col]].copy()
-                            # Add the feature result columns using the original index alignment
-                            for col in feature_result.columns:
-                                date_mapping[col] = feature_result[col].values
-                            feature_result = date_mapping
-                    feature_pieces.append(feature_result)
+                    if entity_col is None or date_col is None:
+                        raise ValueError(
+                            "Panel feature construction requires entity and date columns."
+                        )
+                    panel_aligned_result = self._prepare_panel_feature_result(
+                        feature_result_raw,
+                        data_int,
+                        entity_col,
+                        date_col
+                    )
+                    feature_piece = panel_aligned_result
                 else:
-                    # For time series, just collect the result
-                    feature_pieces.append(feature_result)
+                    feature_piece = feature_result_raw
+
+                if caching_allowed:
+                    self._cache_feature_result(
+                        feature=spec,
+                        target_source=target_source,
+                        raw_result=feature_result_raw,
+                        panel_result=panel_aligned_result,
+                        internal_df=data_int,
+                        mev_df=data_mev,
+                        is_panel=is_panel,
+                        entity_col=entity_col,
+                        date_col=date_col
+                    )
+
+                feature_pieces.append(feature_piece)
                     
             elif isinstance(spec, str):
                 # Raw variable - collect in appropriate list
@@ -866,6 +1151,39 @@ class DataManager:
             result.index = result.index.normalize()
 
         return result
+
+    def clear_feature_cache(self) -> None:
+        """
+        Remove feature columns cached onto internal and MEV data.
+
+        The method drops any columns that were added automatically by
+        :meth:`build_features` when it cached newly generated variables. Original
+        loader-provided columns remain untouched.
+
+        Examples
+        --------
+        >>> dm = DataManager(internal_loader, mev_loader)
+        >>> _ = dm.build_features([TSFM('GDP', 'DF')])  # Cached on the MEV DataFrame
+        >>> dm.clear_feature_cache()  # Removes the cached transform column
+        """
+        if self._internal_data_cache is not None and self._cached_feature_columns_internal:
+            cols_to_drop = [
+                col for col in self._cached_feature_columns_internal
+                if col in self._internal_data_cache.columns
+            ]
+            if cols_to_drop:
+                self._internal_data_cache = self._internal_data_cache.drop(columns=cols_to_drop)
+
+        if self._model_mev_cache is not None and self._cached_feature_columns_mev:
+            cols_to_drop = [
+                col for col in self._cached_feature_columns_mev
+                if col in self._model_mev_cache.columns
+            ]
+            if cols_to_drop:
+                self._model_mev_cache = self._model_mev_cache.drop(columns=cols_to_drop)
+
+        self._cached_feature_columns_internal.clear()
+        self._cached_feature_columns_mev.clear()
 
     def build_tsfm_specs(
         self,
