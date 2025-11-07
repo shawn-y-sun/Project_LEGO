@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 import logging
 import warnings
+from pandas.tseries.frequencies import to_offset
 
 # Module logger
 logger = logging.getLogger(__name__)
@@ -143,6 +144,36 @@ def filter_driver_columns(df: pd.DataFrame, target_var: str = None, base_var: st
         driver_columns.remove(base_var)
     
     return driver_columns
+
+
+def infer_model_frequency(freq_value: Any) -> str:
+    """Return simplified monthly/quarterly code for assorted frequency labels."""
+
+    if freq_value is None:
+        return 'M'
+
+    if isinstance(freq_value, str):
+        freq_str = freq_value.strip().lower()
+        if not freq_str:
+            return 'M'
+
+        if freq_str.startswith('m') or freq_str in {'monthly', 'month', 'months'}:
+            return 'M'
+        if freq_str.startswith('q') or freq_str in {'quarterly', 'quarter', 'quarters'}:
+            return 'Q'
+
+    try:
+        offset = to_offset(freq_value)
+        if offset is not None:
+            name = offset.name.upper()
+            if name.startswith('M'):
+                return 'M'
+            if name.startswith('Q'):
+                return 'Q'
+    except Exception:
+        pass
+
+    return 'M'
 
 class ExportableModel(ABC):
     """Abstract base class defining the interface for exportable models."""
@@ -1182,11 +1213,10 @@ class OLSModelAdapter(ExportableModel):
             return pd.DataFrame(columns=SCENARIO_COLUMNS)
         
         # Get model frequency to determine driver data frequency
-        model_freq = getattr(self.model, 'dm', None)
-        if model_freq is not None:
-            model_freq = getattr(model_freq, 'freq', 'M')
-        else:
-            model_freq = 'M'
+        freq_value = getattr(self.model, 'dm', None)
+        if freq_value is not None:
+            freq_value = getattr(freq_value, 'freq', None)
+        model_freq = infer_model_frequency(freq_value)
         is_monthly = model_freq == 'M'
 
         qtr_method = getattr(self.model.scen_manager, 'qtr_method', 'mean')
@@ -1927,6 +1957,11 @@ def get_scenario_driver_data(model, scen_set: str, scen_name: str, driver_names:
             return None
         
         driver_data = scenario_features[available_drivers].copy()
+        try:
+            driver_data.index = pd.to_datetime(driver_data.index)
+        except Exception:
+            pass
+        driver_data = driver_data.sort_index()
         
         # Apply date filtering (P0 to P{periods})
         if jump_off_date is None:
@@ -1937,7 +1972,7 @@ def get_scenario_driver_data(model, scen_set: str, scen_name: str, driver_names:
             jump_off_date = pd.to_datetime(jump_off_date)
 
             # Determine frequency from model
-            model_freq = getattr(model.dm, 'freq', 'M')
+            model_freq = infer_model_frequency(getattr(getattr(model, 'dm', None), 'freq', None))
 
             # Resolve default horizon when not explicitly provided
             if periods is None:
@@ -1956,8 +1991,11 @@ def get_scenario_driver_data(model, scen_set: str, scen_name: str, driver_names:
             # Filter data to P0 to P{periods} range
             mask = (driver_data.index >= jump_off_date) & (driver_data.index <= end_date)
             driver_data = driver_data.loc[mask]
-        
+
+            if periods is not None and len(driver_data) > periods:
+                driver_data = driver_data.iloc[:periods]
+
         return driver_data if not driver_data.empty else None
-        
+
     except Exception:
         return None
