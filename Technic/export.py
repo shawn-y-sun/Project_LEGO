@@ -14,7 +14,7 @@ Key components:
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, List, Any, Optional, Set, Type
+from typing import Dict, List, Any, Optional, Set, Type, Iterable
 import pandas as pd
 from pathlib import Path
 import numpy as np
@@ -770,10 +770,38 @@ class OLSModelAdapter(ExportableModel):
         # Target - In-Sample / Out-of-Sample
         predicted_in = self.model.y_fitted_in
         blocks.append(self._build_ts_block(predicted_in.index, model_id, SERIES_TYPE_TARGET, 'In-Sample', predicted_in.values))
- 
+
+        # In-sample error (Model - Actual)
+        target_actual_in = getattr(self.model, 'y_in', pd.Series(dtype=float))
+        if isinstance(target_actual_in, pd.Series) and not target_actual_in.empty:
+            aligned_actual_in = target_actual_in.reindex(predicted_in.index)
+            error_in = (predicted_in - aligned_actual_in).dropna()
+            if not error_in.empty:
+                blocks.append(self._build_ts_block(
+                    error_in.index,
+                    model_id,
+                    SERIES_TYPE_TARGET,
+                    'Error(Model-Actual)',
+                    error_in.values
+                ))
+
         if not self.model.X_out.empty:
             predicted_out = self.model.y_pred_out
             blocks.append(self._build_ts_block(predicted_out.index, model_id, SERIES_TYPE_TARGET, 'Out-of-Sample', predicted_out.values))
+
+            # Out-of-sample error (Model - Actual)
+            target_actual_out = getattr(self.model, 'y_out', pd.Series(dtype=float))
+            if isinstance(target_actual_out, pd.Series) and not target_actual_out.empty:
+                aligned_actual_out = target_actual_out.reindex(predicted_out.index)
+                error_out = (predicted_out - aligned_actual_out).dropna()
+                if not error_out.empty:
+                    blocks.append(self._build_ts_block(
+                        error_out.index,
+                        model_id,
+                        SERIES_TYPE_TARGET,
+                        'Error(Model-Actual)',
+                        error_out.values
+                    ))
  
         # Features (Independent Variables) — vectorized for efficiency
         feature_data_in = self.model.X_in
@@ -860,9 +888,9 @@ class OLSModelAdapter(ExportableModel):
         - value: The actual value
         
         Summary Statistics includes descriptive statistics for:
-        - Target variable (combined in-sample and out-of-sample data)
-        - Base variable (if available)
-        - All independent variables (combined in-sample and out-of-sample data)
+        - Target variable (reported separately for in-sample and full-sample data)
+        - Base variable (if available, split by in-sample and full-sample)
+        - All independent variables (split by in-sample and full-sample data)
         """
         model_id = self._model_id
         stats_list = []
@@ -1056,50 +1084,66 @@ class OLSModelAdapter(ExportableModel):
                         })
         
         # Add Summary Statistics for all variables
-        def _add_summary_stats(data_series: pd.Series, var_name: str):
-            """Helper function to calculate and add summary statistics for a variable."""
-            if data_series is None or data_series.empty:
+        def _append_summary_stats(data_series: Optional[pd.Series], var_name: str, category: str) -> None:
+            """Calculate and append summary statistics for a given series and category."""
+            if data_series is None:
                 return
-            
-            # Calculate summary statistics
+
+            series = data_series.dropna()
+            if series.empty:
+                return
+
             summary_stats = {
-                'Mean': data_series.mean(),
-                'Std': data_series.std(),
-                'Min': data_series.min(),
-                'Max': data_series.max(),
-                'Median': data_series.median(),
-                '25th Percentile': data_series.quantile(0.25),
-                '90th Percentile': data_series.quantile(0.90),
-                '95th Percentile': data_series.quantile(0.95)
+                'Mean': series.mean(),
+                'Std': series.std(),
+                'Min': series.min(),
+                'Max': series.max(),
+                'Median': series.median(),
+                '25th Percentile': series.quantile(0.25),
+                '90th Percentile': series.quantile(0.90),
+                '95th Percentile': series.quantile(0.95)
             }
-            
-            # Add each statistic to stats_list
+
             for stat_name, stat_value in summary_stats.items():
                 if pd.notnull(stat_value):
                     stats_list.append({
-                        'category': 'Summary Statistics',
+                        'category': category,
                         'model': model_id,
                         'type': stat_name,
                         'value_type': var_name,
                         'value': float(stat_value)
                     })
-        
-        # Target variable summary statistics
-        target_data = pd.concat([self.model.y_in, self.model.y_out]).sort_index()
-        _add_summary_stats(target_data, 'Target')
-        
-        # Base variable summary statistics (if available)
-        base_data = getattr(self.model, 'y_base_full', None)
-        if base_data is not None and not base_data.empty:
-            _add_summary_stats(base_data, 'Base')
-        
-        # Independent variables summary statistics (in-sample only)
-        feature_data_in = self.model.X_in
 
+        def _add_in_full_stats(series_in: Optional[pd.Series], series_full: Optional[pd.Series], var_name: str) -> None:
+            """Add both in-sample and full-sample stats for a variable when available."""
+            _append_summary_stats(series_in, var_name, 'Summary Statistics(In-Sample)')
+            _append_summary_stats(series_full, var_name, 'Summary Statistics(Full-Sample)')
+
+        # Target variable summary statistics
+        y_in = getattr(self.model, 'y_in', pd.Series(dtype=float))
+        y_full = getattr(self.model, 'y_full', pd.Series(dtype=float))
+        _add_in_full_stats(y_in, y_full, 'Target')
+
+        # Base variable summary statistics (if available)
+        base_in = getattr(self.model, 'y_base_in', None)
+        base_full = getattr(self.model, 'y_base_full', None)
+        if base_in is not None or base_full is not None:
+            _add_in_full_stats(base_in, base_full, 'Base')
+
+        # Independent variables summary statistics
+        feature_data_in = getattr(self.model, 'X_in', pd.DataFrame())
+        feature_data_full = getattr(self.model, 'X_full', pd.DataFrame())
+
+        feature_columns: Iterable[str] = []
         if not feature_data_in.empty:
-            for var_name in feature_data_in.columns:
-                var_series_in = feature_data_in[var_name]
-                _add_summary_stats(var_series_in, var_name)
+            feature_columns = feature_data_in.columns
+        elif not feature_data_full.empty:
+            feature_columns = feature_data_full.columns
+
+        for var_name in feature_columns:
+            series_in = feature_data_in[var_name] if var_name in feature_data_in.columns else None
+            series_full = feature_data_full[var_name] if var_name in feature_data_full.columns else None
+            _add_in_full_stats(series_in, series_full, var_name)
         
         # Create DataFrame efficiently
         return pd.DataFrame(stats_list)
@@ -1120,8 +1164,9 @@ class OLSModelAdapter(ExportableModel):
         The method processes:
         - Target variable forecasts: Monthly frequency only
         - Base variable forecasts: Both monthly and quarterly frequencies
-        - Driver scenario data: Actual transformed model drivers (P0 to P12), 
-          excludes seasonal dummies and intercept terms
+        - Driver scenario data: Actual transformed model drivers (default P0 to P60 for
+          monthly models or P0 to P20 for quarterly models), excludes seasonal dummies
+          and intercept terms
         """
         if self.model.scen_manager is None:
             # Return empty DataFrame with correct schema
@@ -1400,7 +1445,7 @@ class OLSModelAdapter(ExportableModel):
                 for scen_name in scenarios.keys():
                     driver_data = get_scenario_driver_data(
                         self.model, scen_set, scen_name, model_drivers,
-                        jump_off_date=None, periods=12
+                        jump_off_date=None
                     )
 
                     if driver_data is not None and not driver_data.empty:
@@ -1835,8 +1880,8 @@ def get_model_driver_names(model) -> List[str]:
     return driver_features
 
 
-def get_scenario_driver_data(model, scen_set: str, scen_name: str, driver_names: List[str], 
-                           jump_off_date=None, periods: int = 12) -> Optional[pd.DataFrame]:
+def get_scenario_driver_data(model, scen_set: str, scen_name: str, driver_names: List[str],
+                           jump_off_date=None, periods: Optional[int] = None) -> Optional[pd.DataFrame]:
     """
     Get transformed driver scenario data for specific scenario and drivers.
     
@@ -1855,8 +1900,10 @@ def get_scenario_driver_data(model, scen_set: str, scen_name: str, driver_names:
         List of driver feature names to extract
     jump_off_date : pd.Timestamp, optional
         Jump-off date (P0). If None, uses model's scenario manager P0
-    periods : int, default 12
-        Number of periods after P0 to include (P1 to P{periods})
+    periods : int, optional
+        Number of periods after P0 to include (P1 to P{periods}). If not provided,
+        defaults to 60 periods for monthly models and 20 periods for quarterly models
+        (approximately five years of data).
         
     Returns
     -------
@@ -1888,15 +1935,24 @@ def get_scenario_driver_data(model, scen_set: str, scen_name: str, driver_names:
         if jump_off_date is not None:
             # Convert to pandas timestamp if needed
             jump_off_date = pd.to_datetime(jump_off_date)
-            
-            # Calculate end date (P{periods} after jump-off)
+
             # Determine frequency from model
             model_freq = getattr(model.dm, 'freq', 'M')
+
+            # Resolve default horizon when not explicitly provided
+            if periods is None:
+                periods = 60 if model_freq == 'M' else 20
+
+            if periods <= 0:
+                return driver_data if not driver_data.empty else None
+
+            # Calculate end date to include exactly `periods` data points starting from P0
+            horizon = max(periods - 1, 0)
             if model_freq == 'M':
-                end_date = jump_off_date + pd.DateOffset(months=periods)
+                end_date = jump_off_date + pd.DateOffset(months=horizon)
             else:  # Quarterly
-                end_date = jump_off_date + pd.DateOffset(months=periods*3)
-            
+                end_date = jump_off_date + pd.DateOffset(months=horizon * 3)
+
             # Filter data to P0 to P{periods} range
             mask = (driver_data.index >= jump_off_date) & (driver_data.index <= end_date)
             driver_data = driver_data.loc[mask]

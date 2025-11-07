@@ -180,8 +180,8 @@ class SensitivityTest:
         """
         Get standard deviations for all parameters suitable for input sensitivity testing.
         
-        Calculates standard deviations from self.model.X_full up to self.dm.scen_p0
-        for parameters in self.param_names.
+        Calculates standard deviations from the in-sample design matrix (self.model.X_in)
+        up to self.dm.scen_p0 for parameters in self.param_names.
         
         Returns
         -------
