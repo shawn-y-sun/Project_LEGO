@@ -637,9 +637,64 @@ class ModelBase(ABC):
         if strict:
             missing = [idx for idx in converted_idx if idx not in target_index]
             if missing:
-                raise ValueError(f"Outlier indices {missing} not in the provided index.")
+                # Allow outlier labels that refer to known indices outside of the
+                # currently inspected slice (e.g., out-of-sample periods when
+                # processing in-sample data). Only raise an error for labels that
+                # cannot be found anywhere across the model's known indices.
+                known_index = self._collect_known_indices()
+                unresolved = [idx for idx in missing if idx not in known_index]
+                if unresolved:
+                    raise ValueError(
+                        "Outlier indices {} not in the provided index or any known "
+                        "model indices.".format(unresolved)
+                    )
 
         return existing_outliers
+
+    def _collect_known_indices(self) -> pd.Index:
+        """
+        Gather the union of indices known to the model instance.
+
+        Returns
+        -------
+        pd.Index
+            Union of in-sample, out-of-sample, cached data, and target indices
+            that the model is aware of. When no indices are available an empty
+            :class:`pandas.Index` is returned.
+
+        Notes
+        -----
+        This helper supports outlier handling by ensuring that outlier labels
+        are only considered invalid if they are completely unknown to the
+        model, rather than simply absent from a specific slice of data.
+        """
+        indices: List[pd.Index] = []
+
+        if self.dm is not None:
+            # NOTE: DataManager exposes dedicated in/out sample index series.
+            if hasattr(self.dm, "in_sample_idx") and self.dm.in_sample_idx is not None:
+                indices.append(pd.Index(self.dm.in_sample_idx))
+            if hasattr(self.dm, "out_sample_idx") and self.dm.out_sample_idx is not None:
+                indices.append(pd.Index(self.dm.out_sample_idx))
+            if hasattr(self.dm, "p0") and self.dm.p0 is not None:
+                indices.append(pd.Index([self.dm.p0]))
+            if hasattr(self.dm, "internal_data") and self.dm.internal_data is not None:
+                indices.append(pd.Index(self.dm.internal_data.index))
+
+        # Include cached feature/target matrices supplied directly by the caller.
+        for cached in (self._X_cache, self._y_cache, self._X_out_cache, self._y_out_cache):
+            if cached is not None:
+                indices.append(pd.Index(cached.index))
+
+        if not indices:
+            return pd.Index([])
+
+        # Merge indices sequentially to preserve dtype information.
+        combined_index = indices[0]
+        for extra in indices[1:]:
+            combined_index = combined_index.union(extra)
+
+        return combined_index
 
     def _apply_outlier_handling(
         self,
