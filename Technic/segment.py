@@ -1,4 +1,10 @@
-# TECHNIC/segment.py
+# =============================================================================
+# module: segment.py
+# Purpose: Manage candidate model construction, evaluation, and visualization workflows.
+# Key Types/Classes: Segment
+# Key Functions: build_cm, plot_vars, explore_vars, export
+# Dependencies: warnings, pandas, numpy, matplotlib.pyplot, math, typing, pathlib, internal modules
+# =============================================================================
 import warnings
 warnings.simplefilter(action="ignore", category=FutureWarning)
 import pandas as pd
@@ -26,6 +32,7 @@ from .export import (
     ExportManager
 )
 from .periods import resolve_periods_argument
+from .plot import _plot_segmented_series
 
 
 class Segment:
@@ -475,32 +482,49 @@ class Segment:
         else:  # sample == 'full'
             target_idx = self.dm.in_sample_idx.union(self.dm.out_sample_idx)
 
-        target_series = self.dm.internal_data.loc[target_idx, self.target]
+        target_series_full = self.dm.internal_data.loc[target_idx, self.target]
+        target_series_plot = target_series_full.copy()
 
         if outlier_labels is not None:
-            target_series = target_series.drop(labels=outlier_labels, errors='ignore')
+            # NOTE: Retain original index positions in the plotting series so NaNs
+            # create visible gaps while still excluding these observations from
+            # correlation calculations.
+            target_series_plot.loc[target_series_plot.index.isin(outlier_labels)] = np.nan
+            target_series = target_series_full.drop(labels=outlier_labels, errors='ignore')
+        else:
+            target_series = target_series_full
 
         # Apply date range filter to target if specified
         if date_range:
             start_date, end_date = date_range
             start_date = pd.to_datetime(start_date)
             end_date = pd.to_datetime(end_date)
-            
+
+            mask_plot = (target_series_plot.index >= start_date) & (target_series_plot.index <= end_date)
+            target_series_plot = target_series_plot[mask_plot]
+
             mask = (target_series.index >= start_date) & (target_series.index <= end_date)
             target_series = target_series[mask]
+        else:
+            start_date = end_date = None
 
         for var_name, df in var_dfs.items():
             df = df.copy()
+            df_plot = df.copy()
 
             if outlier_labels is not None:
+                df_plot.loc[df_plot.index.isin(outlier_labels), :] = np.nan
                 df = df.drop(index=outlier_labels, errors='ignore')
 
             # Apply date range filter to variable data if specified
             if date_range:
+                mask_plot = (df_plot.index >= start_date) & (df_plot.index <= end_date)
+                df_plot = df_plot[mask_plot]
+
                 mask = (df.index >= start_date) & (df.index <= end_date)
                 df = df[mask]
 
-            # Align df and target to their common index
+            # Align df and target to their common index for correlation computations
             common_idx = df.index.intersection(target_series.index)
             df_aligned = df.loc[common_idx]
             ts_aligned = target_series.loc[common_idx]
@@ -539,7 +563,7 @@ class Segment:
                 # Calculate correlation
                 var_series = df_aligned[col]
                 target_series_aligned = ts_aligned
-                
+
                 # Remove NaN values for correlation calculation
                 combined = pd.concat([var_series, target_series_aligned], axis=1).dropna()
                 if len(combined) > 1:
@@ -548,28 +572,36 @@ class Segment:
                     corr_text = f"Corr: {corr:.2f}"
                 else:
                     corr_text = "Corr: N/A"
-                
+
                 # Set subplot title with correlation
                 ax.set_title(f"{col} - {corr_text}")
 
                 if plot_type == 'line':
                     # primary vs secondary y-axis
-                    line1, = ax.plot(
-                        ts_aligned.index,
-                        ts_aligned,
+                    plot_index = target_series_plot.index.union(df_plot.index)
+                    target_plot_aligned = target_series_plot.reindex(plot_index)
+                    var_plot_aligned = df_plot[col].reindex(plot_index)
+
+                    _plot_segmented_series(
+                        ax,
+                        target_plot_aligned,
                         color='tab:blue',
                         label=self.target,
                         linewidth=2
                     )
                     ax2 = ax.twinx()
-                    line2, = ax2.plot(
-                        df_aligned.index,
-                        df_aligned[col],
+                    _plot_segmented_series(
+                        ax2,
+                        var_plot_aligned,
                         color='tab:orange',
                         label=col,
                         linewidth=2
                     )
-                    ax.legend(handles=[line1, line2], loc='best')
+
+                    # Synchronize legend entries across twin axes for consistency
+                    handles_1, labels_1 = ax.get_legend_handles_labels()
+                    handles_2, labels_2 = ax2.get_legend_handles_labels()
+                    ax.legend(handles=handles_1 + handles_2, labels=labels_1 + labels_2, loc='best')
 
                     # remove all axis labels
                     ax.set_xlabel('')
