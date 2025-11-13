@@ -573,6 +573,9 @@ class ModelBase(ABC):
         When has_lookback_var is True, uses rolling_predict to generate predictions
         that account for conditional variable effects.
 
+        Any configured outlier periods are masked with ``NaN`` so callers do not
+        inadvertently use predictions for excluded observations.
+
         Returns empty Series if X_out is empty.
         """
         if self.X_out.empty:
@@ -590,9 +593,12 @@ class ModelBase(ABC):
                 y=self.y_full,
                 time_frame=oos_time_frame
             )
-            return y_pred
+            # Mask any configured outliers so downstream consumers do not attempt
+            # to use predictions for periods that should be ignored.
+            return self._apply_outlier_handling(y_pred, strict=False, drop=False)
 
-        return self.predict(self.X_out)
+        preds = self.predict(self.X_out)
+        return self._apply_outlier_handling(preds, strict=False, drop=False)
 
     def _normalize_outlier_index(self, target_index: pd.Index, *, strict: bool = True) -> List[Any]:
         """
@@ -637,9 +643,64 @@ class ModelBase(ABC):
         if strict:
             missing = [idx for idx in converted_idx if idx not in target_index]
             if missing:
-                raise ValueError(f"Outlier indices {missing} not in the provided index.")
+                # Allow outlier labels that refer to known indices outside of the
+                # currently inspected slice (e.g., out-of-sample periods when
+                # processing in-sample data). Only raise an error for labels that
+                # cannot be found anywhere across the model's known indices.
+                known_index = self._collect_known_indices()
+                unresolved = [idx for idx in missing if idx not in known_index]
+                if unresolved:
+                    raise ValueError(
+                        "Outlier indices {} not in the provided index or any known "
+                        "model indices.".format(unresolved)
+                    )
 
         return existing_outliers
+
+    def _collect_known_indices(self) -> pd.Index:
+        """
+        Gather the union of indices known to the model instance.
+
+        Returns
+        -------
+        pd.Index
+            Union of in-sample, out-of-sample, cached data, and target indices
+            that the model is aware of. When no indices are available an empty
+            :class:`pandas.Index` is returned.
+
+        Notes
+        -----
+        This helper supports outlier handling by ensuring that outlier labels
+        are only considered invalid if they are completely unknown to the
+        model, rather than simply absent from a specific slice of data.
+        """
+        indices: List[pd.Index] = []
+
+        if self.dm is not None:
+            # NOTE: DataManager exposes dedicated in/out sample index series.
+            if hasattr(self.dm, "in_sample_idx") and self.dm.in_sample_idx is not None:
+                indices.append(pd.Index(self.dm.in_sample_idx))
+            if hasattr(self.dm, "out_sample_idx") and self.dm.out_sample_idx is not None:
+                indices.append(pd.Index(self.dm.out_sample_idx))
+            if hasattr(self.dm, "p0") and self.dm.p0 is not None:
+                indices.append(pd.Index([self.dm.p0]))
+            if hasattr(self.dm, "internal_data") and self.dm.internal_data is not None:
+                indices.append(pd.Index(self.dm.internal_data.index))
+
+        # Include cached feature/target matrices supplied directly by the caller.
+        for cached in (self._X_cache, self._y_cache, self._X_out_cache, self._y_out_cache):
+            if cached is not None:
+                indices.append(pd.Index(cached.index))
+
+        if not indices:
+            return pd.Index([])
+
+        # Merge indices sequentially to preserve dtype information.
+        combined_index = indices[0]
+        for extra in indices[1:]:
+            combined_index = combined_index.union(extra)
+
+        return combined_index
 
     def _apply_outlier_handling(
         self,
