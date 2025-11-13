@@ -573,6 +573,9 @@ class ModelBase(ABC):
         When has_lookback_var is True, uses rolling_predict to generate predictions
         that account for conditional variable effects.
 
+        Any configured outlier periods are masked with ``NaN`` so callers do not
+        inadvertently use predictions for excluded observations.
+
         Returns empty Series if X_out is empty.
         """
         if self.X_out.empty:
@@ -590,9 +593,12 @@ class ModelBase(ABC):
                 y=self.y_full,
                 time_frame=oos_time_frame
             )
-            return y_pred
+            # Mask any configured outliers so downstream consumers do not attempt
+            # to use predictions for periods that should be ignored.
+            return self._apply_outlier_handling(y_pred, strict=False, drop=False)
 
-        return self.predict(self.X_out)
+        preds = self.predict(self.X_out)
+        return self._apply_outlier_handling(preds, strict=False, drop=False)
 
     def _normalize_outlier_index(self, target_index: pd.Index, *, strict: bool = True) -> List[Any]:
         """
