@@ -409,7 +409,8 @@ class Segment:
         vars_list: List[str],
         plot_type: str = 'line',
         sample: str = 'full',
-        date_range: Optional[Tuple[str, str]] = None
+        date_range: Optional[Tuple[str, str]] = None,
+        outlier_idx: Optional[Sequence[Any]] = None
     ) -> None:
         """
         Create exploratory plots comparing variables and their transformations to the target.
@@ -434,6 +435,10 @@ class Segment:
         date_range : Tuple[str, str], optional
             Date range for zooming in, e.g., ('2020-05-31', '2022-02-28').
             If provided, plots and correlations will be calculated only for this period.
+        outlier_idx : Sequence[Any], optional
+            Iterable of index labels representing observations to exclude from plotting
+            and correlation calculations. Labels must match those in the modeling
+            DataFrame index. Useful for removing anomalous dates prior to visualization.
 
         Example
         -------
@@ -443,27 +448,38 @@ class Segment:
         ... )
         >>> # This creates 3 separate figures:
         >>> # Figure 1: GDP and all its transformations vs target
-        >>> # Figure 2: UNRATE and all its transformations vs target  
+        >>> # Figure 2: UNRATE and all its transformations vs target
         >>> # Figure 3: CPI and all its transformations vs target
-        >>> 
+        >>>
         >>> # Create scatter plots for specific period
         >>> segment.plot_vars(
         ...     vars_list=["GDP", "UNRATE"],
         ...     plot_type="scatter",
-        ...     date_range=("2020-01-01", "2022-12-31")
+        ...     date_range=("2020-01-01", "2022-12-31"),
+        ...     outlier_idx=["2020-03-31"]
         ... )
         """
         # Generate transformations for each variable (no lags, minimal periods)
         var_dfs = self.dm.build_search_vars(vars_list, max_lag=0, periods=[1])
-        
+
+        outlier_labels: Optional[pd.Index]
+        if outlier_idx is None:
+            outlier_labels = None
+        else:
+            # NOTE: Ensure fast membership checks and alignment-safe removal.
+            outlier_labels = pd.Index(outlier_idx)
+
         # Get target data based on sample
         if sample == 'in':
             target_idx = self.dm.in_sample_idx
         else:  # sample == 'full'
             target_idx = self.dm.in_sample_idx.union(self.dm.out_sample_idx)
-        
+
         target_series = self.dm.internal_data.loc[target_idx, self.target]
-        
+
+        if outlier_labels is not None:
+            target_series = target_series.drop(labels=outlier_labels, errors='ignore')
+
         # Apply date range filter to target if specified
         if date_range:
             start_date, end_date = date_range
@@ -474,11 +490,16 @@ class Segment:
             target_series = target_series[mask]
 
         for var_name, df in var_dfs.items():
+            df = df.copy()
+
+            if outlier_labels is not None:
+                df = df.drop(index=outlier_labels, errors='ignore')
+
             # Apply date range filter to variable data if specified
             if date_range:
                 mask = (df.index >= start_date) & (df.index <= end_date)
                 df = df[mask]
-            
+
             # Align df and target to their common index
             common_idx = df.index.intersection(target_series.index)
             df_aligned = df.loc[common_idx]
@@ -588,11 +609,13 @@ class Segment:
         sample: str = 'full',
         plot_type: str = 'line',
         date_range: Optional[Tuple[str, str]] = None,
+        plot: bool = True,
+        outlier_idx: Optional[Sequence[Any]] = None,
         **legacy_kwargs: Any
     ) -> pd.DataFrame:
         """
         Explore variables by creating plots and returning correlation analysis.
-        
+
         This method consolidates the functionality of plot_vars() and get_corr() methods.
         It generates transformation specifications for variables, creates exploratory plots,
         and returns a DataFrame with correlation rankings.
@@ -621,6 +644,15 @@ class Segment:
         date_range : Tuple[str, str], optional
             Date range for zooming in, e.g., ('2020-05-31', '2022-02-28').
             If provided, plots and correlations will be calculated only for this period.
+        plot : bool, default True
+            Flag indicating whether to generate plots via :meth:`plot_vars` before
+            running the correlation analysis. Set to ``False`` to skip plotting when
+            only tabular correlations are required.
+        outlier_idx : Sequence[Any], optional
+            Iterable of index labels representing observations to exclude from both the
+            plotting step and correlation analysis. Labels must match those in the
+            modeling DataFrame index. Useful for omitting anomalous periods before
+            ranking transformations.
 
         Returns
         -------
@@ -642,16 +674,27 @@ class Segment:
         ...     vars_list=['GDP', 'UNRATE'],
         ...     plot_type='scatter',
         ...     periods=[1, 3, 6, 12],
-        ...     date_range=('2020-01-01', '2022-12-31')
+        ...     date_range=('2020-01-01', '2022-12-31'),
+        ...     outlier_idx=['2020-03-31']
         ... )
         """
-        # First create the plots
-        self.plot_vars(
-            vars_list=vars_list,
-            plot_type=plot_type,
-            sample=sample,
-            date_range=date_range
-        )
+        outlier_labels: Optional[pd.Index]
+        if outlier_idx is None:
+            outlier_labels = None
+        else:
+            # NOTE: Preserve user-specified labels for consistent filtering across steps.
+            outlier_labels = pd.Index(outlier_idx)
+
+        # First create the plots when requested. This keeps backward compatibility
+        # with the original behavior while allowing callers to opt out of plotting.
+        if plot:
+            self.plot_vars(
+                vars_list=vars_list,
+                plot_type=plot_type,
+                sample=sample,
+                date_range=date_range,
+                outlier_idx=outlier_labels
+            )
 
         legacy_max_periods = legacy_kwargs.pop("max_periods", None)
         if legacy_kwargs:
@@ -677,9 +720,12 @@ class Segment:
             target_idx = self.dm.in_sample_idx
         else:  # sample == 'full'
             target_idx = self.dm.in_sample_idx.union(self.dm.out_sample_idx)
-        
+
         target_data = self.dm.internal_data.loc[target_idx, self.target]
-        
+
+        if outlier_labels is not None:
+            target_data = target_data.drop(labels=outlier_labels, errors='ignore')
+
         # Apply date range filter if specified
         if date_range:
             start_date, end_date = date_range
@@ -691,13 +737,18 @@ class Segment:
         
         # Calculate correlations for all transformations
         corr_results = []
-        
+
         for var_name, var_df in var_dfs.items():
+            var_df = var_df.copy()
+
+            if outlier_labels is not None:
+                var_df = var_df.drop(index=outlier_labels, errors='ignore')
+
             # Apply same date range filter to variable data
             if date_range:
                 mask = (var_df.index >= start_date) & (var_df.index <= end_date)
                 var_df = var_df[mask]
-            
+
             # Align with target data
             common_idx = var_df.index.intersection(target_data.index)
             var_aligned = var_df.loc[common_idx]
