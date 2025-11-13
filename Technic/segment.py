@@ -1807,3 +1807,142 @@ class Segment:
                         self.cms[new_id] = cm
 
         return None
+
+    def rerank_cms(
+        self,
+        rank_weights: Tuple[float, float, float],
+        all_passed: bool = True,
+        override: bool = False,
+        top_n: int = 10,
+        sample: str = 'in'
+    ) -> List[CM]:
+        """
+        Re-compute rankings for candidate models using new weights.
+
+        Parameters
+        ----------
+        rank_weights : Tuple[float, float, float]
+            Weights for (Fit Measures, IS Error, OOS Error) used during ranking.
+        all_passed : bool, default True
+            When ``True``, include every CM stored in ``self.searcher.passed_cms``.
+            When ``False``, limit the re-ranking to models currently in
+            ``self.cms``.
+        override : bool, default False
+            If ``True``, replace ``self.cms`` and ``self.searcher.top_cms`` with
+            the newly ranked ``top_n`` models.
+        top_n : int, default 10
+            Number of models to display and return from the refreshed ranking.
+        sample : {'in', 'full'}, default 'in'
+            Sample to use when retrieving diagnostics for ranking. Choose
+            ``'in'`` for in-sample diagnostics or ``'full'`` for full-sample.
+
+        Returns
+        -------
+        List[CM]
+            The top ``top_n`` candidate models ordered by the refreshed
+            composite score.
+
+        Raises
+        ------
+        RuntimeError
+            If no search has been performed or if there are no models to rank.
+
+        Examples
+        --------
+        >>> # After running search_cms(...)
+        >>> refreshed = segment.rerank_cms(
+        ...     rank_weights=(0.4, 0.4, 0.2),
+        ...     all_passed=True,
+        ...     top_n=5
+        ... )
+        >>> refreshed[0].model_id
+        'cm1'
+        """
+        if self.searcher is None:
+            raise RuntimeError(
+                "Cannot rerank candidate models before running a search."
+            )
+
+        # Determine which candidate models participate in the re-ranking.
+        if all_passed:
+            passed_cms = getattr(self.searcher, 'passed_cms', None)
+            if not passed_cms:
+                raise RuntimeError(
+                    "ModelSearch has no passed candidate models to rerank."
+                )
+            candidate_cms: List[CM] = list(passed_cms)
+        else:
+            if not self.cms:
+                raise RuntimeError(
+                    "Segment has no candidate models to rerank."
+                )
+            candidate_cms = list(self.cms.values())
+
+        # Track existing models to identify newly promoted entries when
+        # re-ranking across all passed combinations.
+        existing_obj_ids: Set[int] = {id(cm) for cm in self.cms.values()}
+
+        # Assign temporary identifiers to avoid collisions during ranking while
+        # preserving object identity for later reassignment.
+        temp_to_cm: Dict[str, CM] = {}
+        for idx, cm in enumerate(candidate_cms):
+            temp_id = f"temp_{idx}"
+            temp_to_cm[temp_id] = cm
+            cm.model_id = temp_id
+
+        df_ranked = self.searcher.rank_cms(candidate_cms, sample, rank_weights)
+
+        ordered_temp_ids = df_ranked['model_id'].tolist()
+        ordered_cms = [temp_to_cm[temp_id] for temp_id in ordered_temp_ids]
+
+        # Reassign sequential model identifiers based on refreshed ranking.
+        df_updated = df_ranked.copy()
+        for idx, cm in enumerate(ordered_cms):
+            new_id = f"cm{idx + 1}"
+            cm.model_id = new_id
+            df_updated.at[idx, 'model_id'] = new_id
+
+        # Derive the refreshed top-N models and update search state to reflect
+        # the latest ranking outcome.
+        top_limit = min(top_n, len(ordered_cms))
+        top_models = ordered_cms[:top_limit]
+        self.top_cms = top_models
+        self.searcher.top_cms = top_models
+        if all_passed:
+            self.searcher.passed_cms = ordered_cms
+        self.searcher.df_scores = df_updated
+
+        # Persist cms registry depending on override preference.
+        if override:
+            self.cms.clear()
+            for cm in top_models:
+                self.cms[cm.model_id] = cm
+        else:
+            self.cms.clear()
+            for cm in ordered_cms:
+                self.cms[cm.model_id] = cm
+
+        print("=== Updated Ranked Results ===")
+        print(df_updated.head(top_limit).to_string(index=False))
+
+        print(f"\n=== Top {top_limit} Model Formulas ===")
+        for cm in top_models:
+            print(f"{cm.model_id}: {cm.formula}")
+
+        # Highlight newly promoted models when re-ranking across all passed CMs.
+        if all_passed:
+            order_list = df_updated['model_id'].tolist()
+            pos_map = {mid: (i + 1) for i, mid in enumerate(order_list)}
+            newly_added = [
+                (cm.model_id, pos_map.get(cm.model_id))
+                for cm in top_models
+                if id(cm) not in existing_obj_ids
+            ]
+            if newly_added:
+                print("\nNew models entering the top list:")
+                formatted = ", ".join(
+                    f"{mid} (#{rank})" for mid, rank in newly_added
+                )
+                print(formatted)
+
+        return top_models
