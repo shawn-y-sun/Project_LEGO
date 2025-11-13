@@ -524,6 +524,13 @@ class Segment:
                 mask = (df.index >= start_date) & (df.index <= end_date)
                 df = df[mask]
 
+            # NOTE: Keep variable data constrained to the same timeline as the target.
+            # Without this alignment, the secondary axis could include observations
+            # outside the selected sample, causing plots to display the full series
+            # even when no date range is provided.
+            df_plot = df_plot.loc[df_plot.index.intersection(target_series_plot.index)]
+            df = df.loc[df.index.intersection(target_series.index)]
+
             # Align df and target to their common index for correlation computations
             common_idx = df.index.intersection(target_series.index)
             df_aligned = df.loc[common_idx]
