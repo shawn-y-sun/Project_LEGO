@@ -3,14 +3,16 @@
 # Purpose: Manage candidate model construction, evaluation, and visualization workflows.
 # Key Types/Classes: Segment
 # Key Functions: build_cm, plot_vars, explore_vars, export
-# Dependencies: warnings, pandas, numpy, matplotlib.pyplot, math, typing, pathlib, internal modules
+# Dependencies: warnings, pandas, numpy, matplotlib.pyplot, math, inspect, copy, typing, pathlib, internal modules
 # =============================================================================
 import warnings
 warnings.simplefilter(action="ignore", category=FutureWarning)
+import inspect
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import math
+from copy import deepcopy
 from typing import Type, Dict, List, Optional, Any, Union, Callable, Tuple, Set, Sequence
 from pathlib import Path
 
@@ -33,6 +35,7 @@ from .export import (
 )
 from .periods import resolve_periods_argument
 from .plot import _plot_segmented_series
+from .pretest import PreTestSet, FeatureTest
 
 
 class Segment:
@@ -229,7 +232,85 @@ class Segment:
         cm.build(specs, sample=sample, outlier_idx=cleaned_outliers)
         self.cms[cm_id] = cm
         return cm
-    
+
+    def _resolve_model_pretestset(self) -> Optional[PreTestSet]:
+        """Return a deep copy of the default pre-test bundle for ``model_cls``."""
+
+        if self.model_cls is None:
+            return None
+
+        try:
+            signature = inspect.signature(self.model_cls.__init__)
+        except (TypeError, ValueError):
+            return None
+
+        parameter = signature.parameters.get("pretestset")
+        if parameter is None or parameter.default is inspect._empty:
+            return None
+
+        default_bundle = parameter.default
+        if default_bundle is None:
+            return None
+
+        return deepcopy(default_bundle)
+
+    def _run_target_pretest(self, pretestset: Optional[PreTestSet]) -> Optional[Any]:
+        """Execute the configured target pre-test and print the result."""
+
+        if pretestset is None or pretestset.target_test is None:
+            return None
+
+        target_test = pretestset.target_test
+        if target_test.dm is None:
+            target_test.dm = self.dm
+        if target_test.target is None:
+            target_test.target = self.target
+
+        try:
+            result = target_test.test_filter
+        except Exception as exc:
+            print(f"Target pre-test raised {type(exc).__name__}: {exc}")
+            return None
+
+        description = ""
+        if hasattr(result, "attrs"):
+            description = result.attrs.get("filter_mode_desc", "") or ""
+        if not description and hasattr(result, "filter_mode_desc"):
+            description = getattr(result, "filter_mode_desc", "")
+
+        print("--- Target Pre-Test Result ---")
+        if description:
+            print(description)
+        print(result)
+        print("")
+
+        return result
+
+    def _prepare_feature_pretest(
+        self,
+        pretestset: Optional[PreTestSet],
+        target_pretest_result: Optional[Any]
+    ) -> Optional[FeatureTest]:
+        """Align the feature pre-test with the current data context."""
+
+        if pretestset is None:
+            return None
+
+        feature_test = pretestset.feature_test
+        if feature_test is None:
+            return None
+
+        if feature_test.dm is not self.dm:
+            feature_test.dm = self.dm
+
+        if (
+            getattr(feature_test, "target_test_result", None) is None
+            and target_pretest_result is not None
+        ):
+            feature_test.target_test_result = target_pretest_result
+
+        return feature_test
+
     def remove_cm(self, cm_ids: Union[str, List[str]]) -> None:
         """
         Remove one or more candidate models from this segment.
@@ -649,6 +730,8 @@ class Segment:
         plot_type: str = 'line',
         date_range: Optional[Tuple[str, str]] = None,
         plot: bool = True,
+        pretest: bool = False,
+        print_pretest: bool = False,
         outlier_idx: Optional[Sequence[Any]] = None,
         **legacy_kwargs: Any
     ) -> pd.DataFrame:
@@ -687,6 +770,13 @@ class Segment:
             Flag indicating whether to generate plots via :meth:`plot_vars` before
             running the correlation analysis. Set to ``False`` to skip plotting when
             only tabular correlations are required.
+        pretest : bool, default False
+            When ``True``, execute the target and feature pre-tests defined on
+            ``self.model_cls`` (if any) before calculating correlations. Features
+            failing validation are omitted from the output.
+        print_pretest : bool, default False
+            When ``True`` and ``pretest`` is enabled, print a summary of excluded
+            features mirroring the :class:`ModelSearch` reporting style.
         outlier_idx : Sequence[Any], optional
             Iterable of index labels representing observations to exclude from both the
             plotting step and correlation analysis. Labels must match those in the
@@ -758,6 +848,18 @@ class Segment:
             max_lag=max_lag,
             periods=resolved_periods
         )
+
+        feature_test: Optional[FeatureTest] = None
+        excluded_features: List[str] = []
+        excluded_seen: Set[str] = set()
+        pretest_cache: Dict[str, bool] = {}
+        if pretest:
+            model_pretestset = self._resolve_model_pretestset()
+            target_pretest_result = self._run_target_pretest(model_pretestset)
+            feature_test = self._prepare_feature_pretest(
+                model_pretestset,
+                target_pretest_result
+            )
         
         # Get target data based on sample
         if sample == 'in':
@@ -799,6 +901,28 @@ class Segment:
             target_aligned = target_data.loc[common_idx]
             
             for col in var_aligned.columns:
+                if feature_test is not None:
+                    cache_key = repr(col)
+                    if cache_key in pretest_cache:
+                        passes_feature = pretest_cache[cache_key]
+                    else:
+                        feature_test.feature = col
+                        try:
+                            passes_feature = bool(feature_test.test_filter)
+                        except Exception as exc:
+                            print(
+                                "Feature pre-test raised "
+                                f"{type(exc).__name__} for {col!r}: {exc}"
+                            )
+                            passes_feature = True
+                        pretest_cache[cache_key] = passes_feature
+
+                    if not passes_feature:
+                        if cache_key not in excluded_seen:
+                            excluded_features.append(cache_key)
+                            excluded_seen.add(cache_key)
+                        continue
+
                 # Calculate correlation, handling NaN values
                 combined = pd.concat([var_aligned[col], target_aligned], axis=1).dropna()
                 if len(combined) > 1:
@@ -814,11 +938,20 @@ class Segment:
                     'corr': corr,
                     'abs_corr': abs(corr)
                 })
-        
+
+        if feature_test is not None and excluded_features and print_pretest:
+            print("--- Feature Pre-Test Exclusions ---")
+            print(
+                "Excluded "
+                f"{len(excluded_features)} variant(s): "
+                + ", ".join(excluded_features)
+            )
+            print("")
+
         # Create result DataFrame and sort by absolute correlation
         result_df = pd.DataFrame(corr_results)
         result_df = result_df.sort_values('abs_corr', ascending=False).reset_index(drop=True)
-        
+
         return result_df
 
     def export(
