@@ -906,7 +906,8 @@ class Segment:
                     if cache_key in pretest_cache:
                         passes_feature = pretest_cache[cache_key]
                     else:
-                        feature_test.feature = col
+                        feature_series = var_aligned[col].copy()
+                        feature_test.feature = feature_series
                         try:
                             passes_feature = bool(feature_test.test_filter)
                         except Exception as exc:
