@@ -740,11 +740,16 @@ class Segment:
             unexpected = ", ".join(sorted(legacy_kwargs.keys()))
             raise TypeError(f"Unexpected keyword arguments: {unexpected}")
 
+        # Respect explicit caller intent for quarterly data by only forcing the
+        # default quarterly floor when no custom periods (including legacy
+        # ``max_periods``) are supplied. The previous implementation always
+        # enforced ``[1, 2, 3, 4]`` which prevented users from narrowing the
+        # window to values such as ``[1]``.
         resolved_periods = resolve_periods_argument(
             self.dm.freq,
             periods,
             legacy_max_periods=legacy_max_periods,
-            ensure_quarterly_floor=True
+            ensure_quarterly_floor=(periods is None and legacy_max_periods is None)
         )
 
         # Generate all possible transformations for each variable
@@ -1506,7 +1511,7 @@ class Segment:
             self.dm.freq,
             periods,
             legacy_max_periods=legacy_max_periods,
-            ensure_quarterly_floor=True
+            ensure_quarterly_floor=(periods is None and legacy_max_periods is None)
         )
 
         # Build all possible transformations for the variables
