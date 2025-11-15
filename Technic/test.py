@@ -1,6 +1,8 @@
 # =============================================================================
 # module: test.py
 # Purpose: Model testing framework with base and concrete test implementations
+# Key Types/Classes: ModelTestBase, StationarityTest, CoefTest
+# Key Functions: _adf_test_fn, _pp_test_fn, stationarity_test_dict
 # Dependencies: pandas, statsmodels, scipy, abc, typing
 # =============================================================================
 from abc import ABC, abstractmethod
@@ -14,6 +16,7 @@ from statsmodels.stats.diagnostic import acorr_breusch_godfrey, het_breuschpagan
 from scipy.stats import shapiro, kstest, cramervonmises
 from statsmodels.tsa.stattools import adfuller, zivot_andrews, range_unit_root_test, kpss
 from arch.unitroot import PhillipsPerron, DFGLS, engle_granger
+from arch.unitroot.unitroot import InfeasibleTestException
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 import warnings
@@ -736,12 +739,24 @@ class StationarityTest(ModelTestBase):
         │ ADF  │   …      │   …     │  True  │
         │ PP   │   …      │   …     │  True  │
         └──────┴──────────┴─────────┴────────┘
+
+        Notes
+        -----
+        If a diagnostic raises ``InfeasibleTestException`` (typically from the
+        Phillips–Perron routine on very short samples), the statistic and
+        p-value are recorded as ``None`` and the check is marked as failed so
+        downstream filters can handle the edge case gracefully.
         """
         records = []
         for name, func in self.test_dict.items():
-            stat, pvalue = func(self.series)
-            alpha, direction = self.thresholds[name]
-            passed = pvalue < alpha if direction == '<' else pvalue > alpha
+            try:
+                stat, pvalue = func(self.series)
+                alpha, direction = self.thresholds[name]
+                passed = pvalue < alpha if direction == '<' else pvalue > alpha
+            except InfeasibleTestException:
+                # Short samples can make long-run covariance estimators infeasible;
+                # mark the test as failed while returning explicit null diagnostics.
+                stat, pvalue, passed = None, None, False
             records.append({
                 'Test': name,
                 'Statistic': stat,

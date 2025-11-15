@@ -446,7 +446,7 @@ def _coerce_numeric_series(series: pd.Series, context_label: str) -> pd.Series:
 
 
 def ppnr_ols_feature_test_func(
-    feature: Union[str, Feature, TSFM],
+    feature: Union[str, Feature, TSFM, pd.Series, pd.DataFrame],
     dm: DataManager,
     target_test_result: Optional[Any],
     sample: str = "in",
@@ -455,9 +455,11 @@ def ppnr_ols_feature_test_func(
 
     Parameters
     ----------
-    feature : Union[str, Feature, TSFM]
-        Identifier, feature object, or TSFM transform to be materialized via
-        :meth:`DataManager.build_features`.
+    feature : Union[str, Feature, TSFM, pd.Series, pd.DataFrame]
+        Identifier, feature object, TSFM transform, or raw feature history. When
+        a :class:`pandas.Series` or :class:`pandas.DataFrame` is supplied, the
+        observations are evaluated directly without rebuilding via the data
+        manager.
     dm : DataManager
         Data manager that provides feature construction utilities and sample
         indices.
@@ -495,9 +497,23 @@ def ppnr_ols_feature_test_func(
             f"received {sample!r}."
         )
 
-    feature_frame = dm.build_features([feature])
-    if isinstance(feature_frame, pd.Series):
-        feature_frame = feature_frame.to_frame()
+    if isinstance(feature, (pd.Series, pd.DataFrame)):
+        # Accept pre-materialized feature histories so callers can bypass
+        # DataManager feature construction when transformations already exist
+        # in-memory (e.g., Segment.explore_vars). Copies guard against
+        # accidental mutation of caller-owned objects.
+        feature_frame = (
+            feature.to_frame()
+            if isinstance(feature, pd.Series)
+            else feature.copy()
+        )
+        # Ensure Series-provided columns retain a helpful label for logging.
+        if isinstance(feature, pd.Series) and feature_frame.columns.size == 1:
+            feature_frame.columns = [feature.name or "feature"]
+    else:
+        feature_frame = dm.build_features([feature])
+        if isinstance(feature_frame, pd.Series):
+            feature_frame = feature_frame.to_frame()
 
     if feature_frame.empty:
         # No data implies nothing to invalidate; treat as passing.
