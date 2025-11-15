@@ -254,8 +254,30 @@ class Segment:
 
         return deepcopy(default_bundle)
 
-    def _run_target_pretest(self, pretestset: Optional[PreTestSet]) -> Optional[Any]:
-        """Execute the configured target pre-test and print the result."""
+    def _run_target_pretest(
+        self,
+        pretestset: Optional[PreTestSet],
+        *,
+        print_result: bool = True
+    ) -> Optional[Any]:
+        """Execute the configured target pre-test and optionally print the result.
+
+        Parameters
+        ----------
+        pretestset : PreTestSet, optional
+            The pre-test bundle resolved from the active ``model_cls``. When
+            ``None`` or when no target test is present, the method exits early.
+        print_result : bool, default True
+            Flag indicating whether to print the target pre-test output. Set to
+            ``False`` when callers need to suppress console noise (for example
+            during exploratory analysis).
+
+        Returns
+        -------
+        Any, optional
+            The raw result returned by the target pre-test implementation. The
+            concrete type depends on the configured diagnostics.
+        """
 
         if pretestset is None or pretestset.target_test is None:
             return None
@@ -278,11 +300,12 @@ class Segment:
         if not description and hasattr(result, "filter_mode_desc"):
             description = getattr(result, "filter_mode_desc", "")
 
-        print("--- Target Pre-Test Result ---")
-        if description:
-            print(description)
-        print(result)
-        print("")
+        if print_result:
+            print("--- Target Pre-Test Result ---")
+            if description:
+                print(description)
+            print(result)
+            print("")
 
         return result
 
@@ -855,7 +878,10 @@ class Segment:
         pretest_cache: Dict[str, bool] = {}
         if pretest:
             model_pretestset = self._resolve_model_pretestset()
-            target_pretest_result = self._run_target_pretest(model_pretestset)
+            target_pretest_result = self._run_target_pretest(
+                model_pretestset,
+                print_result=False
+            )
             feature_test = self._prepare_feature_pretest(
                 model_pretestset,
                 target_pretest_result
