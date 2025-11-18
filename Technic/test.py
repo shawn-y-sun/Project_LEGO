@@ -747,10 +747,14 @@ class StationarityTest(ModelTestBase):
         p-value are recorded as ``None`` and the check is marked as failed so
         downstream filters can handle the edge case gracefully.
         """
+        # Normalize dtype to float to avoid mixed-int/float dtype issues inside
+        # tests such as Phillips–Perron which expect pure numeric input.
+        series = pd.to_numeric(self.series, errors='coerce').astype(float)
+
         records = []
         for name, func in self.test_dict.items():
             try:
-                stat, pvalue = func(self.series)
+                stat, pvalue = func(series)
                 alpha, direction = self.thresholds[name]
                 passed = pvalue < alpha if direction == '<' else pvalue > alpha
             except InfeasibleTestException:
@@ -1411,7 +1415,9 @@ class CointTest(ModelTestBase):
         
         # Test each X variable (expect non-stationary)
         for col in self.X_vars.columns:
-            series = self.X_vars[col].dropna()
+            # Ensure numeric dtype to prevent unit-root tests from failing when
+            # a column mixes ints and floats.
+            series = pd.to_numeric(self.X_vars[col], errors='coerce').dropna().astype(float)
             if len(series) < 10:  # Skip series that are too short
                 continue
                 
@@ -1472,7 +1478,8 @@ class CointTest(ModelTestBase):
             records.append(record)
         
         # Test residuals (expect stationary)
-        resid_series = self.resids.dropna()
+        # Standardize residual dtype for unit-root diagnostics.
+        resid_series = pd.to_numeric(self.resids, errors='coerce').dropna().astype(float)
         if len(resid_series) >= 10:
             record = {
                 'Type': 'Residuals',
