@@ -1,4 +1,10 @@
-# TECHNIC/segment.py
+# =============================================================================
+# module: segment.py
+# Purpose: Manage candidate model construction, evaluation, and visualization workflows.
+# Key Types/Classes: Segment
+# Key Functions: build_cm, plot_vars, explore_vars, export
+# Dependencies: warnings, pandas, numpy, matplotlib.pyplot, math, typing, pathlib, internal modules
+# =============================================================================
 import warnings
 warnings.simplefilter(action="ignore", category=FutureWarning)
 import pandas as pd
@@ -26,6 +32,7 @@ from .export import (
     ExportManager
 )
 from .periods import resolve_periods_argument
+from .plot import _plot_segmented_series
 
 
 class Segment:
@@ -409,7 +416,8 @@ class Segment:
         vars_list: List[str],
         plot_type: str = 'line',
         sample: str = 'full',
-        date_range: Optional[Tuple[str, str]] = None
+        date_range: Optional[Tuple[str, str]] = None,
+        outlier_idx: Optional[Sequence[Any]] = None
     ) -> None:
         """
         Create exploratory plots comparing variables and their transformations to the target.
@@ -434,6 +442,10 @@ class Segment:
         date_range : Tuple[str, str], optional
             Date range for zooming in, e.g., ('2020-05-31', '2022-02-28').
             If provided, plots and correlations will be calculated only for this period.
+        outlier_idx : Sequence[Any], optional
+            Iterable of index labels representing observations to exclude from plotting
+            and correlation calculations. Labels must match those in the modeling
+            DataFrame index. Useful for removing anomalous dates prior to visualization.
 
         Example
         -------
@@ -443,43 +455,83 @@ class Segment:
         ... )
         >>> # This creates 3 separate figures:
         >>> # Figure 1: GDP and all its transformations vs target
-        >>> # Figure 2: UNRATE and all its transformations vs target  
+        >>> # Figure 2: UNRATE and all its transformations vs target
         >>> # Figure 3: CPI and all its transformations vs target
-        >>> 
+        >>>
         >>> # Create scatter plots for specific period
         >>> segment.plot_vars(
         ...     vars_list=["GDP", "UNRATE"],
         ...     plot_type="scatter",
-        ...     date_range=("2020-01-01", "2022-12-31")
+        ...     date_range=("2020-01-01", "2022-12-31"),
+        ...     outlier_idx=["2020-03-31"]
         ... )
         """
         # Generate transformations for each variable (no lags, minimal periods)
         var_dfs = self.dm.build_search_vars(vars_list, max_lag=0, periods=[1])
-        
+
+        outlier_labels: Optional[pd.Index]
+        if outlier_idx is None:
+            outlier_labels = None
+        else:
+            # NOTE: Ensure fast membership checks and alignment-safe removal.
+            outlier_labels = pd.Index(outlier_idx)
+
         # Get target data based on sample
         if sample == 'in':
             target_idx = self.dm.in_sample_idx
         else:  # sample == 'full'
             target_idx = self.dm.in_sample_idx.union(self.dm.out_sample_idx)
-        
-        target_series = self.dm.internal_data.loc[target_idx, self.target]
-        
+
+        target_series_full = self.dm.internal_data.loc[target_idx, self.target]
+        target_series_plot = target_series_full.copy()
+
+        if outlier_labels is not None:
+            # NOTE: Retain original index positions in the plotting series so NaNs
+            # create visible gaps while still excluding these observations from
+            # correlation calculations.
+            target_series_plot.loc[target_series_plot.index.isin(outlier_labels)] = np.nan
+            target_series = target_series_full.drop(labels=outlier_labels, errors='ignore')
+        else:
+            target_series = target_series_full
+
         # Apply date range filter to target if specified
         if date_range:
             start_date, end_date = date_range
             start_date = pd.to_datetime(start_date)
             end_date = pd.to_datetime(end_date)
-            
+
+            mask_plot = (target_series_plot.index >= start_date) & (target_series_plot.index <= end_date)
+            target_series_plot = target_series_plot[mask_plot]
+
             mask = (target_series.index >= start_date) & (target_series.index <= end_date)
             target_series = target_series[mask]
+        else:
+            start_date = end_date = None
 
         for var_name, df in var_dfs.items():
+            df = df.copy()
+            df_plot = df.copy()
+
+            if outlier_labels is not None:
+                df_plot.loc[df_plot.index.isin(outlier_labels), :] = np.nan
+                df = df.drop(index=outlier_labels, errors='ignore')
+
             # Apply date range filter to variable data if specified
             if date_range:
+                mask_plot = (df_plot.index >= start_date) & (df_plot.index <= end_date)
+                df_plot = df_plot[mask_plot]
+
                 mask = (df.index >= start_date) & (df.index <= end_date)
                 df = df[mask]
-            
-            # Align df and target to their common index
+
+            # NOTE: Keep variable data constrained to the same timeline as the target.
+            # Without this alignment, the secondary axis could include observations
+            # outside the selected sample, causing plots to display the full series
+            # even when no date range is provided.
+            df_plot = df_plot.loc[df_plot.index.intersection(target_series_plot.index)]
+            df = df.loc[df.index.intersection(target_series.index)]
+
+            # Align df and target to their common index for correlation computations
             common_idx = df.index.intersection(target_series.index)
             df_aligned = df.loc[common_idx]
             ts_aligned = target_series.loc[common_idx]
@@ -518,7 +570,7 @@ class Segment:
                 # Calculate correlation
                 var_series = df_aligned[col]
                 target_series_aligned = ts_aligned
-                
+
                 # Remove NaN values for correlation calculation
                 combined = pd.concat([var_series, target_series_aligned], axis=1).dropna()
                 if len(combined) > 1:
@@ -527,28 +579,36 @@ class Segment:
                     corr_text = f"Corr: {corr:.2f}"
                 else:
                     corr_text = "Corr: N/A"
-                
+
                 # Set subplot title with correlation
                 ax.set_title(f"{col} - {corr_text}")
 
                 if plot_type == 'line':
                     # primary vs secondary y-axis
-                    line1, = ax.plot(
-                        ts_aligned.index,
-                        ts_aligned,
+                    plot_index = target_series_plot.index.union(df_plot.index)
+                    target_plot_aligned = target_series_plot.reindex(plot_index)
+                    var_plot_aligned = df_plot[col].reindex(plot_index)
+
+                    _plot_segmented_series(
+                        ax,
+                        target_plot_aligned,
                         color='tab:blue',
                         label=self.target,
                         linewidth=2
                     )
                     ax2 = ax.twinx()
-                    line2, = ax2.plot(
-                        df_aligned.index,
-                        df_aligned[col],
+                    _plot_segmented_series(
+                        ax2,
+                        var_plot_aligned,
                         color='tab:orange',
                         label=col,
                         linewidth=2
                     )
-                    ax.legend(handles=[line1, line2], loc='best')
+
+                    # Synchronize legend entries across twin axes for consistency
+                    handles_1, labels_1 = ax.get_legend_handles_labels()
+                    handles_2, labels_2 = ax2.get_legend_handles_labels()
+                    ax.legend(handles=handles_1 + handles_2, labels=labels_1 + labels_2, loc='best')
 
                     # remove all axis labels
                     ax.set_xlabel('')
@@ -588,11 +648,13 @@ class Segment:
         sample: str = 'full',
         plot_type: str = 'line',
         date_range: Optional[Tuple[str, str]] = None,
+        plot: bool = True,
+        outlier_idx: Optional[Sequence[Any]] = None,
         **legacy_kwargs: Any
     ) -> pd.DataFrame:
         """
         Explore variables by creating plots and returning correlation analysis.
-        
+
         This method consolidates the functionality of plot_vars() and get_corr() methods.
         It generates transformation specifications for variables, creates exploratory plots,
         and returns a DataFrame with correlation rankings.
@@ -621,6 +683,15 @@ class Segment:
         date_range : Tuple[str, str], optional
             Date range for zooming in, e.g., ('2020-05-31', '2022-02-28').
             If provided, plots and correlations will be calculated only for this period.
+        plot : bool, default True
+            Flag indicating whether to generate plots via :meth:`plot_vars` before
+            running the correlation analysis. Set to ``False`` to skip plotting when
+            only tabular correlations are required.
+        outlier_idx : Sequence[Any], optional
+            Iterable of index labels representing observations to exclude from both the
+            plotting step and correlation analysis. Labels must match those in the
+            modeling DataFrame index. Useful for omitting anomalous periods before
+            ranking transformations.
 
         Returns
         -------
@@ -642,27 +713,43 @@ class Segment:
         ...     vars_list=['GDP', 'UNRATE'],
         ...     plot_type='scatter',
         ...     periods=[1, 3, 6, 12],
-        ...     date_range=('2020-01-01', '2022-12-31')
+        ...     date_range=('2020-01-01', '2022-12-31'),
+        ...     outlier_idx=['2020-03-31']
         ... )
         """
-        # First create the plots
-        self.plot_vars(
-            vars_list=vars_list,
-            plot_type=plot_type,
-            sample=sample,
-            date_range=date_range
-        )
+        outlier_labels: Optional[pd.Index]
+        if outlier_idx is None:
+            outlier_labels = None
+        else:
+            # NOTE: Preserve user-specified labels for consistent filtering across steps.
+            outlier_labels = pd.Index(outlier_idx)
+
+        # First create the plots when requested. This keeps backward compatibility
+        # with the original behavior while allowing callers to opt out of plotting.
+        if plot:
+            self.plot_vars(
+                vars_list=vars_list,
+                plot_type=plot_type,
+                sample=sample,
+                date_range=date_range,
+                outlier_idx=outlier_labels
+            )
 
         legacy_max_periods = legacy_kwargs.pop("max_periods", None)
         if legacy_kwargs:
             unexpected = ", ".join(sorted(legacy_kwargs.keys()))
             raise TypeError(f"Unexpected keyword arguments: {unexpected}")
 
+        # Respect explicit caller intent for quarterly data by only forcing the
+        # default quarterly floor when no custom periods (including legacy
+        # ``max_periods``) are supplied. The previous implementation always
+        # enforced ``[1, 2, 3, 4]`` which prevented users from narrowing the
+        # window to values such as ``[1]``.
         resolved_periods = resolve_periods_argument(
             self.dm.freq,
             periods,
             legacy_max_periods=legacy_max_periods,
-            ensure_quarterly_floor=True
+            ensure_quarterly_floor=(periods is None and legacy_max_periods is None)
         )
 
         # Generate all possible transformations for each variable
@@ -677,9 +764,12 @@ class Segment:
             target_idx = self.dm.in_sample_idx
         else:  # sample == 'full'
             target_idx = self.dm.in_sample_idx.union(self.dm.out_sample_idx)
-        
+
         target_data = self.dm.internal_data.loc[target_idx, self.target]
-        
+
+        if outlier_labels is not None:
+            target_data = target_data.drop(labels=outlier_labels, errors='ignore')
+
         # Apply date range filter if specified
         if date_range:
             start_date, end_date = date_range
@@ -691,13 +781,18 @@ class Segment:
         
         # Calculate correlations for all transformations
         corr_results = []
-        
+
         for var_name, var_df in var_dfs.items():
+            var_df = var_df.copy()
+
+            if outlier_labels is not None:
+                var_df = var_df.drop(index=outlier_labels, errors='ignore')
+
             # Apply same date range filter to variable data
             if date_range:
                 mask = (var_df.index >= start_date) & (var_df.index <= end_date)
                 var_df = var_df[mask]
-            
+
             # Align with target data
             common_idx = var_df.index.intersection(target_data.index)
             var_aligned = var_df.loc[common_idx]
@@ -1416,7 +1511,7 @@ class Segment:
             self.dm.freq,
             periods,
             legacy_max_periods=legacy_max_periods,
-            ensure_quarterly_floor=True
+            ensure_quarterly_floor=(periods is None and legacy_max_periods is None)
         )
 
         # Build all possible transformations for the variables
@@ -1724,3 +1819,142 @@ class Segment:
                         self.cms[new_id] = cm
 
         return None
+
+    def rerank_cms(
+        self,
+        rank_weights: Tuple[float, float, float],
+        all_passed: bool = True,
+        override: bool = False,
+        top_n: int = 10,
+        sample: str = 'in'
+    ) -> List[CM]:
+        """
+        Re-compute rankings for candidate models using new weights.
+
+        Parameters
+        ----------
+        rank_weights : Tuple[float, float, float]
+            Weights for (Fit Measures, IS Error, OOS Error) used during ranking.
+        all_passed : bool, default True
+            When ``True``, include every CM stored in ``self.searcher.passed_cms``.
+            When ``False``, limit the re-ranking to models currently in
+            ``self.cms``.
+        override : bool, default False
+            If ``True``, replace ``self.cms`` and ``self.searcher.top_cms`` with
+            the newly ranked ``top_n`` models.
+        top_n : int, default 10
+            Number of models to display and return from the refreshed ranking.
+        sample : {'in', 'full'}, default 'in'
+            Sample to use when retrieving diagnostics for ranking. Choose
+            ``'in'`` for in-sample diagnostics or ``'full'`` for full-sample.
+
+        Returns
+        -------
+        List[CM]
+            The top ``top_n`` candidate models ordered by the refreshed
+            composite score.
+
+        Raises
+        ------
+        RuntimeError
+            If no search has been performed or if there are no models to rank.
+
+        Examples
+        --------
+        >>> # After running search_cms(...)
+        >>> refreshed = segment.rerank_cms(
+        ...     rank_weights=(0.4, 0.4, 0.2),
+        ...     all_passed=True,
+        ...     top_n=5
+        ... )
+        >>> refreshed[0].model_id
+        'cm1'
+        """
+        if self.searcher is None:
+            raise RuntimeError(
+                "Cannot rerank candidate models before running a search."
+            )
+
+        # Determine which candidate models participate in the re-ranking.
+        if all_passed:
+            passed_cms = getattr(self.searcher, 'passed_cms', None)
+            if not passed_cms:
+                raise RuntimeError(
+                    "ModelSearch has no passed candidate models to rerank."
+                )
+            candidate_cms: List[CM] = list(passed_cms)
+        else:
+            if not self.cms:
+                raise RuntimeError(
+                    "Segment has no candidate models to rerank."
+                )
+            candidate_cms = list(self.cms.values())
+
+        # Track existing models to identify newly promoted entries when
+        # re-ranking across all passed combinations.
+        existing_obj_ids: Set[int] = {id(cm) for cm in self.cms.values()}
+
+        # Assign temporary identifiers to avoid collisions during ranking while
+        # preserving object identity for later reassignment.
+        temp_to_cm: Dict[str, CM] = {}
+        for idx, cm in enumerate(candidate_cms):
+            temp_id = f"temp_{idx}"
+            temp_to_cm[temp_id] = cm
+            cm.model_id = temp_id
+
+        df_ranked = self.searcher.rank_cms(candidate_cms, sample, rank_weights)
+
+        ordered_temp_ids = df_ranked['model_id'].tolist()
+        ordered_cms = [temp_to_cm[temp_id] for temp_id in ordered_temp_ids]
+
+        # Reassign sequential model identifiers based on refreshed ranking.
+        df_updated = df_ranked.copy()
+        for idx, cm in enumerate(ordered_cms):
+            new_id = f"cm{idx + 1}"
+            cm.model_id = new_id
+            df_updated.at[idx, 'model_id'] = new_id
+
+        # Derive the refreshed top-N models and update search state to reflect
+        # the latest ranking outcome.
+        top_limit = min(top_n, len(ordered_cms))
+        top_models = ordered_cms[:top_limit]
+        self.top_cms = top_models
+        self.searcher.top_cms = top_models
+        if all_passed:
+            self.searcher.passed_cms = ordered_cms
+        self.searcher.df_scores = df_updated
+
+        # Persist cms registry depending on override preference.
+        if override:
+            self.cms.clear()
+            for cm in top_models:
+                self.cms[cm.model_id] = cm
+        else:
+            self.cms.clear()
+            for cm in ordered_cms:
+                self.cms[cm.model_id] = cm
+
+        print("=== Updated Ranked Results ===")
+        print(df_updated.head(top_limit).to_string(index=False))
+
+        print(f"\n=== Top {top_limit} Model Formulas ===")
+        for cm in top_models:
+            print(f"{cm.model_id}: {cm.formula}")
+
+        # Highlight newly promoted models when re-ranking across all passed CMs.
+        if all_passed:
+            order_list = df_updated['model_id'].tolist()
+            pos_map = {mid: (i + 1) for i, mid in enumerate(order_list)}
+            newly_added = [
+                (cm.model_id, pos_map.get(cm.model_id))
+                for cm in top_models
+                if id(cm) not in existing_obj_ids
+            ]
+            if newly_added:
+                print("\nNew models entering the top list:")
+                formatted = ", ".join(
+                    f"{mid} (#{rank})" for mid, rank in newly_added
+                )
+                print(formatted)
+
+        return top_models

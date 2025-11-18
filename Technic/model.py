@@ -3,7 +3,7 @@
 # Purpose: Define base and OLS regression models with testing and reporting hooks
 # Key Types/Classes: ModelBase, OLS, FixedOLS
 # Key Functions: train, predict, y_base_fitted_in, y_base_pred_out
-# Dependencies: pandas, numpy, statsmodels, typing, .testset.TestSet, .report.OLS_ModelReport
+# Dependencies: pandas, numpy, statsmodels, typing, .testset.TestSet, .report.OLS_ModelReport, .pretest.PreTestSet
 # =============================================================================
 
 from abc import ABC, abstractmethod
@@ -16,6 +16,7 @@ from statsmodels.stats.outliers_influence import variance_inflation_factor
 from .test import *
 from .report import ModelReportBase, OLS_ModelReport
 from .testset import ppnr_ols_testset_func, TestSet
+from .pretest import PreTestSet, ppnr_ols_pretestset
 from .modeltype import RateLevel, BalanceLevel
 
 class ModelBase(ABC):
@@ -53,6 +54,11 @@ class ModelBase(ABC):
         Updates or adds tests post initial mapping.
     testset_cls : type, default TestSet
         Class for aggregating ModelTestBase instances into a TestSet.
+    pretestset : PreTestSet, optional
+        Optional collection of pre-fitting validation tests executed before
+        the main model search pipeline. When provided, callers can reuse
+        standardized target, feature, and specification checks prior to
+        invoking more expensive fitting steps.
     scen_cls : type, optional
         Class to use for scenario management. If None, defaults to ScenManager.
     report_cls : type, optional
@@ -88,6 +94,7 @@ class ModelBase(ABC):
         testset_func: Optional[Callable[['ModelBase'], Dict[str, ModelTestBase]]] = None,
         test_update_func: Optional[Callable[['ModelBase'], Dict[str, Any]]] = None,
         testset_cls: Type = TestSet,
+        pretestset: Optional[PreTestSet] = None,
         scen_cls: Optional[Type] = None,
         report_cls: Optional[Type] = None,
         stability_test_cls: Optional[Type] = None,
@@ -132,6 +139,9 @@ class ModelBase(ABC):
         self.test_update_func = test_update_func
         self.testset_cls = testset_cls
         self.testset: Optional[TestSet] = None
+        if pretestset is not None and not isinstance(pretestset, PreTestSet):
+            raise TypeError("pretestset must be an instance of PreTestSet or None")
+        self.pretestset = pretestset
         
         # Scenario management
         if scen_cls is None:
@@ -563,6 +573,9 @@ class ModelBase(ABC):
         When has_lookback_var is True, uses rolling_predict to generate predictions
         that account for conditional variable effects.
 
+        Any configured outlier periods are masked with ``NaN`` so callers do not
+        inadvertently use predictions for excluded observations.
+
         Returns empty Series if X_out is empty.
         """
         if self.X_out.empty:
@@ -580,9 +593,12 @@ class ModelBase(ABC):
                 y=self.y_full,
                 time_frame=oos_time_frame
             )
-            return y_pred
+            # Mask any configured outliers so downstream consumers do not attempt
+            # to use predictions for periods that should be ignored.
+            return self._apply_outlier_handling(y_pred, strict=False, drop=False)
 
-        return self.predict(self.X_out)
+        preds = self.predict(self.X_out)
+        return self._apply_outlier_handling(preds, strict=False, drop=False)
 
     def _normalize_outlier_index(self, target_index: pd.Index, *, strict: bool = True) -> List[Any]:
         """
@@ -627,9 +643,64 @@ class ModelBase(ABC):
         if strict:
             missing = [idx for idx in converted_idx if idx not in target_index]
             if missing:
-                raise ValueError(f"Outlier indices {missing} not in the provided index.")
+                # Allow outlier labels that refer to known indices outside of the
+                # currently inspected slice (e.g., out-of-sample periods when
+                # processing in-sample data). Only raise an error for labels that
+                # cannot be found anywhere across the model's known indices.
+                known_index = self._collect_known_indices()
+                unresolved = [idx for idx in missing if idx not in known_index]
+                if unresolved:
+                    raise ValueError(
+                        "Outlier indices {} not in the provided index or any known "
+                        "model indices.".format(unresolved)
+                    )
 
         return existing_outliers
+
+    def _collect_known_indices(self) -> pd.Index:
+        """
+        Gather the union of indices known to the model instance.
+
+        Returns
+        -------
+        pd.Index
+            Union of in-sample, out-of-sample, cached data, and target indices
+            that the model is aware of. When no indices are available an empty
+            :class:`pandas.Index` is returned.
+
+        Notes
+        -----
+        This helper supports outlier handling by ensuring that outlier labels
+        are only considered invalid if they are completely unknown to the
+        model, rather than simply absent from a specific slice of data.
+        """
+        indices: List[pd.Index] = []
+
+        if self.dm is not None:
+            # NOTE: DataManager exposes dedicated in/out sample index series.
+            if hasattr(self.dm, "in_sample_idx") and self.dm.in_sample_idx is not None:
+                indices.append(pd.Index(self.dm.in_sample_idx))
+            if hasattr(self.dm, "out_sample_idx") and self.dm.out_sample_idx is not None:
+                indices.append(pd.Index(self.dm.out_sample_idx))
+            if hasattr(self.dm, "p0") and self.dm.p0 is not None:
+                indices.append(pd.Index([self.dm.p0]))
+            if hasattr(self.dm, "internal_data") and self.dm.internal_data is not None:
+                indices.append(pd.Index(self.dm.internal_data.index))
+
+        # Include cached feature/target matrices supplied directly by the caller.
+        for cached in (self._X_cache, self._y_cache, self._X_out_cache, self._y_out_cache):
+            if cached is not None:
+                indices.append(pd.Index(cached.index))
+
+        if not indices:
+            return pd.Index([])
+
+        # Merge indices sequentially to preserve dtype information.
+        combined_index = indices[0]
+        for extra in indices[1:]:
+            combined_index = combined_index.union(extra)
+
+        return combined_index
 
     def _apply_outlier_handling(
         self,
@@ -1311,6 +1382,7 @@ class OLS(ModelBase):
         testset_func: Callable[['ModelBase'], Dict[str, ModelTestBase]] = ppnr_ols_testset_func,
         test_update_func: Optional[Callable[['ModelBase'], Dict[str, Any]]] = None,
         testset_cls: Type = TestSet,
+        pretestset: Optional[PreTestSet] = ppnr_ols_pretestset,
         scen_cls: Optional[Type] = None,
         model_type: Optional[Type] = None,
         target_base: Optional[str] = None,
@@ -1337,6 +1409,7 @@ class OLS(ModelBase):
             testset_func=testset_func,
             test_update_func=test_update_func,
             testset_cls=testset_cls,
+            pretestset=pretestset,
             scen_cls=scen_cls,
             model_type=model_type,
             target_base=target_base,

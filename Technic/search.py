@@ -1,7 +1,17 @@
-from typing import List, Union, Tuple, Type, Any, Optional, Callable, Dict, Sequence
+# =============================================================================
+# module: search.py
+# Purpose: Provide model search utilities for generating and ranking CM specs.
+# Key Types/Classes: ModelSearch
+# Key Functions: _sort_specs_with_dummies_first
+# Dependencies: itertools, datetime, pandas, tqdm, .pretest.PreTestSet
+# =============================================================================
+
+from typing import List, Union, Tuple, Type, Any, Optional, Callable, Dict, Sequence, Set
 import itertools
 import time
 import datetime
+import inspect
+from copy import deepcopy
 from collections import defaultdict
 import warnings
 import sys
@@ -16,6 +26,7 @@ from .data import DataManager
 from .feature import Feature, DumVar
 from .transform import TSFM
 from .model import ModelBase
+from .pretest import PreTestSet, FeatureTest
 from .cm import CM
 from .periods import default_periods_for_freq, resolve_periods_argument
 
@@ -98,7 +109,71 @@ class ModelSearch:
         self.error_log: List[Tuple[List[Any], str, str]] = []
         self.df_scores: Optional[pd.DataFrame] = None
         self.top_cms: List[CM] = []
-    
+        self.model_pretestset: Optional[PreTestSet] = None
+        self.target_pretest_result: Optional[Any] = None
+
+    def _resolve_model_pretestset(self) -> Optional[PreTestSet]:
+        """Return a deep-copied default pretest bundle for ``self.model_cls``.
+
+        Returns
+        -------
+        Optional[PreTestSet]
+            Deep copy of the default ``pretestset`` argument defined on the
+            model class ``__init__`` signature. ``None`` when the class does not
+            expose a pretest bundle or the default value is empty.
+        """
+
+        try:
+            signature = inspect.signature(self.model_cls.__init__)
+        except (TypeError, ValueError):
+            return None
+
+        parameter = signature.parameters.get("pretestset")
+        if parameter is None or parameter.default is inspect._empty:
+            return None
+
+        default_bundle = parameter.default
+        if default_bundle is None:
+            return None
+
+        # Deep copy to avoid mutating shared constants such as
+        # ``ppnr_ols_pretestset`` while populating runtime dependencies.
+        return deepcopy(default_bundle)
+
+    def _prepare_feature_pretest(self) -> Optional[FeatureTest]:
+        """Return the active feature pre-test with the correct data context.
+
+        Returns
+        -------
+        Optional[FeatureTest]
+            The :class:`FeatureTest` instance configured on ``self.model_cls``
+            after aligning it with the current :class:`DataManager`. ``None``
+            is returned when no feature-level validation has been supplied.
+        """
+
+        if self.model_pretestset is None:
+            self.model_pretestset = self._resolve_model_pretestset()
+
+        if self.model_pretestset is None:
+            return None
+
+        feature_test = self.model_pretestset.feature_test
+        if feature_test is None:
+            return None
+
+        # Always ensure the feature test operates on the search DataManager so
+        # module-level singletons stay in sync with runtime data.
+        if feature_test.dm is not self.dm:
+            feature_test.dm = self.dm
+
+        if (
+            getattr(feature_test, "target_test_result", None) is None
+            and self.target_pretest_result is not None
+        ):
+            feature_test.target_test_result = self.target_pretest_result
+
+        return feature_test
+
     def build_spec_combos(
         self,
         forced_in: Optional[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]],
@@ -118,6 +193,8 @@ class ModelSearch:
           * tuple: items stay grouped together.
           * set: treated as a pool where exactly one must be selected.
         - Strings at top-level are expanded into TSFM variants via DataManager.
+        - Feature-level pre-tests (when configured) prune invalid candidates
+          before combination enumeration.
         - Respects max_var_num (total features per combo).
         - Respects category_limit (max variables from each MEV category per combo).
 
@@ -152,6 +229,65 @@ class ModelSearch:
         combos : list of spec lists
             Each combo is a list including str, TSFM, Feature, or tuple elements.
         """
+        # Run feature-level pretests later in the pipeline so TSFM expansions
+        # can be evaluated directly before enumeration.
+        feature_test = self._prepare_feature_pretest()
+        pretest_cache: Dict[str, bool] = {}
+        excluded_variant_labels: List[str] = []
+        excluded_variant_seen: Set[str] = set()
+        excluded_group_labels: List[str] = []
+        excluded_group_seen: Set[str] = set()
+
+        def _passes_feature(candidate: Any) -> bool:
+            """Return ``True`` when ``candidate`` satisfies the feature pre-test."""
+
+            if feature_test is None:
+                return True
+
+            if isinstance(candidate, tuple):
+                cache_key = f"tuple:{repr(candidate)}"
+                if cache_key in pretest_cache:
+                    passes = pretest_cache[cache_key]
+                else:
+                    passes = True
+                    for element in candidate:
+                        if not _passes_feature(element):
+                            passes = False
+                            break
+                    pretest_cache[cache_key] = passes
+                if not passes:
+                    key = repr(candidate)
+                    if key not in excluded_group_seen:
+                        excluded_group_labels.append(key)
+                        excluded_group_seen.add(key)
+                return passes
+
+            cache_key = repr(candidate)
+            if cache_key in pretest_cache:
+                passes = pretest_cache[cache_key]
+            else:
+                feature_test.feature = candidate
+                try:
+                    result = feature_test.test_filter
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    print(
+                        "Feature pre-test raised "
+                        f"{type(exc).__name__} for {candidate!r}: {exc}"
+                    )
+                    passes = True
+                else:
+                    try:
+                        passes = bool(result)
+                    except Exception:  # pragma: no cover - unexpected truthiness
+                        passes = True
+                pretest_cache[cache_key] = passes
+
+            if not passes:
+                if cache_key not in excluded_variant_seen:
+                    excluded_variant_labels.append(cache_key)
+                    excluded_variant_seen.add(cache_key)
+            return passes
+
         # Handle forced_in being optional
         forced_specs = (forced_in or []).copy()
 
@@ -281,16 +417,53 @@ class ModelSearch:
         expanded: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
         for combo in combos:
             variant_lists: List[List[Any]] = []
+            combo_invalid = False
             for spec in combo:
                 if isinstance(spec, str):
-                    variant_lists.append(tsfm_map.get(spec, [spec]))
+                    variants = tsfm_map.get(spec, [spec])
                 else:
-                    variant_lists.append([spec])
+                    variants = [spec]
+
+                if feature_test is not None:
+                    filtered_variants = [
+                        variant for variant in variants if _passes_feature(variant)
+                    ]
+                    if not filtered_variants:
+                        if spec in forced_specs:
+                            raise ValueError(
+                                "Forced specification failed the configured feature pre-test: "
+                                f"{spec!r}"
+                            )
+                        combo_invalid = True
+                        break
+                    variants = filtered_variants
+
+                variant_lists.append(variants)
+
+            if combo_invalid:
+                continue
+
             # Cartesian product over variant lists
             for prod in itertools.product(*variant_lists):
                 # Sort each spec list so quarterly and monthly dummies come first
                 sorted_prod = _sort_specs_with_dummies_first(list(prod))
                 expanded.append(sorted_prod)
+
+        if (feature_test is not None) and (excluded_variant_labels or excluded_group_labels):
+            print("--- Feature Pre-Test Exclusions ---")
+            if excluded_variant_labels:
+                print(
+                    "Excluded "
+                    f"{len(excluded_variant_labels)} variant(s): "
+                    + ", ".join(excluded_variant_labels)
+                )
+            if excluded_group_labels:
+                print(
+                    "Removed "
+                    f"{len(excluded_group_labels)} grouped candidate(s): "
+                    + ", ".join(excluded_group_labels)
+                )
+            print("")
 
         self.all_specs = expanded
         return expanded
@@ -607,10 +780,11 @@ class ModelSearch:
         Steps
         -----
         1. Print configuration summary.
-        2. Build spec combinations via build_spec_combos.
-        3. Print number of generated combos.
-        4. Assess and filter combos via filter_specs (printing test info for first combo).
-        5. Rank passed models via rank_cms and retain top_n.
+        2. Run the model class' target pre-test when defined.
+        3. Build spec combinations via build_spec_combos.
+        4. Print number of generated combos.
+        5. Assess and filter combos via filter_specs (printing test info for first combo).
+        6. Rank passed models via rank_cms and retain top_n.
 
         Parameters
         ----------
@@ -688,6 +862,52 @@ class ModelSearch:
                   f"Test update func: {test_update_func}\n"
                   f"Outlier idx     : {outlier_idx}\n")
             print("==================================\n")
+
+            # Execute optional target-level pretests before heavy computations.
+            self.model_pretestset = self._resolve_model_pretestset()
+            target_test_result: Optional[Any] = None
+            if (
+                self.model_pretestset is not None
+                and self.model_pretestset.target_test is not None
+            ):
+                target_test = self.model_pretestset.target_test
+                if target_test.dm is None:
+                    target_test.dm = self.dm
+                if target_test.target is None:
+                    target_test.target = self.target
+
+                try:
+                    target_test_result = target_test.test_filter
+                except Exception as exc:
+                    print(
+                        "Target pre-test raised "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                else:
+                    description = ""
+                    if hasattr(target_test_result, "attrs"):
+                        description = target_test_result.attrs.get(
+                            "filter_mode_desc",
+                            ""
+                        ) or ""
+                    if not description and hasattr(target_test_result, "filter_mode_desc"):
+                        description = getattr(
+                            target_test_result,
+                            "filter_mode_desc",
+                            ""
+                        )
+
+                    print("--- Target Pre-Test Result ---")
+                    if description:
+                        print(description)
+                    print(target_test_result)
+                    print("")
+
+                if self.model_pretestset.feature_test is not None:
+                    self.model_pretestset.feature_test.target_test_result = (
+                        target_test_result
+                    )
+            self.target_pretest_result = target_test_result
         
             # Warn about interpolated MEV variables within the candidate pool
             def _flatten(items: Any) -> List[Union[str, TSFM]]:

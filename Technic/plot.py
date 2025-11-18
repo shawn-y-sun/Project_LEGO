@@ -171,7 +171,8 @@ def ols_model_perf_plot(
     """
     Plot actual vs. fitted (in-sample) and predicted (out-of-sample) values,
     with a secondary bar chart of absolute errors. When a model is supplied,
-    periods flagged as outliers are rendered as gaps in the actual series.
+    periods flagged as outliers are rendered as gaps in both actual and
+    predicted series so that excluded observations are visually apparent.
 
     Parameters
     ----------
@@ -294,15 +295,15 @@ def ols_model_perf_plot(
         label="Fitted (IS)",
     )
     
-    # Plot out-of-sample predictions
+    # Plot out-of-sample predictions, surfacing outlier-induced gaps.
     if not y_pred.empty:
-        ax1.plot(
-            y_pred.index,
+        _plot_segmented_series(
+            ax1,
             y_pred,
-            linestyle="--",
-            label="Predicted (OOS)",
             color="tab:blue",
             linewidth=2,
+            label="Predicted (OOS)",
+            line_kwargs={"linestyle": "--"},
         )
     
     ax1.set_ylabel("Value")
@@ -368,13 +369,13 @@ def ols_model_perf_plot(
 
         if y_base_pred_out is not None and not y_base_pred_out.empty:
             y_base_pred_components.append(y_base_pred_out)
-            ax3.plot(
-                y_base_pred_out.index,
+            _plot_segmented_series(
+                ax3,
                 y_base_pred_out,
-                linestyle="--",
-                label="Predicted (OOS)",
                 color="tab:orange",
                 linewidth=2,
+                label="Predicted (OOS)",
+                line_kwargs={"linestyle": "--"},
             )
 
         if y_base_pred_components:
@@ -470,7 +471,7 @@ def ols_plot_perf_set(
     Plot actual vs. fitted/in-sample and predicted/out-of-sample values for multiple candidate models.
     In-sample fits are solid; out-of-sample predictions are dashed. When reports
     originate from models with configured outliers, those periods appear as gaps in
-    the actual series.
+    both actual and predicted series so the excluded windows are easy to spot.
 
     Parameters
     ----------
@@ -556,13 +557,13 @@ def ols_plot_perf_set(
             and not rpt.model.y_pred_out.empty
         ):
             y_out = rpt.model.y_pred_out.sort_index()
-            ax.plot(
-                y_out.index,
+            _plot_segmented_series(
+                ax,
                 y_out,
-                linestyle='--',
-                label=None,
                 color=color,
-                linewidth=2
+                linewidth=2,
+                label=None,
+                line_kwargs={"linestyle": "--"},
             )
     ax.set_title('Model Performance Comparison (Target Variable)')
     ax.set_ylabel('Value')
@@ -598,13 +599,13 @@ def ols_plot_perf_set(
                 )
             # Out-of-sample predicted base
             if y_base_pred_out is not None and not y_base_pred_out.empty:
-                ax_base.plot(
-                    y_base_pred_out.index,
+                _plot_segmented_series(
+                    ax_base,
                     y_base_pred_out,
-                    linestyle='--',
-                    label=None,
                     color=color,
-                    linewidth=2
+                    linewidth=2,
+                    label=None,
+                    line_kwargs={"linestyle": "--"},
                 )
         else:
             # No base variable data for this model
