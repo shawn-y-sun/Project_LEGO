@@ -1,12 +1,13 @@
 # =============================================================================
 # module: test.py
 # Purpose: Model testing framework with base and concrete test implementations
-# Key Types/Classes: ModelTestBase, StationarityTest, CoefTest
+# Key Types/Classes: ModelTestBase, StationarityTest, FullStationarityTest,
+#                    MultiFullStationarityTest, CoefTest
 # Key Functions: _adf_test_fn, _pp_test_fn, stationarity_test_dict
 # Dependencies: pandas, statsmodels, scipy, abc, typing
 # =============================================================================
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Union, Callable, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 import pandas as pd
 import numpy as np
 
@@ -18,6 +19,11 @@ from statsmodels.tsa.stattools import adfuller, zivot_andrews, range_unit_root_t
 from arch.unitroot import PhillipsPerron, DFGLS, engle_granger
 from arch.unitroot.unitroot import InfeasibleTestException
 from statsmodels.stats.outliers_influence import variance_inflation_factor
+from .data import DataManager
+from .transform import TSFM
+from .regime import RgmVar
+from .condition import CondVar
+from .feature import Feature, DumVar
 
 import warnings
 from statsmodels.tools.sm_exceptions import InterpolationWarning
@@ -832,6 +838,238 @@ class StationarityTest(ModelTestBase):
         return pd.DataFrame(data).set_index(['Type', 'Lags'])
 
 
+class FullStationarityTest(ModelTestBase):
+    """
+    Run staged stationarity checks across in-sample and full-sample data.
+
+    The test first evaluates stationarity on the in-sample portion of a
+    constructed feature. If the check fails, it retries on the combined
+    in- and out-of-sample data. For regime-shift or conditional variables,
+    it optionally re-runs the sequence on the original (pre-regime or
+    pre-condition) variable.
+
+    Parameters
+    ----------
+    variable : Union[str, TSFM]
+        Variable identifier or transformation specification to build.
+        Regime-aware (:class:`~Technic.regime.RgmVar`) and conditional
+        (:class:`~Technic.condition.CondVar`) features are also supported.
+    dm : DataManager
+        Data manager used to construct features and access sample indices.
+    alias : str, optional
+        Display name for this test (defaults to class name).
+    filter_mode : {'strict', 'moderate'}, default 'moderate'
+        Passed through to the underlying stationarity test.
+    test_dict : Dict[str, callable], optional
+        Mapping of test names to functions; defaults to
+        ``stationarity_test_dict``.
+    test_threshold : Dict[str, Tuple[float, str]], optional
+        Test thresholds and directions; defaults to
+        ``stationarity_test_threshold``.
+    filter_on : bool, default True
+        Whether this test is active in filtering.
+    test_class : Type[StationarityTest], optional
+        Test class to instantiate for each sample evaluation. Defaults to
+        :class:`StationarityTest`.
+
+    Examples
+    --------
+    >>> fst = FullStationarityTest('GDP', dm)
+    >>> fst.test_result
+    >>> fst.test_filter
+    """
+
+    category = 'assumption'
+
+    def __init__(
+        self,
+        variable: Union[str, TSFM, RgmVar, CondVar],
+        dm: DataManager,
+        alias: Optional[str] = None,
+        filter_mode: str = 'moderate',
+        test_dict: Optional[Dict[str, Callable]] = None,
+        test_threshold: Optional[Dict[str, Tuple[float, str]]] = None,
+        filter_on: bool = True,
+        test_class: Type[StationarityTest] = StationarityTest,
+    ) -> None:
+        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        self.variable = variable
+        self.dm = dm
+        self.test_dict = test_dict if test_dict is not None else stationarity_test_dict
+        self.thresholds = test_threshold if test_threshold is not None else stationarity_test_threshold
+        self.test_class = test_class
+        self._test_result_cache: Optional[pd.DataFrame] = None
+        self._test_filter_cache: Optional[bool] = None
+
+    @property
+    def test_result(self) -> pd.DataFrame:
+        """
+        Execute staged stationarity checks and return the most recent table.
+
+        Returns
+        -------
+        pd.DataFrame
+            Stationarity diagnostics matching :class:`StationarityTest`
+            output with an added ``Sample`` column denoting the sample on
+            which the reported results were obtained. Values are one of
+            ``'In'``, ``'Full'``, ``'Original-In'``, or ``'Original-Full'``.
+
+        Raises
+        ------
+        ValueError
+            If feature construction yields an empty series for the provided
+            variable specification.
+        """
+
+        if self._test_result_cache is not None:
+            return self._test_result_cache
+
+        # Evaluate the provided variable on in-sample then full-sample data.
+        result_df, passed = self._evaluate_variable(self.variable, label_prefix='')
+
+        # If still failing and the variable carries an original component,
+        # retry using the unfiltered base variable for a broader assessment.
+        if not passed and isinstance(self.variable, (RgmVar, CondVar)):
+            original_spec = self._resolve_original_variable(self.variable)
+            result_df, passed = self._evaluate_variable(original_spec, label_prefix='Original-')
+
+        self._test_result_cache = result_df
+        self._test_filter_cache = passed
+        return result_df
+
+    @property
+    def test_filter(self) -> bool:
+        """
+        Return True if any staged stationarity check passes.
+        """
+
+        if self._test_filter_cache is None:
+            _ = self.test_result
+        return bool(self._test_filter_cache)
+
+    def _evaluate_variable(
+        self,
+        variable_spec: Union[str, TSFM, RgmVar, CondVar],
+        label_prefix: str,
+    ) -> Tuple[pd.DataFrame, bool]:
+        """
+        Run stationarity tests on in-sample followed by full-sample data.
+
+        Parameters
+        ----------
+        variable_spec : Union[str, TSFM, RgmVar, CondVar]
+            Specification passed to :meth:`DataManager.build_features`.
+        label_prefix : str
+            Prefix for the ``Sample`` label (``''`` or ``'Original-'``).
+
+        Returns
+        -------
+        Tuple[pandas.DataFrame, bool]
+            The latest test result table and whether any stage passed.
+        """
+
+        series = self._build_feature_series(variable_spec)
+        in_sample_df, in_passed = self._run_stationarity(series, self.dm.in_sample_idx, f"{label_prefix}In")
+        if in_passed:
+            return in_sample_df, True
+
+        combined_idx = self.dm.in_sample_idx.append(self.dm.out_sample_idx)
+        full_df, full_passed = self._run_stationarity(series, combined_idx, f"{label_prefix}Full")
+        return full_df, full_passed
+
+    def _build_feature_series(self, variable_spec: Union[str, TSFM, RgmVar, CondVar]) -> pd.Series:
+        """
+        Construct a single feature series from the provided specification.
+
+        Parameters
+        ----------
+        variable_spec : Union[str, TSFM, RgmVar, CondVar]
+            Feature identifier forwarded to :meth:`DataManager.build_features`.
+
+        Returns
+        -------
+        pd.Series
+            The first column from the constructed feature frame.
+
+        Raises
+        ------
+        ValueError
+            If the constructed DataFrame is empty.
+        """
+
+        feature_frame = self.dm.build_features([variable_spec])
+        if feature_frame.empty:
+            raise ValueError(
+                "FullStationarityTest: constructed feature frame is empty; "
+                "unable to perform stationarity checks."
+            )
+        series = feature_frame.iloc[:, 0]
+        series.name = series.name or str(variable_spec)
+        return series
+
+    def _run_stationarity(
+        self,
+        series: pd.Series,
+        sample_idx: pd.Index,
+        sample_label: str,
+    ) -> Tuple[pd.DataFrame, bool]:
+        """
+        Execute the configured stationarity test for a specific sample.
+
+        Parameters
+        ----------
+        series : pd.Series
+            Full feature series prior to sample slicing.
+        sample_idx : pd.Index
+            Index labels defining the sample to evaluate (e.g., in-sample).
+        sample_label : str
+            Label recorded in the ``Sample`` column of the result table.
+
+        Returns
+        -------
+        Tuple[pd.DataFrame, bool]
+            The stationarity result table for the given sample and whether it
+            satisfied the configured filter mode.
+        """
+
+        aligned_idx = sample_idx[sample_idx.isin(series.index)]
+        test_instance = self.test_class(
+            series=series.loc[aligned_idx],
+            alias=self.alias,
+            filter_mode=self.filter_mode,
+            test_dict=self.test_dict,
+            test_threshold=self.thresholds,
+            filter_on=self.filter_on,
+        )
+        result_df = test_instance.test_result.copy()
+
+        # Insert sample indicator before the Passed column for readability.
+        insert_at = result_df.columns.get_loc('Passed')
+        result_df.insert(insert_at, 'Sample', sample_label)
+        return result_df, test_instance.test_filter
+
+    @staticmethod
+    def _resolve_original_variable(variable_spec: Union[RgmVar, CondVar]) -> Union[str, TSFM]:
+        """
+        Extract the base variable from a regime or conditional specification.
+
+        Parameters
+        ----------
+        variable_spec : Union[RgmVar, CondVar]
+            Regime or conditional feature wrapper.
+
+        Returns
+        -------
+        Union[str, TSFM]
+            The unwrapped variable specification suitable for feature
+            construction.
+        """
+
+        if isinstance(variable_spec, RgmVar):
+            return variable_spec.var
+        return getattr(variable_spec, 'main_var', variable_spec.var)
+
+
 # ----------------------------------------------------------------------------
 # PvalueTest class
 # ----------------------------------------------------------------------------
@@ -1552,6 +1790,193 @@ class CointTest(ModelTestBase):
             
         # All variables must pass their expectations (logic already handled in test_result)
         return results['Passed'].all()
+
+class MultiFullStationarityTest(ModelTestBase):
+    """
+    Run staged stationarity tests across all feature specifications in a model option.
+
+    The class builds a :class:`FullStationarityTest` for each string or Feature
+    spec provided, excluding dummy specifications. It consolidates the
+    sample-aware diagnostics into a single DataFrame to highlight which sample
+    (in-sample, full-sample, or original-variable reruns) determined the
+    outcome.
+
+    Parameters
+    ----------
+    specs : List[Union[str, Feature]]
+        Feature specifications, as accepted by :class:`ModelBase`, flattened
+        automatically to individual entries. Dummy specs are ignored.
+    dm : DataManager
+        Data manager used to build features and provide sample indices.
+    test_dict : Dict[str, callable], optional
+        Mapping of test names to functions; defaults to ``stationarity_test_dict``.
+    test_threshold : Dict[str, Tuple[float, str]], optional
+        Thresholds and inequality directions for each test; defaults to
+        ``stationarity_test_threshold``.
+    alias : str, optional
+        Display name for this test suite (defaults to class name).
+    filter_mode : {'strict','moderate'}, default 'moderate'
+        - 'strict': all individual stationarity diagnostics must pass per feature
+        - 'moderate': at least half of the diagnostics must pass per feature
+    filter_on : bool, default True
+        Whether this test participates in filtering decisions.
+    full_test_class : Type[FullStationarityTest], optional
+        Class used to instantiate staged stationarity checks; defaults to
+        :class:`FullStationarityTest`.
+    stationarity_test_class : Type[StationarityTest], optional
+        Underlying stationarity implementation passed through to each
+        :class:`FullStationarityTest` instance.
+
+    Raises
+    ------
+    ValueError
+        If ``specs`` is empty.
+    TypeError
+        If a spec is neither a string nor a Feature instance (excluding
+        :class:`DumVar`).
+
+    Examples
+    --------
+    >>> multi_full = MultiFullStationarityTest(specs=['GDP', TSFM('UNRATE', diff)], dm=dm)
+    >>> multi_full.test_result
+    >>> multi_full.test_filter
+    """
+
+    category = 'assumption'
+
+    def __init__(
+        self,
+        specs: List[Union[str, Feature]],
+        dm: DataManager,
+        test_dict: Optional[Dict[str, Callable]] = None,
+        test_threshold: Optional[Dict[str, Tuple[float, str]]] = None,
+        alias: Optional[str] = None,
+        filter_mode: str = 'moderate',
+        filter_on: bool = True,
+        full_test_class: Type[FullStationarityTest] = FullStationarityTest,
+        stationarity_test_class: Type[StationarityTest] = StationarityTest,
+    ) -> None:
+        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        if not specs:
+            raise ValueError("specs must contain at least one feature specification.")
+        self.specs = specs
+        self.dm = dm
+        self.test_dict = test_dict if test_dict is not None else stationarity_test_dict
+        self.thresholds = test_threshold if test_threshold is not None else stationarity_test_threshold
+        self.filter_mode_descs = {
+            'strict':   'All individual tests must pass for each variable.',
+            'moderate': 'At least half of individual tests must pass for each variable.'
+        }
+        self.full_test_class = full_test_class
+        self.stationarity_test_class = stationarity_test_class
+
+        self._individual_tests: Dict[str, FullStationarityTest] = {}
+        for spec in self._flatten_specs(self.specs):
+            if isinstance(spec, DumVar):
+                # Dummy variables are intentionally excluded from stationarity checks.
+                continue
+            if isinstance(spec, (str, Feature)):
+                label = self._spec_label(spec)
+                self._individual_tests[label] = self.full_test_class(
+                    variable=spec,
+                    dm=self.dm,
+                    alias=self.alias,
+                    filter_mode=self.filter_mode,
+                    test_dict=self.test_dict,
+                    test_threshold=self.thresholds,
+                    filter_on=self.filter_on,
+                    test_class=self.stationarity_test_class,
+                )
+            else:
+                raise TypeError(
+                    f"Unsupported spec type {type(spec)} for MultiFullStationarityTest."
+                )
+
+    @property
+    def filter_mode_desc(self) -> str:
+        """Human-readable description of the configured filter mode."""
+
+        return self.filter_mode_descs[self.filter_mode]
+
+    @property
+    def test_result(self) -> pd.DataFrame:
+        """
+        Run staged stationarity tests on all valid specs and consolidate results.
+
+        Returns
+        -------
+        pd.DataFrame
+            Index: Feature names
+            Columns: For each test in ``test_dict``
+                - ``{test_name}_Statistic``
+                - ``{test_name}_P-value``
+                - ``{test_name}_Passed``
+            Plus:
+                - ``Sample`` indicating which sample produced the recorded result
+                - ``Passed`` indicating the overall outcome per feature
+        """
+
+        if not self._individual_tests:
+            return pd.DataFrame()
+
+        records: List[Dict[str, Any]] = []
+        test_names = list(self.test_dict.keys())
+
+        for var_name, stat_test in self._individual_tests.items():
+            record: Dict[str, Any] = {'Variable': var_name}
+
+            individual_results = stat_test.test_result
+            sample_value = individual_results['Sample'].iloc[0] if 'Sample' in individual_results.columns else np.nan
+            record['Sample'] = sample_value
+
+            for test_name in test_names:
+                if test_name in individual_results.index:
+                    record[f'{test_name}_Statistic'] = individual_results.loc[test_name, 'Statistic']
+                    record[f'{test_name}_P-value'] = individual_results.loc[test_name, 'P-value']
+                    record[f'{test_name}_Passed'] = individual_results.loc[test_name, 'Passed']
+                else:
+                    record[f'{test_name}_Statistic'] = np.nan
+                    record[f'{test_name}_P-value'] = np.nan
+                    record[f'{test_name}_Passed'] = False
+
+            record['Passed'] = stat_test.test_filter
+            records.append(record)
+
+        return pd.DataFrame(records).set_index('Variable')
+
+    @property
+    def test_filter(self) -> bool:
+        """Return True if all staged stationarity tests pass for every spec."""
+
+        if not self._individual_tests:
+            return True
+
+        return all(test.test_filter for test in self._individual_tests.values())
+
+    @staticmethod
+    def _flatten_specs(items: Any) -> List[Any]:
+        """Flatten nested spec containers to a single list."""
+
+        flattened: List[Any] = []
+        for item in items:
+            if isinstance(item, (list, tuple)):
+                flattened.extend(MultiFullStationarityTest._flatten_specs(item))
+            else:
+                flattened.append(item)
+        return flattened
+
+    @staticmethod
+    def _spec_label(spec: Union[str, Feature]) -> str:
+        """Derive a user-friendly label for a feature specification."""
+
+        if isinstance(spec, str):
+            return spec
+        if getattr(spec, 'alias', None):
+            return str(spec.alias)
+        if getattr(spec, 'name', None):
+            return str(spec.name)
+        return str(spec)
+
 
 class MultiStationarityTest(ModelTestBase):
     """

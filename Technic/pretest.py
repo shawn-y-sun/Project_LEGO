@@ -27,7 +27,7 @@ import pandas as pd
 from .data import DataManager
 from .feature import Feature
 from .transform import TSFM
-from .test import StationarityTest
+from .test import FullStationarityTest, StationarityTest
 
 
 class PreTestSet:
@@ -456,10 +456,11 @@ def ppnr_ols_feature_test_func(
     Parameters
     ----------
     feature : Union[str, Feature, TSFM, pd.Series, pd.DataFrame]
-        Identifier, feature object, TSFM transform, or raw feature history. When
-        a :class:`pandas.Series` or :class:`pandas.DataFrame` is supplied, the
-        observations are evaluated directly without rebuilding via the data
-        manager.
+        Identifier or feature object evaluated via
+        :class:`~Technic.test.FullStationarityTest` when a string,
+        :class:`Feature`, or :class:`TSFM` is provided. Pre-materialized
+        :class:`pandas.Series` or :class:`pandas.DataFrame` inputs are assessed
+        directly with :class:`~Technic.test.StationarityTest`.
     dm : DataManager
         Data manager that provides feature construction utilities and sample
         indices.
@@ -468,9 +469,9 @@ def ppnr_ols_feature_test_func(
         stationary target, ``False`` denotes a non-stationary target, and
         ``None`` defers the decision to the feature diagnostics.
     sample : {"in", "full"}, default "in"
-        Portion of the feature history to evaluate. ``"in"`` restricts to the
-        in-sample span, while ``"full"`` includes both in-sample and
-        out-of-sample observations when available.
+        Portion of the feature history to evaluate for raw series inputs.
+        ``"in"`` restricts to the in-sample span, while ``"full"`` includes both
+        in-sample and out-of-sample observations when available.
 
     Returns
     -------
@@ -482,7 +483,7 @@ def ppnr_ols_feature_test_func(
     Raises
     ------
     ValueError
-        If ``sample`` is not ``"in"`` or ``"full"``.
+        If ``sample`` is not ``"in"`` or ``"full"`` for raw series inputs.
 
     Examples
     --------
@@ -490,102 +491,107 @@ def ppnr_ols_feature_test_func(
     True
     """
 
-    normalized_sample = str(sample).lower()
-    if normalized_sample not in {"in", "full"}:
-        raise ValueError(
-            "sample must be either 'in' or 'full'; "
-            f"received {sample!r}."
-        )
-
-    if isinstance(feature, (pd.Series, pd.DataFrame)):
-        # Accept pre-materialized feature histories so callers can bypass
-        # DataManager feature construction when transformations already exist
-        # in-memory (e.g., Segment.explore_vars). Copies guard against
-        # accidental mutation of caller-owned objects.
-        feature_frame = (
-            feature.to_frame()
-            if isinstance(feature, pd.Series)
-            else feature.copy()
-        )
-        # Ensure Series-provided columns retain a helpful label for logging.
-        if isinstance(feature, pd.Series) and feature_frame.columns.size == 1:
-            feature_frame.columns = [feature.name or "feature"]
+    if isinstance(feature, (str, Feature, TSFM)):
+        # Delegate staged stationarity checks to FullStationarityTest, which
+        # internally handles in-sample, full-sample, and original-variable
+        # retries for regime or conditional wrappers.
+        feature_pass = FullStationarityTest(variable=feature, dm=dm).test_filter
     else:
-        feature_frame = dm.build_features([feature])
-        if isinstance(feature_frame, pd.Series):
-            feature_frame = feature_frame.to_frame()
+        normalized_sample = str(sample).lower()
+        if normalized_sample not in {"in", "full"}:
+            raise ValueError(
+                "sample must be either 'in' or 'full'; "
+                f"received {sample!r}."
+            )
 
-    if feature_frame.empty:
-        # No data implies nothing to invalidate; treat as passing.
-        return True
+        if isinstance(feature, (pd.Series, pd.DataFrame)):
+            # Accept pre-materialized feature histories so callers can bypass
+            # DataManager feature construction when transformations already
+            # exist in-memory (e.g., Segment.explore_vars). Copies guard against
+            # accidental mutation of caller-owned objects.
+            feature_frame = (
+                feature.to_frame()
+                if isinstance(feature, pd.Series)
+                else feature.copy()
+            )
+            # Ensure Series-provided columns retain a helpful label for logging.
+            if isinstance(feature, pd.Series) and feature_frame.columns.size == 1:
+                feature_frame.columns = [feature.name or "feature"]
+        else:
+            feature_frame = dm.build_features([feature])
+            if isinstance(feature_frame, pd.Series):
+                feature_frame = feature_frame.to_frame()
 
-    in_sample_idx = dm.in_sample_idx
-    scoped_segments = []
+        if feature_frame.empty:
+            # No data implies nothing to invalidate; treat as passing.
+            feature_pass = True
+        else:
+            in_sample_idx = dm.in_sample_idx
+            scoped_segments = []
 
-    # Build the evaluation window according to the requested sample scope.
+            # Build the evaluation window according to the requested sample scope.
+            if in_sample_idx is not None:
+                in_sample_idx = feature_frame.index.intersection(in_sample_idx)
+                if len(in_sample_idx) > 0:
+                    scoped_segments.append(feature_frame.loc[in_sample_idx])
 
-    if in_sample_idx is not None:
-        in_sample_idx = feature_frame.index.intersection(in_sample_idx)
-        if len(in_sample_idx) > 0:
-            scoped_segments.append(feature_frame.loc[in_sample_idx])
+            if normalized_sample == "full":
+                out_sample_idx = dm.out_sample_idx
+                if out_sample_idx is not None:
+                    out_sample_idx = feature_frame.index.intersection(out_sample_idx)
+                    if len(out_sample_idx) > 0:
+                        scoped_segments.append(feature_frame.loc[out_sample_idx])
 
-    if normalized_sample == "full":
-        out_sample_idx = dm.out_sample_idx
-        if out_sample_idx is not None:
-            out_sample_idx = feature_frame.index.intersection(out_sample_idx)
-            if len(out_sample_idx) > 0:
-                scoped_segments.append(feature_frame.loc[out_sample_idx])
+            if scoped_segments:
+                scoped_frame = pd.concat(scoped_segments, axis=0).sort_index()
+            else:
+                scoped_frame = feature_frame.sort_index()
 
-    if scoped_segments:
-        scoped_frame = pd.concat(scoped_segments, axis=0).sort_index()
-    else:
-        scoped_frame = feature_frame.sort_index()
+            numeric_frame = scoped_frame.apply(pd.to_numeric, errors="coerce")
 
-    numeric_frame = scoped_frame.apply(pd.to_numeric, errors="coerce")
-
-    candidate_columns = [
-        col for col in numeric_frame.columns if ":" not in str(col)
-    ]
-
-    if isinstance(feature, Feature):
-        desired_columns = [
-            name for name in feature.output_names if ":" not in str(name)
-        ]
-        if desired_columns:
             candidate_columns = [
-                col for col in candidate_columns if col in desired_columns
+                col for col in numeric_frame.columns if ":" not in str(col)
             ]
 
-    usable_columns = []
-    for column in candidate_columns:
-        series = numeric_frame[column].dropna()
-        if series.empty:
-            continue
-        usable_columns.append((column, series))
+            if isinstance(feature, Feature):
+                desired_columns = [
+                    name for name in feature.output_names if ":" not in str(name)
+                ]
+                if desired_columns:
+                    candidate_columns = [
+                        col for col in candidate_columns if col in desired_columns
+                    ]
 
-    if not usable_columns:
-        # Nothing qualifies for stationarity testing, so accept by default.
-        return True
+            usable_columns = []
+            for column in candidate_columns:
+                series = numeric_frame[column].dropna()
+                if series.empty:
+                    continue
+                usable_columns.append((column, series))
 
-    # Each feature invocation yields a single logical output set, so iterate
-    # directly over the filtered columns in their materialized order.
-    column_outcomes = []
-    for column, series in usable_columns:
-        try:
-            cleaned_series = _coerce_numeric_series(
-                series, f"Feature column '{column}'"
-            )
-        except ValueError:
-            # Skip columns that still lack numeric data after coercion.
-            continue
+            if not usable_columns:
+                # Nothing qualifies for stationarity testing, so accept by default.
+                feature_pass = True
+            else:
+                # Each feature invocation yields a single logical output set, so
+                # iterate directly over the filtered columns in their materialized
+                # order.
+                column_outcomes = []
+                for column, series in usable_columns:
+                    try:
+                        cleaned_series = _coerce_numeric_series(
+                            series, f"Feature column '{column}'"
+                        )
+                    except ValueError:
+                        # Skip columns that still lack numeric data after coercion.
+                        continue
 
-        stationarity_test = StationarityTest(series=cleaned_series)
-        result_df = stationarity_test.test_result
-        column_pass = _summarize_stationarity_result(result_df)
-        column_outcomes.append(False if column_pass is None else column_pass)
+                    stationarity_test = StationarityTest(series=cleaned_series)
+                    result_df = stationarity_test.test_result
+                    column_pass = _summarize_stationarity_result(result_df)
+                    column_outcomes.append(False if column_pass is None else column_pass)
 
-    # Require all eligible outputs for the feature to align with the target.
-    feature_pass = all(column_outcomes) if column_outcomes else True
+                feature_pass = all(column_outcomes) if column_outcomes else True
 
     target_pass = _coerce_target_result(target_test_result)
     if target_pass is False:

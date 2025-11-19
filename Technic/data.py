@@ -2,7 +2,7 @@
 # module: data.py
 # Purpose: Manage and combine internal and MEV data for modeling
 # Key Types/Classes: DataManager
-# Key Functions: build_features, _interpolate_df
+# Key Functions: build_feature, build_features, _interpolate_df
 # Dependencies: pandas, numpy, scipy, typing, DataLoader, MEVLoader, TSFM, CondVar, DumVar
 # =============================================================================
 import pandas as pd
@@ -18,6 +18,7 @@ from .transform import TSFM
 from .feature import Feature
 from . import transform as transform_module
 from .condition import CondVar
+from .regime import RgmVar
 from .periods import default_periods_for_freq, resolve_periods_argument
 import inspect
 import functools
@@ -744,27 +745,16 @@ class DataManager:
                 else:
                     yield it
         flat_specs = list(_flatten(specs))
-        
+
         # Initialize lists to collect features
         internal_pieces = []
         mev_pieces = []
         feature_pieces = []
-        
+
         for spec in flat_specs:
             if isinstance(spec, Feature):
+                self._ensure_feature_frequency(spec)
                 # For TSFM instances, ensure frequency consistency
-                if isinstance(spec, TSFM):
-                    if spec.freq is None:
-                        spec.freq = self.freq
-                    elif spec.freq != self.freq:
-                        warnings.warn(
-                            f"TSFM instance for '{spec.var}' has frequency '{spec.freq}' "
-                            f"but DataManager has frequency '{self.freq}'. "
-                            f"Updating TSFM frequency to match DataManager.",
-                            UserWarning
-                        )
-                        spec.freq = self.freq
-                
                 # For Features, we need to handle the result differently based on data type
                 feature_result = spec.apply(data_int, data_mev)
                 
@@ -866,6 +856,75 @@ class DataManager:
             result.index = result.index.normalize()
 
         return result
+
+    def build_feature(
+        self,
+        spec: Union[str, Feature, List[Union[str, Feature]]],
+        internal_df: Optional[pd.DataFrame] = None,
+        mev_df: Optional[pd.DataFrame] = None,
+    ) -> pd.DataFrame:
+        """
+        Build one or more features using a convenience wrapper.
+
+        Parameters
+        ----------
+        spec : Union[str, Feature, List[Union[str, Feature]]]
+            Single feature specification or list of specifications. Items can
+            include :class:`TSFM`, :class:`CondVar`, :class:`RgmVar`, or any
+            other :class:`Feature` subclass. Lists of :class:`RgmVar` objects
+            are supported and will be flattened before construction.
+        internal_df : pandas.DataFrame, optional
+            Override for internal data; defaults to ``self.internal_data``.
+        mev_df : pandas.DataFrame, optional
+            Override for model MEV data; defaults to ``self.model_mev``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Constructed feature set, equivalent to calling
+            :meth:`build_features` with ``spec`` wrapped in a list when
+            necessary.
+
+        Examples
+        --------
+        >>> rgm_specs = [RgmVar("GDP", "recession"), RgmVar("CPI", "recession", on=0)]
+        >>> dm.build_feature(rgm_specs)  # doctest: +SKIP
+        """
+
+        spec_list: List[Union[str, Feature]]
+        if isinstance(spec, (list, tuple)):
+            spec_list = list(spec)
+        else:
+            spec_list = [spec]
+
+        return self.build_features(spec_list, internal_df=internal_df, mev_df=mev_df)
+
+    def _ensure_feature_frequency(self, feature: Feature) -> None:
+        """
+        Align TSFM-backed features with the DataManager frequency.
+
+        The helper adjusts frequency metadata for standalone :class:`TSFM`
+        instances as well as regime-aware :class:`RgmVar` wrappers that embed a
+        TSFM specification via ``var_feature``.
+        """
+
+        tsfm_candidates: List[TSFM] = []
+        if isinstance(feature, TSFM):
+            tsfm_candidates.append(feature)
+        elif isinstance(feature, RgmVar) and isinstance(feature.var_feature, TSFM):
+            tsfm_candidates.append(feature.var_feature)
+
+        for tsfm_spec in tsfm_candidates:
+            if tsfm_spec.freq is None:
+                tsfm_spec.freq = self.freq
+            elif tsfm_spec.freq != self.freq:
+                warnings.warn(
+                    f"TSFM instance for '{tsfm_spec.var}' has frequency '{tsfm_spec.freq}' "
+                    f"but DataManager has frequency '{self.freq}'. Updating TSFM frequency "
+                    "to match DataManager.",
+                    UserWarning,
+                )
+                tsfm_spec.freq = self.freq
 
     def build_tsfm_specs(
         self,
