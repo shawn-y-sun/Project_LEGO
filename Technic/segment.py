@@ -33,9 +33,11 @@ from .export import (
     OLSModelAdapter,
     ExportManager
 )
+from .feature import Feature
 from .periods import resolve_periods_argument
 from .plot import _plot_segmented_series
 from .pretest import PreTestSet, FeatureTest
+from .transform import TSFM
 
 
 class Segment:
@@ -865,8 +867,7 @@ class Segment:
             ensure_quarterly_floor=(periods is None and legacy_max_periods is None)
         )
 
-        # Generate all possible transformations for each variable
-        var_dfs = self.dm.build_search_vars(
+        tsfm_specs = self.dm.build_tsfm_specs(
             vars_list,
             max_lag=max_lag,
             periods=resolved_periods
@@ -886,6 +887,44 @@ class Segment:
                 model_pretestset,
                 target_pretest_result
             )
+
+        # Apply feature pretests on specs before constructing feature dataframes
+        filtered_tsfm_specs: Dict[str, List[Union[str, Feature, TSFM]]] = {}
+        for var_name, tsfms in tsfm_specs.items():
+            filtered: List[Union[str, Feature, TSFM]] = []
+            for tsfm in tsfms:
+                if feature_test is None:
+                    filtered.append(tsfm)
+                    continue
+
+                cache_key = repr(tsfm)
+                if cache_key in pretest_cache:
+                    passes_feature = pretest_cache[cache_key]
+                else:
+                    feature_test.feature = tsfm
+                    try:
+                        passes_feature = bool(feature_test.test_filter)
+                    except Exception as exc:
+                        print(
+                            "Feature pre-test raised "
+                            f"{type(exc).__name__} for {cache_key!r}: {exc}"
+                        )
+                        passes_feature = True
+                    pretest_cache[cache_key] = passes_feature
+
+                if passes_feature:
+                    filtered.append(tsfm)
+                elif cache_key not in excluded_seen:
+                    excluded_features.append(cache_key)
+                    excluded_seen.add(cache_key)
+
+            filtered_tsfm_specs[var_name] = filtered
+
+        # Generate all possible transformations for each variable after filtering
+        var_dfs = {
+            var_name: self.dm.build_features(tsfms)
+            for var_name, tsfms in filtered_tsfm_specs.items()
+        }
         
         # Get target data based on sample
         if sample == 'in':
@@ -927,29 +966,6 @@ class Segment:
             target_aligned = target_data.loc[common_idx]
             
             for col in var_aligned.columns:
-                if feature_test is not None:
-                    cache_key = repr(col)
-                    if cache_key in pretest_cache:
-                        passes_feature = pretest_cache[cache_key]
-                    else:
-                        feature_series = var_aligned[col].copy()
-                        feature_test.feature = feature_series
-                        try:
-                            passes_feature = bool(feature_test.test_filter)
-                        except Exception as exc:
-                            print(
-                                "Feature pre-test raised "
-                                f"{type(exc).__name__} for {col!r}: {exc}"
-                            )
-                            passes_feature = True
-                        pretest_cache[cache_key] = passes_feature
-
-                    if not passes_feature:
-                        if cache_key not in excluded_seen:
-                            excluded_features.append(cache_key)
-                            excluded_seen.add(cache_key)
-                        continue
-
                 # Calculate correlation, handling NaN values
                 combined = pd.concat([var_aligned[col], target_aligned], axis=1).dropna()
                 if len(combined) > 1:
