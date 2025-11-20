@@ -1073,9 +1073,11 @@ class FullStationarityTest(ModelTestBase):
             The unwrapped variable specification suitable for feature
             construction.
         """
-
-        if isinstance(variable_spec, RgmVar):
-            return variable_spec.var
+        # Prefer the original transform when present (e.g., a TSFM wrapped by
+        # a regime indicator) so fallback testing mirrors the non-regime
+        # specification rather than the raw base variable.
+        if isinstance(variable_spec, RgmVar) and getattr(variable_spec, "var_feature", None) is not None:
+            return variable_spec.var_feature
         return variable_spec.var
 
 
