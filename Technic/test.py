@@ -1067,7 +1067,7 @@ class FullStationarityTest(ModelTestBase):
 
         if isinstance(variable_spec, RgmVar):
             return variable_spec.var
-        return getattr(variable_spec, 'main_var', variable_spec.var)
+        return variable_spec.var
 
 
 # ----------------------------------------------------------------------------
@@ -1234,12 +1234,12 @@ class GroupTest(ModelTestBase):
 
 class SignCheck(ModelTestBase):
     """
-    Test whether model coefficients have the expected signs based on TSFM exp_sign values.
+    Test whether model coefficients have the expected signs based on Feature exp_sign values.
 
     Parameters
     ----------
-    tsfm_list : List[TSFM]
-        List of TSFM transformation instances with exp_sign attributes.
+    feature_list : List[Feature]
+        List of Feature-like objects that expose ``exp_sign`` and ``name`` attributes.
     coefficients : pd.Series
         Series of model coefficients with variable names as index.
     alias : str, optional
@@ -1266,14 +1266,14 @@ class SignCheck(ModelTestBase):
 
     def __init__(
         self,
-        tsfm_list: List,  # List[TSFM] but avoiding import issues
+        feature_list: List[Feature],
         coefficients: pd.Series,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
         filter_on: bool = True
     ):
         super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
-        self.tsfm_list = tsfm_list
+        self.feature_list = feature_list
         self.coefficients = coefficients
         self.filter_mode_descs = {
             'strict':   'All coefficients must have expected signs.',
@@ -1287,12 +1287,12 @@ class SignCheck(ModelTestBase):
     @property
     def test_result(self) -> pd.DataFrame:
         """
-        Check coefficient signs against expected signs from TSFM instances.
+        Check coefficient signs against expected signs from provided feature objects.
 
         Returns
         -------
         pd.DataFrame
-            Index: TSFM names (where exp_sign != 0)
+            Index: feature names (where exp_sign != 0)
             Columns:
               - 'Expected': '+' for positive, '-' for negative expected sign
               - 'Coefficient': actual coefficient value
@@ -1308,34 +1308,39 @@ class SignCheck(ModelTestBase):
         └──────────┴───────────┴─────────────┴────────┘
         """
         records = []
-        
-        for tsfm in self.tsfm_list:
-            # Skip TSFM instances where exp_sign is 0 (no expectation)
-            if tsfm.exp_sign == 0:
+
+        for feature in self.feature_list:
+            if not hasattr(feature, 'exp_sign'):
+                raise AttributeError(
+                    f"Feature '{feature}' does not define required 'exp_sign' attribute."
+                )
+
+            # Skip features where exp_sign is 0 (no expectation)
+            if feature.exp_sign == 0:
                 continue
-                
-            tsfm_name = tsfm.name
-            
-            # Check if coefficient exists for this TSFM
+
+            tsfm_name = feature.name
+
+            # Check if coefficient exists for this feature
             if tsfm_name not in self.coefficients.index:
                 # If coefficient not found, mark as failed
-                expected_sign = '+' if tsfm.exp_sign > 0 else '-'
+                expected_sign = '+' if feature.exp_sign > 0 else '-'
                 records.append({
                     'Expected': expected_sign,
                     'Coefficient': np.nan,
                     'Passed': False
                 })
                 continue
-            
+
             coeff_value = self.coefficients[tsfm_name]
-            expected_sign = '+' if tsfm.exp_sign > 0 else '-'
-            
+            expected_sign = '+' if feature.exp_sign > 0 else '-'
+
             # Check if signs match
-            if tsfm.exp_sign > 0:
+            if feature.exp_sign > 0:
                 # Expect positive coefficient
                 passed = coeff_value > 0
             else:
-                # Expect negative coefficient  
+                # Expect negative coefficient
                 passed = coeff_value < 0
             
             records.append({
@@ -1343,12 +1348,12 @@ class SignCheck(ModelTestBase):
                 'Coefficient': coeff_value,
                 'Passed': passed
             })
-        
-        # Create DataFrame with TSFM names as index
-        tsfm_names = [tsfm.name for tsfm in self.tsfm_list if tsfm.exp_sign != 0]
+
+        # Create DataFrame with feature names as index
+        tsfm_names = [feature.name for feature in self.feature_list if feature.exp_sign != 0]
         df = pd.DataFrame(records, index=tsfm_names)
         df.index.name = 'Variable'
-        
+
         return df
 
     @property

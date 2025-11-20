@@ -27,6 +27,11 @@ class RgmVar(Feature):
     on : bool or int, default True
         When True/1 the variable is active during regime==1; when False/0 the
         variable is active during regime==0.
+    exp_sign : int, default 0
+        Expected coefficient sign for economic validation:
+        - 1: expect positive coefficient (positive relationship with target)
+        - -1: expect negative coefficient (negative relationship with target)
+        - 0: no expectation (no sign constraint)
     alias : str, optional
         Custom output name. Defaults to ``"{var_name}@{regime}_{on}"``.
     freq : str, optional
@@ -53,6 +58,7 @@ class RgmVar(Feature):
         var: Union[str, TSFM],
         regime: str,
         on: Union[bool, int] = True,
+        exp_sign: int = 0,
         alias: Optional[str] = None,
         freq: Optional[str] = None,
     ) -> None:
@@ -77,6 +83,7 @@ class RgmVar(Feature):
         super().__init__(var=var_for_super, alias=alias)
         self.regime = regime
         self.on = normalized_on
+        self.exp_sign = exp_sign
         self.freq = freq
         self._var_label = var_label
 
