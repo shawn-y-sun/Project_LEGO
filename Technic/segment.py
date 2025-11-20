@@ -909,6 +909,7 @@ class Segment:
         feature_test: Optional[FeatureTest] = None
         excluded_features: List[str] = []
         excluded_seen: Set[str] = set()
+        excluded_sign_variants: List[str] = []
         pretest_cache: Dict[str, bool] = {}
         if pretest:
             model_pretestset = self._resolve_model_pretestset()
@@ -1057,6 +1058,8 @@ class Segment:
                     if expected_sign != 0:
                         corr_sign = int(np.sign(corr)) if corr != 0 else 0
                         if corr_sign != expected_sign:
+                            if print_pretest:
+                                excluded_sign_variants.append(col)
                             continue
 
                 corr_results.append({
@@ -1068,6 +1071,15 @@ class Segment:
         # Create result DataFrame and sort by absolute correlation
         result_df = pd.DataFrame(corr_results)
         result_df = result_df.sort_values('abs_corr', ascending=False).reset_index(drop=True)
+
+        if print_pretest and excluded_sign_variants:
+            print("--- Expected Sign Exclusions ---")
+            print(
+                "Excluded "
+                f"{len(excluded_sign_variants)} variant(s): "
+                + ", ".join(excluded_sign_variants)
+            )
+            print("")
 
         return result_df
 
