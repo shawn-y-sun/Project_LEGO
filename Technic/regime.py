@@ -100,6 +100,18 @@ class RgmVar(Feature):
 
         return self.alias or f"{self._var_label}@{self.regime}_{self.on}"
 
+    def __repr__(self) -> str:
+        """
+        Represent the feature using its resolved name for readability.
+
+        Returns
+        -------
+        str
+            ``self.name`` to mirror the output feature label.
+        """
+
+        return self.name
+
     def lookup_map(self) -> Dict[str, str]:
         """
         Map attributes to column names for lookup.
