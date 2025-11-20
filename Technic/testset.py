@@ -332,7 +332,7 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
     sign_check_features = mdl.spec_map.get('SignCheck', [])
     if sign_check_features:
         tests['Sign Check'] = SignCheck(
-            tsfm_list=sign_check_features,
+            feature_list=sign_check_features,
             coefficients=mdl.params,
             filter_mode='moderate'
         )
