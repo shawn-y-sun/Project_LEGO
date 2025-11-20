@@ -192,6 +192,8 @@ class ModelSearch:
             * str, TSFM, Feature, tuple, or set.
           * tuple: items stay grouped together.
           * set: treated as a pool where exactly one must be selected.
+        - Duplicate entries in desired_pool are removed before processing to
+          prevent redundant combination generation.
         - Strings at top-level are expanded into TSFM variants via DataManager.
         - Feature-level pre-tests (when configured) prune invalid candidates
           before combination enumeration.
@@ -291,12 +293,31 @@ class ModelSearch:
         # Handle forced_in being optional
         forced_specs = (forced_in or []).copy()
 
+        # Remove duplicates from desired_pool to avoid repeated combinations
+        # when users inadvertently supply the same variable more than once.
+        seen_signatures: Set[str] = set()
+        unique_desired_pool: List[Union[str, TSFM, Feature, Tuple[Any, ...], set]] = []
+
+        def _dedup_signature(item: Any) -> str:
+            """Create a deterministic signature for deduplication."""
+
+            # Using repr ensures we can handle unhashable inputs such as sets and tuples
+            # while keeping ordering stable for repeated objects.
+            return f"{type(item).__name__}:{repr(item)}"
+
+        for pool_item in desired_pool:
+            signature = _dedup_signature(pool_item)
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+            unique_desired_pool.append(pool_item)
+
         # Step 1: Build raw combos from desired_pool with category constraints
         # Separate constrained and unconstrained items
         constrained_items = []  # top-level strings and TSFM instances
         unconstrained_items = []  # everything else (sets, tuples, other Features)
 
-        for item in desired_pool:
+        for item in unique_desired_pool:
             if isinstance(item, (str, TSFM)):
                 constrained_items.append(item)
             else:
