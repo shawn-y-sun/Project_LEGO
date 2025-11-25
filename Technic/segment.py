@@ -992,11 +992,30 @@ class Segment:
             )
             print("")
 
-        # Generate all possible transformations for each variable after filtering
-        var_dfs = {
-            var_name: self.dm.build_features(tsfms)
-            for var_name, tsfms in filtered_tsfm_specs.items()
-        }
+        # Generate all possible transformations for each variable after filtering.
+        # We also capture a mapping from the realized column names (which include
+        # frequency prefixes and lag suffixes resolved during apply()) back to the
+        # originating transform objects. This prevents plot_vars() from rebuilding
+        # an untransformed series when a top entry stems from a lagged or
+        # frequency-annotated TSFM whose name is finalized only after execution.
+        var_dfs: Dict[str, pd.DataFrame] = {}
+        for var_name, tsfms in filtered_tsfm_specs.items():
+            var_df = self.dm.build_features(tsfms)
+            var_dfs[var_name] = var_df
+
+            # Prefer a one-to-one mapping between the provided specs and the
+            # resulting columns when sizes align; otherwise, fall back to any
+            # explicit output_names defined on the feature object to preserve
+            # downstream plotting fidelity.
+            if len(tsfms) == len(var_df.columns):
+                for tsfm, col in zip(tsfms, var_df.columns):
+                    tsfm_lookup[col] = tsfm
+            else:
+                for tsfm in tsfms:
+                    output_names = getattr(tsfm, "output_names", None)
+                    if output_names:
+                        for col in output_names:
+                            tsfm_lookup[col] = tsfm
         
         # Get target data based on sample
         if sample == 'in':
