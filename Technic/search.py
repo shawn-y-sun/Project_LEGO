@@ -193,7 +193,10 @@ class ModelSearch:
         - desired_pool can contain:
             * str, TSFM, Feature, tuple, or set.
           * tuple: items stay grouped together.
-          * set: treated as a pool where exactly one must be selected.
+          * set: treated as a pool where exactly one must be selected. When a
+            set contains :class:`RgmVar` instances, combinations of distinct
+            regimes are also enumerated (respecting ``regime_limit``) so
+            multi-regime variants are not excluded prematurely.
         - Duplicate entries in desired_pool are removed before processing to
           prevent redundant combination generation.
         - Strings at top-level are expanded into TSFM variants via DataManager.
@@ -390,7 +393,20 @@ class ModelSearch:
                         else:
                             flat.add(el)
                 _flatten(item)
-                pools.append(list(flat))
+                # When a set contains regime variables, allow combinations of
+                # distinct regimes to co-occur by generating subset options.
+                # Filtering by ``regime_limit`` later in the pipeline still
+                # enforces per-regime caps, but this expansion ensures we do
+                # not artificially limit combos to a single RgmVar.
+                if any(isinstance(el, RgmVar) for el in flat):
+                    subset_pool: List[List[Any]] = []
+                    flat_list = list(flat)
+                    for r in range(1, len(flat_list) + 1):
+                        for combo in itertools.combinations(flat_list, r):
+                            subset_pool.append(list(combo))
+                    pools.append(subset_pool)
+                else:
+                    pools.append(list(flat))
             else:
                 pools.append([item])
 
