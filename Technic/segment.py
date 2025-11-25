@@ -519,7 +519,7 @@ class Segment:
     
     def plot_vars(
         self,
-        vars_list: List[str],
+        vars_list: List[Union[str, Feature]],
         plot_type: str = 'line',
         sample: str = 'full',
         date_range: Optional[Tuple[str, str]] = None,
@@ -534,9 +534,12 @@ class Segment:
 
         Parameters
         ----------
-        vars_list : List[str]
-            List of variable names to explore. For each variable, all applicable
-            transformations will be generated and plotted.
+        vars_list : List[Union[str, Feature]]
+            List of variable names or pre-constructed Feature/TSFM objects to explore.
+            For each variable, all applicable transformations will be generated and
+            plotted when provided as names. When Feature objects are supplied, the
+            method plots those specific transformations without rebuilding the
+            broader search grid.
         plot_type : str, default 'line'
             Type of plot to create:
             - 'line': time series plot with dual y-axes
@@ -758,6 +761,7 @@ class Segment:
         plot_type: str = 'line',
         date_range: Optional[Tuple[str, str]] = None,
         plot: bool = True,
+        plot_top: Optional[int] = None,
         pretest: bool = False,
         print_pretest: bool = False,
         outlier_idx: Optional[Sequence[Any]] = None,
@@ -812,6 +816,12 @@ class Segment:
             Flag indicating whether to generate plots via :meth:`plot_vars` before
             running the correlation analysis. Set to ``False`` to skip plotting when
             only tabular correlations are required.
+        plot_top : int, optional
+            Positive integer indicating how many of the highest absolute-correlation
+            transformations to plot. When provided alongside ``plot=True``, the method
+            skips the initial plotting pass, computes correlations first, and then plots
+            only the top ``plot_top`` entries using :meth:`plot_vars` by forwarding
+            either the variable names or the corresponding :class:`Feature` objects.
         pretest : bool, default False
             When ``True``, execute the target and feature pre-tests defined on
             ``self.model_cls`` (if any) before calculating correlations. Features
@@ -837,9 +847,11 @@ class Segment:
         ------
         TypeError
             If unexpected keyword arguments are provided, ``regime`` is not a string,
-            or ``regime_on`` cannot be interpreted as 0/1.
+            ``regime_on`` cannot be interpreted as 0/1, or ``plot_top`` is not an
+            integer when supplied.
         ValueError
-            If ``regime_on`` is not interpretable as 0/1 or boolean.
+            If ``regime_on`` is not interpretable as 0/1 or boolean, or ``plot_top``
+            is not positive when provided.
         KeyError
             If the specified ``regime`` column cannot be found in either internal or
             MEV data sources.
@@ -871,7 +883,8 @@ class Segment:
 
         # First create the plots when requested. This keeps backward compatibility
         # with the original behavior while allowing callers to opt out of plotting.
-        if plot:
+        # When plot_top is provided, defer plotting until correlations are available.
+        if plot and plot_top is None:
             self.plot_vars(
                 vars_list=vars_list,
                 plot_type=plot_type,
@@ -884,6 +897,12 @@ class Segment:
         if legacy_kwargs:
             unexpected = ", ".join(sorted(legacy_kwargs.keys()))
             raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+
+        if plot_top is not None:
+            if not isinstance(plot_top, int):
+                raise TypeError("plot_top must be provided as a positive integer.")
+            if plot_top <= 0:
+                raise ValueError("plot_top must be a positive integer when specified.")
 
         # Respect explicit caller intent for quarterly data by only forcing the
         # default quarterly floor when no custom periods (including legacy
@@ -924,11 +943,16 @@ class Segment:
 
         # Apply feature pretests on specs before constructing feature dataframes
         filtered_tsfm_specs: Dict[str, List[Union[str, Feature, TSFM]]] = {}
+        tsfm_lookup: Dict[str, Union[str, Feature, TSFM]] = {}
         for var_name, tsfms in tsfm_specs.items():
             filtered: List[Union[str, Feature, TSFM]] = []
             for tsfm in tsfms:
                 if feature_test is None:
                     filtered.append(tsfm)
+                    if isinstance(tsfm, Feature):
+                        tsfm_lookup[tsfm.name] = tsfm
+                    elif isinstance(tsfm, str):
+                        tsfm_lookup[tsfm] = tsfm
                     continue
 
                 cache_key = repr(tsfm)
@@ -948,6 +972,10 @@ class Segment:
 
                 if passes_feature:
                     filtered.append(tsfm)
+                    if isinstance(tsfm, Feature):
+                        tsfm_lookup[tsfm.name] = tsfm
+                    elif isinstance(tsfm, str):
+                        tsfm_lookup[tsfm] = tsfm
                 elif cache_key not in excluded_seen:
                     excluded_features.append(cache_key)
                     excluded_seen.add(cache_key)
@@ -1080,6 +1108,28 @@ class Segment:
                 + ", ".join(excluded_sign_variants)
             )
             print("")
+
+        if plot and plot_top is not None and not result_df.empty:
+            top_n = min(plot_top, len(result_df))
+            top_entries = result_df.head(top_n)['variable'].tolist()
+            # NOTE: Preserve Feature objects for transformed variants so plot_vars()
+            # can render the exact transformation instead of rebuilding all variants.
+            plot_specs: List[Union[str, Feature, TSFM]] = [
+                tsfm_lookup.get(var_name, var_name) for var_name in top_entries
+            ]
+
+            print(
+                "Plotting top "
+                f"{top_n} transformation(s) by absolute correlation: "
+                + ", ".join(map(str, top_entries))
+            )
+            self.plot_vars(
+                vars_list=plot_specs,
+                plot_type=plot_type,
+                sample=sample,
+                date_range=date_range,
+                outlier_idx=outlier_labels
+            )
 
         return result_df
 
