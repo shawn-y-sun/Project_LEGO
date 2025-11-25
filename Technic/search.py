@@ -29,6 +29,7 @@ from .model import ModelBase
 from .pretest import PreTestSet, FeatureTest
 from .cm import CM
 from .periods import default_periods_for_freq, resolve_periods_argument
+from .regime import RgmVar
 
 
 def _sort_specs_with_dummies_first(spec_list: List[Any]) -> List[Any]:
@@ -182,6 +183,7 @@ class ModelSearch:
         max_lag: int = 3,
         periods: Optional[Sequence[int]] = None,
         category_limit: int = 1,
+        regime_limit: int = 1,
         exp_sign_map: Optional[Dict[str, int]] = None,
         **legacy_kwargs: Any
     ) -> List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]]:
@@ -222,6 +224,10 @@ class ModelSearch:
             Max variables from each MEV category per combo. Only applies to
             top-level strings and TSFM instances in desired_pool; other Feature
             instances or items in nested structures are not subject to this constraint.
+        regime_limit : int, default 1
+            Maximum number of :class:`RgmVar` instances from the same regime per
+            combo. Applies across the full combination, including forced
+            specifications.
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             Passed to DataManager.build_tsfm_specs() for string expansion.
@@ -231,6 +237,12 @@ class ModelSearch:
         combos : list of spec lists
             Each combo is a list including str, TSFM, Feature, or tuple elements.
         """
+        if not isinstance(regime_limit, int):
+            raise TypeError("regime_limit must be provided as an integer.")
+
+        if regime_limit < 1:
+            raise ValueError("regime_limit must be a positive integer.")
+
         # Run feature-level pretests later in the pipeline so TSFM expansions
         # can be evaluated directly before enumeration.
         feature_test = self._prepare_feature_pretest()
@@ -408,6 +420,42 @@ class ModelSearch:
         for rc in raw_combos:
             if len(forced_specs) + len(rc) <= max_var_num:
                 combos.append(forced_specs + rc)
+
+        def _regime_counts(items: Sequence[Any]) -> Dict[str, int]:
+            """Return counts of regime occurrences for any nested :class:`RgmVar`.
+
+            Parameters
+            ----------
+            items : Sequence[Any]
+                Collection of specification elements to inspect.
+
+            Returns
+            -------
+            Dict[str, int]
+                Mapping of regime label to count of :class:`RgmVar` entries.
+            """
+
+            counts: Dict[str, int] = defaultdict(int)
+
+            def _collect(obj: Any) -> None:
+                if isinstance(obj, RgmVar):
+                    counts[obj.regime] += 1
+                elif isinstance(obj, (list, tuple, set)):
+                    for el in obj:
+                        _collect(el)
+
+            _collect(items)
+            return counts
+
+        # Enforce per-regime limits across forced and desired combinations
+        filtered_combos: List[List[Any]] = []
+        for combo in combos:
+            regime_counts = _regime_counts(combo)
+            if any(count > regime_limit for count in regime_counts.values()):
+                continue
+            filtered_combos.append(combo)
+
+        combos = filtered_combos
 
         # Step 3: Expand only top-level strings into TSFM variants
         # Gather unique strings to expand
@@ -789,6 +837,7 @@ class ModelSearch:
         max_lag: int = 3,
         periods: Optional[Sequence[int]] = None,
         category_limit: int = 1,
+        regime_limit: int = 1,
         exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
@@ -831,6 +880,10 @@ class ModelSearch:
             still accepted for backward compatibility.
         category_limit : int, default 1
             Maximum number of variables from each MEV category per combo.
+        regime_limit : int, default 1
+            Maximum number of :class:`RgmVar` instances from the same regime per
+            combo. Applies across the full combination, including forced
+            specifications.
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             Passed to build_spec_combos() and ultimately to DataManager.build_tsfm_specs().
@@ -877,6 +930,7 @@ class ModelSearch:
                   f"Max lag         : {max_lag}\n"
                   f"Periods         : {periods_summary}\n"
                   f"Category limit  : {category_limit}\n"
+                  f"Regime limit    : {regime_limit}\n"
                   f"Exp sign map    : {exp_sign_map}\n"
                   f"Top N           : {top_n}\n"
                   f"Rank weights    : {rank_weights}\n"
@@ -954,6 +1008,7 @@ class ModelSearch:
                 max_lag,
                 periods=resolved_periods,
                 category_limit=category_limit,
+                regime_limit=regime_limit,
                 exp_sign_map=exp_sign_map,
             )
             print(f"Built {len(combos)} spec combinations.\n")
