@@ -1137,14 +1137,20 @@ class DataManager:
         for spec in specs:
             if isinstance(spec, TSFM):
                 assign_feature_exp_sign(spec)
-                specs_map[spec.var] = [wrap_regime(spec)]
+                # NOTE: Multiple TSFMs can share the same base var (e.g., lag/grid
+                # variants). Accumulate them instead of overwriting so callers can
+                # request a specific subset without losing earlier entries.
+                specs_map.setdefault(spec.var, []).append(wrap_regime(spec))
 
             elif isinstance(spec, Feature):
                 assign_feature_exp_sign(spec)
                 var_name = getattr(spec, "var", None)
                 if var_name is None:
                     raise ValueError(f"Feature spec {spec!r} is missing a 'var' attribute.")
-                specs_map[var_name] = [spec]
+                # NOTE: Preserve all provided feature variants per variable for
+                # downstream plotting or correlation selection without collapsing
+                # to the last seen definition.
+                specs_map.setdefault(var_name, []).append(spec)
 
             elif isinstance(spec, str):
                 var_name = spec

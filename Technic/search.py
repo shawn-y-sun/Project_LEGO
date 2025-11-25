@@ -231,6 +231,9 @@ class ModelSearch:
             Maximum number of :class:`RgmVar` instances sharing the same
             ``(regime, regime_on)`` signature per combo. Applies across the full
             combination, including forced specifications.
+            Maximum number of :class:`RgmVar` instances from the same regime per
+            combo. Applies across the full combination, including forced
+            specifications.
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             Passed to DataManager.build_tsfm_specs() for string expansion.
