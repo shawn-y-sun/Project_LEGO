@@ -228,6 +228,9 @@ class ModelSearch:
             top-level strings and TSFM instances in desired_pool; other Feature
             instances or items in nested structures are not subject to this constraint.
         regime_limit : int, default 1
+            Maximum number of :class:`RgmVar` instances sharing the same
+            ``(regime, regime_on)`` signature per combo. Applies across the full
+            combination, including forced specifications.
             Maximum number of :class:`RgmVar` instances from the same regime per
             combo. Applies across the full combination, including forced
             specifications.
@@ -437,8 +440,13 @@ class ModelSearch:
             if len(forced_specs) + len(rc) <= max_var_num:
                 combos.append(forced_specs + rc)
 
-        def _regime_counts(items: Sequence[Any]) -> Dict[str, int]:
+        def _regime_counts(items: Sequence[Any]) -> Dict[Tuple[str, int], int]:
             """Return counts of regime occurrences for any nested :class:`RgmVar`.
+
+            Regime uniqueness accounts for the activation flag (``on``/``regime_on``)
+            so that variants targeting the same regime column with different active
+            states are treated as distinct. This enables combinations that include
+            both active and inactive variants of the same regime indicator.
 
             Parameters
             ----------
@@ -447,15 +455,17 @@ class ModelSearch:
 
             Returns
             -------
-            Dict[str, int]
-                Mapping of regime label to count of :class:`RgmVar` entries.
+            Dict[Tuple[str, int], int]
+                Mapping of ``(regime, regime_on)`` signatures to counts of
+                :class:`RgmVar` entries.
             """
 
-            counts: Dict[str, int] = defaultdict(int)
+            counts: Dict[Tuple[str, int], int] = defaultdict(int)
 
             def _collect(obj: Any) -> None:
                 if isinstance(obj, RgmVar):
-                    counts[obj.regime] += 1
+                    # Include activation flag so on/off variants coexist.
+                    counts[(obj.regime, getattr(obj, "on", 1))] += 1
                 elif isinstance(obj, (list, tuple, set)):
                     for el in obj:
                         _collect(el)
@@ -897,9 +907,9 @@ class ModelSearch:
         category_limit : int, default 1
             Maximum number of variables from each MEV category per combo.
         regime_limit : int, default 1
-            Maximum number of :class:`RgmVar` instances from the same regime per
-            combo. Applies across the full combination, including forced
-            specifications.
+            Maximum number of :class:`RgmVar` instances sharing the same
+            ``(regime, regime_on)`` signature per combo. Applies across the full
+            combination, including forced specifications.
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             Passed to build_spec_combos() and ultimately to DataManager.build_tsfm_specs().
