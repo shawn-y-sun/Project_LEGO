@@ -962,6 +962,36 @@ class FullStationarityTest(ModelTestBase):
             _ = self.test_result
         return bool(self._test_filter_cache)
 
+    def _build_feature_series(self, variable_spec: Union[str, TSFM, RgmVar, CondVar]) -> pd.Series:
+        """
+        Construct a single feature series from the provided specification.
+
+        Parameters
+        ----------
+        variable_spec : Union[str, TSFM, RgmVar, CondVar]
+            Feature identifier forwarded to :meth:`DataManager.build_features`.
+
+        Returns
+        -------
+        pd.Series
+            The first column from the constructed feature frame.
+
+        Raises
+        ------
+        ValueError
+            If the constructed DataFrame is empty.
+        """
+
+        feature_frame = self.dm.build_features([variable_spec])
+        if feature_frame.empty:
+            raise ValueError(
+                "FullStationarityTest: constructed feature frame is empty; "
+                "unable to perform stationarity checks."
+            )
+        series = feature_frame.iloc[:, 0]
+        series.name = series.name or str(variable_spec)
+        return series
+
     def _evaluate_variable(
         self,
         variable_spec: Union[str, TSFM, RgmVar, CondVar],
@@ -991,6 +1021,77 @@ class FullStationarityTest(ModelTestBase):
         combined_idx = self.dm.in_sample_idx.append(self.dm.out_sample_idx)
         full_df, full_passed = self._run_stationarity(series, combined_idx, f"{label_prefix}Full")
         return full_df, full_passed
+
+    def _run_stationarity(
+        self,
+        series: pd.Series,
+        sample_idx: pd.Index,
+        sample_label: str,
+    ) -> Tuple[pd.DataFrame, bool]:
+        """
+        Execute the configured stationarity test for a specific sample.
+
+        Parameters
+        ----------
+        series : pd.Series
+            Full feature series prior to sample slicing.
+        sample_idx : pd.Index
+            Index labels defining the sample to evaluate (e.g., in-sample).
+        sample_label : str
+            Label recorded in the ``Sample`` column of the result table.
+
+        Returns
+        -------
+        Tuple[pd.DataFrame, bool]
+            The stationarity result table for the given sample and whether it
+            satisfied the configured filter mode.
+        """
+
+        aligned_idx = sample_idx[sample_idx.isin(series.index)]
+        test_instance = self.test_class(
+            series=series.loc[aligned_idx],
+            alias=self.alias,
+            filter_mode=self.filter_mode,
+            test_dict=self.test_dict,
+            test_threshold=self.thresholds,
+            filter_on=self.filter_on,
+        )
+        result_df = test_instance.test_result.copy()
+
+        # Insert sample indicator before the Passed column for readability.
+        insert_at = result_df.columns.get_loc('Passed')
+        result_df.insert(insert_at, 'Sample', sample_label)
+        return result_df, test_instance.test_filter
+
+    @staticmethod
+    def _resolve_original_variable(variable_spec: Union[RgmVar, CondVar]) -> Union[str, TSFM]:
+        """
+        Extract the underlying base variable from regime or conditional specs.
+
+        Parameters
+        ----------
+        variable_spec : Union[RgmVar, CondVar]
+            Regime or conditional feature wrapper.
+
+        Returns
+        -------
+        Union[str, TSFM]
+            The unwrapped variable specification suitable for feature
+            construction.
+
+        Examples
+        --------
+        >>> FullStationarityTest._resolve_original_variable(RgmVar('GDP', var_feature=TSFM('GDP')))
+        TSFM('GDP')
+        >>> FullStationarityTest._resolve_original_variable(CondVar('CPI'))
+        'CPI'
+        """
+
+        # Prefer the original transform when present so fallback testing mirrors
+        # the non-regime specification rather than the raw base variable.
+        if isinstance(variable_spec, RgmVar) and getattr(variable_spec, "var_feature", None) is not None:
+            return variable_spec.var_feature
+        return variable_spec.var
 
     def _evaluate_series_collection(
         self, series_map: Mapping[str, pd.Series]
@@ -1218,36 +1319,6 @@ class TargetStationarityTest(ModelTestBase):
             'Full (No Outliers)': full_no_outliers,
         }
 
-    def _build_feature_series(self, variable_spec: Union[str, TSFM, RgmVar, CondVar]) -> pd.Series:
-        """
-        Construct a single feature series from the provided specification.
-
-        Parameters
-        ----------
-        variable_spec : Union[str, TSFM, RgmVar, CondVar]
-            Feature identifier forwarded to :meth:`DataManager.build_features`.
-
-        Returns
-        -------
-        pd.Series
-            The first column from the constructed feature frame.
-
-        Raises
-        ------
-        ValueError
-            If the constructed DataFrame is empty.
-        """
-
-        feature_frame = self.dm.build_features([variable_spec])
-        if feature_frame.empty:
-            raise ValueError(
-                "FullStationarityTest: constructed feature frame is empty; "
-                "unable to perform stationarity checks."
-            )
-        series = feature_frame.iloc[:, 0]
-        series.name = series.name or str(variable_spec)
-        return series
-
 
 class TargetStationarityTest(ModelTestBase):
     """
@@ -1415,47 +1486,6 @@ class TargetStationarityTest(ModelTestBase):
             'In (No Outliers)': in_no_outliers,
             'Full (No Outliers)': full_no_outliers,
         }
-
-    def _run_stationarity(
-        self,
-        series: pd.Series,
-        sample_idx: pd.Index,
-        sample_label: str,
-    ) -> Tuple[pd.DataFrame, bool]:
-        """
-        Execute the configured stationarity test for a specific sample.
-
-        Parameters
-        ----------
-        series : pd.Series
-            Full feature series prior to sample slicing.
-        sample_idx : pd.Index
-            Index labels defining the sample to evaluate (e.g., in-sample).
-        sample_label : str
-            Label recorded in the ``Sample`` column of the result table.
-
-        Returns
-        -------
-        Tuple[pd.DataFrame, bool]
-            The stationarity result table for the given sample and whether it
-            satisfied the configured filter mode.
-        """
-
-        aligned_idx = sample_idx[sample_idx.isin(series.index)]
-        test_instance = self.test_class(
-            series=series.loc[aligned_idx],
-            alias=self.alias,
-            filter_mode=self.filter_mode,
-            test_dict=self.test_dict,
-            test_threshold=self.thresholds,
-            filter_on=self.filter_on,
-        )
-        result_df = test_instance.test_result.copy()
-
-        # Insert sample indicator before the Passed column for readability.
-        insert_at = result_df.columns.get_loc('Passed')
-        result_df.insert(insert_at, 'Sample', sample_label)
-        return result_df, test_instance.test_filter
 
     @staticmethod
     def _resolve_original_variable(variable_spec: Union[RgmVar, CondVar]) -> Union[str, TSFM]:
@@ -2342,11 +2372,17 @@ class MultiFullStationarityTest(ModelTestBase):
             record: Dict[str, Any] = {'Variable': var_name}
 
             individual_results = stat_test.test_result
-            sample_value = individual_results['Sample'].iloc[0] if 'Sample' in individual_results.columns else np.nan
+
+            # Guard against empty result tables so consolidations never raise
+            # IndexError and instead return a fully NA record.
+            if individual_results.empty or 'Sample' not in individual_results.columns:
+                sample_value = np.nan
+            else:
+                sample_value = individual_results['Sample'].iloc[0]
             record['Sample'] = sample_value
 
             for test_name in test_names:
-                if test_name in individual_results.index:
+                if not individual_results.empty and test_name in individual_results.index:
                     record[f'{test_name}_Statistic'] = individual_results.loc[test_name, 'Statistic']
                     record[f'{test_name}_P-value'] = individual_results.loc[test_name, 'P-value']
                     record[f'{test_name}_Passed'] = individual_results.loc[test_name, 'Passed']
