@@ -2372,11 +2372,17 @@ class MultiFullStationarityTest(ModelTestBase):
             record: Dict[str, Any] = {'Variable': var_name}
 
             individual_results = stat_test.test_result
-            sample_value = individual_results['Sample'].iloc[0] if 'Sample' in individual_results.columns else np.nan
+
+            # Guard against empty result tables so consolidations never raise
+            # IndexError and instead return a fully NA record.
+            if individual_results.empty or 'Sample' not in individual_results.columns:
+                sample_value = np.nan
+            else:
+                sample_value = individual_results['Sample'].iloc[0]
             record['Sample'] = sample_value
 
             for test_name in test_names:
-                if test_name in individual_results.index:
+                if not individual_results.empty and test_name in individual_results.index:
                     record[f'{test_name}_Statistic'] = individual_results.loc[test_name, 'Statistic']
                     record[f'{test_name}_P-value'] = individual_results.loc[test_name, 'P-value']
                     record[f'{test_name}_Passed'] = individual_results.loc[test_name, 'Passed']
