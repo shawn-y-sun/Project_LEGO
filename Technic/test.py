@@ -1063,6 +1063,36 @@ class FullStationarityTest(ModelTestBase):
         result_df.insert(insert_at, 'Sample', sample_label)
         return result_df, test_instance.test_filter
 
+    @staticmethod
+    def _resolve_original_variable(variable_spec: Union[RgmVar, CondVar]) -> Union[str, TSFM]:
+        """
+        Extract the underlying base variable from regime or conditional specs.
+
+        Parameters
+        ----------
+        variable_spec : Union[RgmVar, CondVar]
+            Regime or conditional feature wrapper.
+
+        Returns
+        -------
+        Union[str, TSFM]
+            The unwrapped variable specification suitable for feature
+            construction.
+
+        Examples
+        --------
+        >>> FullStationarityTest._resolve_original_variable(RgmVar('GDP', var_feature=TSFM('GDP')))
+        TSFM('GDP')
+        >>> FullStationarityTest._resolve_original_variable(CondVar('CPI'))
+        'CPI'
+        """
+
+        # Prefer the original transform when present so fallback testing mirrors
+        # the non-regime specification rather than the raw base variable.
+        if isinstance(variable_spec, RgmVar) and getattr(variable_spec, "var_feature", None) is not None:
+            return variable_spec.var_feature
+        return variable_spec.var
+
     def _evaluate_series_collection(
         self, series_map: Mapping[str, pd.Series]
     ) -> Tuple[pd.DataFrame, bool]:
