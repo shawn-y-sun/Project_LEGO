@@ -962,6 +962,36 @@ class FullStationarityTest(ModelTestBase):
             _ = self.test_result
         return bool(self._test_filter_cache)
 
+    def _build_feature_series(self, variable_spec: Union[str, TSFM, RgmVar, CondVar]) -> pd.Series:
+        """
+        Construct a single feature series from the provided specification.
+
+        Parameters
+        ----------
+        variable_spec : Union[str, TSFM, RgmVar, CondVar]
+            Feature identifier forwarded to :meth:`DataManager.build_features`.
+
+        Returns
+        -------
+        pd.Series
+            The first column from the constructed feature frame.
+
+        Raises
+        ------
+        ValueError
+            If the constructed DataFrame is empty.
+        """
+
+        feature_frame = self.dm.build_features([variable_spec])
+        if feature_frame.empty:
+            raise ValueError(
+                "FullStationarityTest: constructed feature frame is empty; "
+                "unable to perform stationarity checks."
+            )
+        series = feature_frame.iloc[:, 0]
+        series.name = series.name or str(variable_spec)
+        return series
+
     def _evaluate_variable(
         self,
         variable_spec: Union[str, TSFM, RgmVar, CondVar],
@@ -1217,36 +1247,6 @@ class TargetStationarityTest(ModelTestBase):
             'In (No Outliers)': in_no_outliers,
             'Full (No Outliers)': full_no_outliers,
         }
-
-    def _build_feature_series(self, variable_spec: Union[str, TSFM, RgmVar, CondVar]) -> pd.Series:
-        """
-        Construct a single feature series from the provided specification.
-
-        Parameters
-        ----------
-        variable_spec : Union[str, TSFM, RgmVar, CondVar]
-            Feature identifier forwarded to :meth:`DataManager.build_features`.
-
-        Returns
-        -------
-        pd.Series
-            The first column from the constructed feature frame.
-
-        Raises
-        ------
-        ValueError
-            If the constructed DataFrame is empty.
-        """
-
-        feature_frame = self.dm.build_features([variable_spec])
-        if feature_frame.empty:
-            raise ValueError(
-                "FullStationarityTest: constructed feature frame is empty; "
-                "unable to perform stationarity checks."
-            )
-        series = feature_frame.iloc[:, 0]
-        series.name = series.name or str(variable_spec)
-        return series
 
 
 class TargetStationarityTest(ModelTestBase):
