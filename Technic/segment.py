@@ -523,7 +523,8 @@ class Segment:
         plot_type: str = 'line',
         sample: str = 'full',
         date_range: Optional[Tuple[str, str]] = None,
-        outlier_idx: Optional[Sequence[Any]] = None
+        outlier_idx: Optional[Sequence[Any]] = None,
+        active_idx: Optional[pd.Index] = None
     ) -> None:
         """
         Create exploratory plots comparing variables and their transformations to the target.
@@ -555,6 +556,12 @@ class Segment:
             Iterable of index labels representing observations to exclude from plotting
             and correlation calculations. Labels must match those in the modeling
             DataFrame index. Useful for removing anomalous dates prior to visualization.
+        active_idx : pd.Index, optional
+            Index labels designating the active subset of observations to retain for
+            plotting and correlation calculations. Primarily used for regime-aware
+            visualizations to ensure inactive periods are excluded from both axes. When
+            provided, the target and variable series are intersected with this index
+            after outlier handling and prior to date range filtering.
 
         Example
         -------
@@ -603,6 +610,14 @@ class Segment:
         else:
             target_series = target_series_full
 
+        if active_idx is not None:
+            # NOTE: Restrict plotting to the explicitly active index (e.g., regime-on
+            # periods) to avoid displaying inactive intervals when regime filters are
+            # applied upstream.
+            active_idx = pd.Index(active_idx)
+            target_series_plot = target_series_plot.loc[target_series_plot.index.intersection(active_idx)]
+            target_series = target_series.loc[target_series.index.intersection(active_idx)]
+
         # Apply date range filter to target if specified
         if date_range:
             start_date, end_date = date_range
@@ -624,6 +639,12 @@ class Segment:
             if outlier_labels is not None:
                 df_plot.loc[df_plot.index.isin(outlier_labels), :] = np.nan
                 df = df.drop(index=outlier_labels, errors='ignore')
+
+            if active_idx is not None:
+                # NOTE: Keep variable data aligned to the active regime periods so the
+                # plotted transformations mirror the filtered target timeline.
+                df_plot = df_plot.loc[df_plot.index.intersection(active_idx)]
+                df = df.loc[df.index.intersection(active_idx)]
 
             # Apply date range filter to variable data if specified
             if date_range:
@@ -1147,7 +1168,8 @@ class Segment:
                 plot_type=plot_type,
                 sample=sample,
                 date_range=date_range,
-                outlier_idx=outlier_labels
+                outlier_idx=outlier_labels,
+                active_idx=active_regime_idx
             )
 
         return result_df
