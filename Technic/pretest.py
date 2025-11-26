@@ -27,7 +27,7 @@ import pandas as pd
 from .data import DataManager
 from .feature import Feature
 from .transform import TSFM
-from .test import FullStationarityTest, StationarityTest
+from .test import FullStationarityTest, StationarityTest, TargetStationarityTest
 
 
 class PreTestSet:
@@ -293,6 +293,7 @@ class SpecTest:
         return self.test_func(self.specs, self.dm)
 
 
+
 def ppnr_ols_target_test_func(
     dm: DataManager,
     target: str,
@@ -307,25 +308,20 @@ def ppnr_ols_target_test_func(
     target : str
         Column name of the target variable within ``dm.internal_data``.
     sample : {"in", "full"}, default "in"
-        Which portion of the internal data to test. ``"in"`` restricts the
-        analysis to in-sample observations. ``"full"`` concatenates the
-        in-sample and out-of-sample segments to reflect the complete available
-        history.
+        Retained for compatibility; both in-sample and full-sample target
+        series are always evaluated.
 
     Returns
     -------
     pd.DataFrame
-        Stationarity diagnostics returned by :class:`StationarityTest.test_result`.
+        Stationarity diagnostics returned by :class:`TargetStationarityTest`.
         The ``filter_mode_desc`` entry is mirrored into ``DataFrame.attrs`` so
         callers can present the descriptive text before printing the table.
 
     Raises
     ------
-    KeyError
-        If ``target`` is not present in the internal data.
     ValueError
-        If ``sample`` is not one of the supported options or if the target
-        lacks numeric observations after coercion.
+        If ``sample`` is not one of the supported options.
 
     Examples
     --------
@@ -341,40 +337,25 @@ def ppnr_ols_target_test_func(
             f"received {sample!r}."
         )
 
-    internal_data = dm.internal_data
+    # Ensure the target contains numeric observations before running diagnostics to
+    # avoid treating an empty/non-numeric series as stationary.
+    _coerce_numeric_series(dm.internal_data[target], f"Target '{target}'")
 
-    if target not in internal_data.columns:
-        raise KeyError(
-            f"Target '{target}' not found in DataManager.internal_data columns."
-        )
-
-    target_series = internal_data[target]
-
-    # Align the target series to the requested sample scope while preserving
-    # chronological ordering across contiguous segments.
-    in_sample_series = target_series.loc[dm.in_sample_idx]
-    if normalized_sample == "in":
-        scoped_series = in_sample_series
-    else:
-        out_sample_idx = dm.out_sample_idx
-        if out_sample_idx is None or len(out_sample_idx) == 0:
-            scoped_series = in_sample_series
-        else:
-            out_sample_series = target_series.loc[out_sample_idx]
-            scoped_series = pd.concat([in_sample_series, out_sample_series])
-
-    cleaned_series = _coerce_numeric_series(scoped_series, f"Target '{target}'")
-    stationarity_test = StationarityTest(series=cleaned_series)
-    result = stationarity_test.test_result
+    target_test = TargetStationarityTest(
+        target=target,
+        dm=dm,
+        filter_mode='moderate',
+        filter_on=False,
+    )
+    result = target_test.test_result
     # Preserve the descriptive text so upstream callers can surface it prior to
     # displaying the full diagnostic table.
     result.attrs["filter_mode_desc"] = getattr(
-        stationarity_test,
+        target_test,
         "filter_mode_desc",
-        ""
+        "",
     )
     return result
-
 
 def _summarize_stationarity_result(result: pd.DataFrame) -> Optional[bool]:
     """Return a boolean summary of StationarityTest results."""
