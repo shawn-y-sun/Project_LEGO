@@ -337,6 +337,10 @@ def ppnr_ols_target_test_func(
             f"received {sample!r}."
         )
 
+    # Ensure the target contains numeric observations before running diagnostics to
+    # avoid treating an empty/non-numeric series as stationary.
+    _coerce_numeric_series(dm.internal_data[target], f"Target '{target}'")
+
     target_test = TargetStationarityTest(
         target=target,
         dm=dm,
