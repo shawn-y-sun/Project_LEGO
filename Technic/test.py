@@ -1022,6 +1022,47 @@ class FullStationarityTest(ModelTestBase):
         full_df, full_passed = self._run_stationarity(series, combined_idx, f"{label_prefix}Full")
         return full_df, full_passed
 
+    def _run_stationarity(
+        self,
+        series: pd.Series,
+        sample_idx: pd.Index,
+        sample_label: str,
+    ) -> Tuple[pd.DataFrame, bool]:
+        """
+        Execute the configured stationarity test for a specific sample.
+
+        Parameters
+        ----------
+        series : pd.Series
+            Full feature series prior to sample slicing.
+        sample_idx : pd.Index
+            Index labels defining the sample to evaluate (e.g., in-sample).
+        sample_label : str
+            Label recorded in the ``Sample`` column of the result table.
+
+        Returns
+        -------
+        Tuple[pd.DataFrame, bool]
+            The stationarity result table for the given sample and whether it
+            satisfied the configured filter mode.
+        """
+
+        aligned_idx = sample_idx[sample_idx.isin(series.index)]
+        test_instance = self.test_class(
+            series=series.loc[aligned_idx],
+            alias=self.alias,
+            filter_mode=self.filter_mode,
+            test_dict=self.test_dict,
+            test_threshold=self.thresholds,
+            filter_on=self.filter_on,
+        )
+        result_df = test_instance.test_result.copy()
+
+        # Insert sample indicator before the Passed column for readability.
+        insert_at = result_df.columns.get_loc('Passed')
+        result_df.insert(insert_at, 'Sample', sample_label)
+        return result_df, test_instance.test_filter
+
     def _evaluate_series_collection(
         self, series_map: Mapping[str, pd.Series]
     ) -> Tuple[pd.DataFrame, bool]:
@@ -1415,47 +1456,6 @@ class TargetStationarityTest(ModelTestBase):
             'In (No Outliers)': in_no_outliers,
             'Full (No Outliers)': full_no_outliers,
         }
-
-    def _run_stationarity(
-        self,
-        series: pd.Series,
-        sample_idx: pd.Index,
-        sample_label: str,
-    ) -> Tuple[pd.DataFrame, bool]:
-        """
-        Execute the configured stationarity test for a specific sample.
-
-        Parameters
-        ----------
-        series : pd.Series
-            Full feature series prior to sample slicing.
-        sample_idx : pd.Index
-            Index labels defining the sample to evaluate (e.g., in-sample).
-        sample_label : str
-            Label recorded in the ``Sample`` column of the result table.
-
-        Returns
-        -------
-        Tuple[pd.DataFrame, bool]
-            The stationarity result table for the given sample and whether it
-            satisfied the configured filter mode.
-        """
-
-        aligned_idx = sample_idx[sample_idx.isin(series.index)]
-        test_instance = self.test_class(
-            series=series.loc[aligned_idx],
-            alias=self.alias,
-            filter_mode=self.filter_mode,
-            test_dict=self.test_dict,
-            test_threshold=self.thresholds,
-            filter_on=self.filter_on,
-        )
-        result_df = test_instance.test_result.copy()
-
-        # Insert sample indicator before the Passed column for readability.
-        insert_at = result_df.columns.get_loc('Passed')
-        result_df.insert(insert_at, 'Sample', sample_label)
-        return result_df, test_instance.test_filter
 
     @staticmethod
     def _resolve_original_variable(variable_spec: Union[RgmVar, CondVar]) -> Union[str, TSFM]:
