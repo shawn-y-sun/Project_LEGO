@@ -204,6 +204,8 @@ class ModelSearch:
           before combination enumeration.
         - Respects max_var_num (total features per combo).
         - Respects category_limit (max variables from each MEV category per combo).
+        - Excludes combinations containing a :class:`TSFM` and :class:`RgmVar`
+          referencing the same base variable.
 
         Parameters
         ----------
@@ -257,6 +259,32 @@ class ModelSearch:
         excluded_variant_seen: Set[str] = set()
         excluded_group_labels: List[str] = []
         excluded_group_seen: Set[str] = set()
+
+        def _has_tsfm_regime_conflict(items: Sequence[Any]) -> bool:
+            """Return ``True`` when a TSFM and RgmVar share the same variable."""
+
+            tsfm_vars: Set[str] = set()
+            rgm_vars: Set[str] = set()
+
+            def _collect(obj: Any) -> None:
+                # Track TSFM variables directly and those nested inside groups.
+                if isinstance(obj, TSFM):
+                    if obj.var is not None:
+                        tsfm_vars.add(str(obj.var))
+                elif isinstance(obj, RgmVar):
+                    if getattr(obj, "var", None) is not None:
+                        rgm_vars.add(str(obj.var))
+                    # Regime features can wrap TSFM; include the wrapped var too.
+                    if isinstance(getattr(obj, "var_feature", None), TSFM):
+                        inner_var = obj.var_feature.var
+                        if inner_var is not None:
+                            tsfm_vars.add(str(inner_var))
+                elif isinstance(obj, (list, tuple, set)):
+                    for el in obj:
+                        _collect(el)
+
+            _collect(items)
+            return bool(tsfm_vars & rgm_vars)
 
         def _passes_feature(candidate: Any) -> bool:
             """Return ``True`` when ``candidate`` satisfies the feature pre-test."""
@@ -542,6 +570,9 @@ class ModelSearch:
             for prod in itertools.product(*variant_lists):
                 # Sort each spec list so quarterly and monthly dummies come first
                 sorted_prod = _sort_specs_with_dummies_first(list(prod))
+                # Skip combos that mix regime-aware and standard transforms of the same var
+                if _has_tsfm_regime_conflict(sorted_prod):
+                    continue
                 expanded.append(sorted_prod)
 
         if (feature_test is not None) and (excluded_variant_labels or excluded_group_labels):
