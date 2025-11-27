@@ -1528,6 +1528,10 @@ class CoefTest(ModelTestBase):
     filter_mode : {'strict','moderate'}, default 'moderate'
         - 'strict'   → require p-value < 0.05 for all.
         - 'moderate' → require p-value < 0.10 for all.
+    weak_limit : int, optional
+        Maximum number of coefficients allowed in the (0.05, 0.10) band when
+        ``filter_mode`` is ``'moderate'``. Use ``None`` to keep the default
+        requirement that all coefficients remain below 0.10.
     """
     category = 'performance'
 
@@ -1542,12 +1546,16 @@ class CoefTest(ModelTestBase):
         pvalues: pd.Series,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = True
+        filter_on: bool = True,
+        weak_limit: Optional[int] = None,
     ):
         super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
         self.pvalues = pvalues
         # Set α based on mode
         self.alpha = 0.05 if filter_mode == 'strict' else 0.10
+        if weak_limit is not None and weak_limit < 0:
+            raise ValueError("weak_limit must be non-negative when provided")
+        self.weak_limit = weak_limit
     
     @property
     def filter_mode_desc(self):
@@ -1579,9 +1587,46 @@ class CoefTest(ModelTestBase):
     @property
     def test_filter(self) -> bool:
         """
-        All coefficients must pass (p-value < α) to pass the test.
+        Evaluate whether coefficient significance meets the configured filter.
+
+        Returns
+        -------
+        bool
+            ``True`` when coefficients satisfy the selected significance
+            threshold and any configured ``weak_limit`` allowances; otherwise
+            ``False``.
+
+        Notes
+        -----
+        When ``filter_mode`` is ``'moderate'`` and ``weak_limit`` is set, up to
+        ``weak_limit`` coefficients may fall within the (0.05, 0.10) interval as
+        long as no coefficient exceeds the 0.10 alpha threshold. A safeguard
+        also forces failure if ``weak_limit`` equals 1 and more than one
+        p-value exceeds 0.5.
         """
-        return self.test_result['Passed'].all()
+        # If weak_limit explicitly disallows very weak signals, fail fast when
+        # multiple coefficients have extremely high p-values despite a relaxed
+        # moderate filter (user-requested safeguard).
+        high_pvalue_count = int((self.pvalues > 0.5).sum())
+        if self.weak_limit == 1 and high_pvalue_count > 1:
+            return False
+
+        # Default rule: all coefficients below the alpha threshold.
+        base_pass = self.test_result['Passed'].all()
+        if self.filter_mode != 'moderate' or self.weak_limit is None:
+            return base_pass
+
+        # Under moderate filtering, allow up to `weak_limit` coefficients to be
+        # in the (0.05, 0.10) band while still requiring everyone to remain
+        # below the 0.10 alpha cut-off.
+        weak_band = (self.pvalues > 0.05) & (self.pvalues < 0.10)
+        weak_count = int(weak_band.sum())
+        if weak_count > self.weak_limit:
+            return False
+
+        # Ensure no coefficient exceeds the relaxed alpha even when weak slots
+        # are available.
+        return base_pass
 
 
 # ----------------------------------------------------------------------------
