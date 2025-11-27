@@ -315,6 +315,12 @@ class ModelSearch:
                 return passes
 
             cache_key = repr(candidate)
+            # Dummy variables should bypass stationarity testing because they
+            # are categorical indicators and do not exhibit stochastic trends.
+            if isinstance(candidate, DumVar):
+                pretest_cache[cache_key] = True
+                return True
+
             if cache_key in pretest_cache:
                 passes = pretest_cache[cache_key]
             else:
