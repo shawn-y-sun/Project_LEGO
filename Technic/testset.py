@@ -1,15 +1,17 @@
 # =============================================================================
 # module: testset.py
-# Purpose: Test set builder functions for different model types
+# Purpose: Test set builder functions for different model types.
+# Key Types/Classes: TestSet
+# Key Functions: ppnr_ols_testset_func, fixed_ols_testset_func
 # Dependencies: pandas, numpy, statsmodels, typing, .test module classes
-# 
+#
 # TESTSET FUNCTION REQUIREMENTS:
 # ==============================
 # All testset functions should define these measure tests FIRST:
-# 1. 'Fit Measures' - FitMeasure for R² and Adj R² 
+# 1. 'Fit Measures' - FitMeasure for R² and Adj R²
 # 2. 'IS Error Measures' - ErrorMeasure for in-sample ME, MAE, RMSE
 # 3. 'OOS Error Measures' - ErrorMeasure for out-of-sample ME, MAE, RMSE (if data available)
-# 
+#
 # These are used by ModelBase.in_perf_measures and ModelBase.out_perf_measures
 # for model reporting and evaluation. Define these before other tests.
 # =============================================================================
@@ -288,8 +290,10 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
 
     # --- Target Stationarity & Cointegration ---
     # 1) Check if Y itself is stationary
-    y_stat = StationarityTest(
-        series=mdl.y.copy(),
+    y_stat = TargetStationarityTest(
+        target=mdl.target,
+        dm=mdl.dm,
+        outlier_idx=getattr(mdl, 'outlier_idx', None),
         filter_mode='moderate',
         filter_on=False
     )
@@ -304,10 +308,14 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
             # Filter to only include variables that exist in X
             available_vars = [var for var in stationarity_vars if var in mdl.X.columns]
             if available_vars:
-                X_vars_df = mdl.X[available_vars].copy()
-                tests['X Stationarity'] = MultiStationarityTest(
-                    dataframe=X_vars_df,
-                    filter_mode='moderate'
+                # Stationarity screening leverages staged, sample-aware checks across
+                # all model specifications; search_cms() already performs pretests,
+                # so filtering is disabled here to avoid double-counting.
+                tests['X Stationarity'] = MultiFullStationarityTest(
+                    specs=mdl.specs,
+                    dm=mdl.dm,
+                    filter_mode='moderate',
+                    filter_on=False
                 )
     else:
         # Y is non-stationary - test cointegration with applicable X variables
@@ -326,7 +334,7 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
     sign_check_features = mdl.spec_map.get('SignCheck', [])
     if sign_check_features:
         tests['Sign Check'] = SignCheck(
-            tsfm_list=sign_check_features,
+            feature_list=sign_check_features,
             coefficients=mdl.params,
             filter_mode='moderate'
         )

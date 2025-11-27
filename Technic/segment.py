@@ -3,14 +3,16 @@
 # Purpose: Manage candidate model construction, evaluation, and visualization workflows.
 # Key Types/Classes: Segment
 # Key Functions: build_cm, plot_vars, explore_vars, export
-# Dependencies: warnings, pandas, numpy, matplotlib.pyplot, math, typing, pathlib, internal modules
+# Dependencies: warnings, pandas, numpy, matplotlib.pyplot, math, inspect, copy, typing, pathlib, internal modules
 # =============================================================================
 import warnings
 warnings.simplefilter(action="ignore", category=FutureWarning)
+import inspect
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import math
+from copy import deepcopy
 from typing import Type, Dict, List, Optional, Any, Union, Callable, Tuple, Set, Sequence
 from pathlib import Path
 
@@ -31,8 +33,11 @@ from .export import (
     OLSModelAdapter,
     ExportManager
 )
+from .feature import Feature
 from .periods import resolve_periods_argument
 from .plot import _plot_segmented_series
+from .pretest import PreTestSet, FeatureTest
+from .transform import TSFM
 
 
 class Segment:
@@ -229,7 +234,108 @@ class Segment:
         cm.build(specs, sample=sample, outlier_idx=cleaned_outliers)
         self.cms[cm_id] = cm
         return cm
-    
+
+    def _resolve_model_pretestset(self) -> Optional[PreTestSet]:
+        """Return a deep copy of the default pre-test bundle for ``model_cls``."""
+
+        if self.model_cls is None:
+            return None
+
+        try:
+            signature = inspect.signature(self.model_cls.__init__)
+        except (TypeError, ValueError):
+            return None
+
+        parameter = signature.parameters.get("pretestset")
+        if parameter is None or parameter.default is inspect._empty:
+            return None
+
+        default_bundle = parameter.default
+        if default_bundle is None:
+            return None
+
+        return deepcopy(default_bundle)
+
+    def _run_target_pretest(
+        self,
+        pretestset: Optional[PreTestSet],
+        *,
+        print_result: bool = True
+    ) -> Optional[Any]:
+        """Execute the configured target pre-test and optionally print the result.
+
+        Parameters
+        ----------
+        pretestset : PreTestSet, optional
+            The pre-test bundle resolved from the active ``model_cls``. When
+            ``None`` or when no target test is present, the method exits early.
+        print_result : bool, default True
+            Flag indicating whether to print the target pre-test output. Set to
+            ``False`` when callers need to suppress console noise (for example
+            during exploratory analysis).
+
+        Returns
+        -------
+        Any, optional
+            The raw result returned by the target pre-test implementation. The
+            concrete type depends on the configured diagnostics.
+        """
+
+        if pretestset is None or pretestset.target_test is None:
+            return None
+
+        target_test = pretestset.target_test
+        if target_test.dm is None:
+            target_test.dm = self.dm
+        if target_test.target is None:
+            target_test.target = self.target
+
+        try:
+            result = target_test.test_filter
+        except Exception as exc:
+            print(f"Target pre-test raised {type(exc).__name__}: {exc}")
+            return None
+
+        description = ""
+        if hasattr(result, "attrs"):
+            description = result.attrs.get("filter_mode_desc", "") or ""
+        if not description and hasattr(result, "filter_mode_desc"):
+            description = getattr(result, "filter_mode_desc", "")
+
+        if print_result:
+            print("--- Target Pre-Test Result ---")
+            if description:
+                print(description)
+            print(result)
+            print("")
+
+        return result
+
+    def _prepare_feature_pretest(
+        self,
+        pretestset: Optional[PreTestSet],
+        target_pretest_result: Optional[Any]
+    ) -> Optional[FeatureTest]:
+        """Align the feature pre-test with the current data context."""
+
+        if pretestset is None:
+            return None
+
+        feature_test = pretestset.feature_test
+        if feature_test is None:
+            return None
+
+        if feature_test.dm is not self.dm:
+            feature_test.dm = self.dm
+
+        if (
+            getattr(feature_test, "target_test_result", None) is None
+            and target_pretest_result is not None
+        ):
+            feature_test.target_test_result = target_pretest_result
+
+        return feature_test
+
     def remove_cm(self, cm_ids: Union[str, List[str]]) -> None:
         """
         Remove one or more candidate models from this segment.
@@ -413,11 +519,12 @@ class Segment:
     
     def plot_vars(
         self,
-        vars_list: List[str],
+        vars_list: List[Union[str, Feature]],
         plot_type: str = 'line',
         sample: str = 'full',
         date_range: Optional[Tuple[str, str]] = None,
-        outlier_idx: Optional[Sequence[Any]] = None
+        outlier_idx: Optional[Sequence[Any]] = None,
+        active_idx: Optional[pd.Index] = None
     ) -> None:
         """
         Create exploratory plots comparing variables and their transformations to the target.
@@ -428,9 +535,12 @@ class Segment:
 
         Parameters
         ----------
-        vars_list : List[str]
-            List of variable names to explore. For each variable, all applicable
-            transformations will be generated and plotted.
+        vars_list : List[Union[str, Feature]]
+            List of variable names or pre-constructed Feature/TSFM objects to explore.
+            For each variable, all applicable transformations will be generated and
+            plotted when provided as names. When Feature objects are supplied, the
+            method plots those specific transformations without rebuilding the
+            broader search grid.
         plot_type : str, default 'line'
             Type of plot to create:
             - 'line': time series plot with dual y-axes
@@ -446,6 +556,12 @@ class Segment:
             Iterable of index labels representing observations to exclude from plotting
             and correlation calculations. Labels must match those in the modeling
             DataFrame index. Useful for removing anomalous dates prior to visualization.
+        active_idx : pd.Index, optional
+            Index labels designating the active subset of observations to retain for
+            plotting and correlation calculations. Primarily used for regime-aware
+            visualizations to ensure inactive periods are excluded from both axes. When
+            provided, the target and variable series are intersected with this index
+            after outlier handling and prior to date range filtering.
 
         Example
         -------
@@ -494,6 +610,14 @@ class Segment:
         else:
             target_series = target_series_full
 
+        if active_idx is not None:
+            # NOTE: Restrict plotting to the explicitly active index (e.g., regime-on
+            # periods) to avoid displaying inactive intervals when regime filters are
+            # applied upstream.
+            active_idx = pd.Index(active_idx)
+            target_series_plot = target_series_plot.loc[target_series_plot.index.intersection(active_idx)]
+            target_series = target_series.loc[target_series.index.intersection(active_idx)]
+
         # Apply date range filter to target if specified
         if date_range:
             start_date, end_date = date_range
@@ -515,6 +639,12 @@ class Segment:
             if outlier_labels is not None:
                 df_plot.loc[df_plot.index.isin(outlier_labels), :] = np.nan
                 df = df.drop(index=outlier_labels, errors='ignore')
+
+            if active_idx is not None:
+                # NOTE: Keep variable data aligned to the active regime periods so the
+                # plotted transformations mirror the filtered target timeline.
+                df_plot = df_plot.loc[df_plot.index.intersection(active_idx)]
+                df = df.loc[df.index.intersection(active_idx)]
 
             # Apply date range filter to variable data if specified
             if date_range:
@@ -645,10 +775,16 @@ class Segment:
         vars_list: List[str],
         max_lag: int = 3,
         periods: Optional[Sequence[int]] = None,
+        exp_sign_map: Optional[Dict[str, int]] = None,
+        regime: Optional[str] = None,
+        regime_on: Union[bool, int] = True,
         sample: str = 'full',
         plot_type: str = 'line',
         date_range: Optional[Tuple[str, str]] = None,
         plot: bool = True,
+        plot_top: Optional[int] = None,
+        pretest: bool = False,
+        print_pretest: bool = False,
         outlier_idx: Optional[Sequence[Any]] = None,
         **legacy_kwargs: Any
     ) -> pd.DataFrame:
@@ -674,6 +810,20 @@ class Segment:
             (default), frequency-aware defaults are applied automatically. The
             deprecated ``max_periods`` keyword is still accepted for backward
             compatibility.
+        exp_sign_map : Dict[str, int], optional
+            Mapping from variable codes to expected coefficient signs. When
+            provided, expected sign metadata is applied to compatible feature
+            specifications generated by :meth:`DataManager.build_tsfm_specs` and
+            used to filter correlation output to transformations whose observed
+            correlation sign matches the expected sign.
+        regime : str, optional
+            Column name of a regime indicator. When supplied, all transform
+            specifications are wrapped in regime-aware features and correlation
+            analysis only includes observations where the regime equals
+            ``regime_on``.
+        regime_on : bool or int, default True
+            Active regime value used to filter observations when ``regime`` is
+            provided. Must be interpretable as 0 or 1.
         sample : str, default 'full'
             Which sample to use:
             - 'in': use in-sample data only
@@ -687,6 +837,19 @@ class Segment:
             Flag indicating whether to generate plots via :meth:`plot_vars` before
             running the correlation analysis. Set to ``False`` to skip plotting when
             only tabular correlations are required.
+        plot_top : int, optional
+            Positive integer indicating how many of the highest absolute-correlation
+            transformations to plot. When provided alongside ``plot=True``, the method
+            skips the initial plotting pass, computes correlations first, and then plots
+            only the top ``plot_top`` entries using :meth:`plot_vars` by forwarding
+            either the variable names or the corresponding :class:`Feature` objects.
+        pretest : bool, default False
+            When ``True``, execute the target and feature pre-tests defined on
+            ``self.model_cls`` (if any) before calculating correlations. Features
+            failing validation are omitted from the output.
+        print_pretest : bool, default False
+            When ``True`` and ``pretest`` is enabled, print a summary of excluded
+            features mirroring the :class:`ModelSearch` reporting style.
         outlier_idx : Sequence[Any], optional
             Iterable of index labels representing observations to exclude from both the
             plotting step and correlation analysis. Labels must match those in the
@@ -697,8 +860,22 @@ class Segment:
         -------
         pd.DataFrame
             DataFrame with columns ['variable', 'corr', 'abs_corr'] sorted by absolute
-            correlation in descending order. Contains all possible transformations
-            for each variable.
+            correlation in descending order. When ``exp_sign_map`` is provided, only
+            transformations whose correlation sign matches the mapped expectation
+            are retained.
+
+        Raises
+        ------
+        TypeError
+            If unexpected keyword arguments are provided, ``regime`` is not a string,
+            ``regime_on`` cannot be interpreted as 0/1, or ``plot_top`` is not an
+            integer when supplied.
+        ValueError
+            If ``regime_on`` is not interpretable as 0/1 or boolean, or ``plot_top``
+            is not positive when provided.
+        KeyError
+            If the specified ``regime`` column cannot be found in either internal or
+            MEV data sources.
 
         Example
         -------
@@ -718,6 +895,7 @@ class Segment:
         ... )
         """
         outlier_labels: Optional[pd.Index]
+        active_regime_idx: Optional[pd.Index] = None
         if outlier_idx is None:
             outlier_labels = None
         else:
@@ -726,7 +904,8 @@ class Segment:
 
         # First create the plots when requested. This keeps backward compatibility
         # with the original behavior while allowing callers to opt out of plotting.
-        if plot:
+        # When plot_top is provided, defer plotting until correlations are available.
+        if plot and plot_top is None:
             self.plot_vars(
                 vars_list=vars_list,
                 plot_type=plot_type,
@@ -740,6 +919,12 @@ class Segment:
             unexpected = ", ".join(sorted(legacy_kwargs.keys()))
             raise TypeError(f"Unexpected keyword arguments: {unexpected}")
 
+        if plot_top is not None:
+            if not isinstance(plot_top, int):
+                raise TypeError("plot_top must be provided as a positive integer.")
+            if plot_top <= 0:
+                raise ValueError("plot_top must be a positive integer when specified.")
+
         # Respect explicit caller intent for quarterly data by only forcing the
         # default quarterly floor when no custom periods (including legacy
         # ``max_periods``) are supplied. The previous implementation always
@@ -752,12 +937,106 @@ class Segment:
             ensure_quarterly_floor=(periods is None and legacy_max_periods is None)
         )
 
-        # Generate all possible transformations for each variable
-        var_dfs = self.dm.build_search_vars(
+        tsfm_specs = self.dm.build_tsfm_specs(
             vars_list,
             max_lag=max_lag,
-            periods=resolved_periods
+            periods=resolved_periods,
+            exp_sign_map=exp_sign_map,
+            regime=regime,
+            regime_on=regime_on
         )
+
+        feature_test: Optional[FeatureTest] = None
+        excluded_features: List[str] = []
+        excluded_seen: Set[str] = set()
+        excluded_sign_variants: List[str] = []
+        pretest_cache: Dict[str, bool] = {}
+        if pretest:
+            model_pretestset = self._resolve_model_pretestset()
+            target_pretest_result = self._run_target_pretest(
+                model_pretestset,
+                print_result=False
+            )
+            feature_test = self._prepare_feature_pretest(
+                model_pretestset,
+                target_pretest_result
+            )
+
+        # Apply feature pretests on specs before constructing feature dataframes
+        filtered_tsfm_specs: Dict[str, List[Union[str, Feature, TSFM]]] = {}
+        tsfm_lookup: Dict[str, Union[str, Feature, TSFM]] = {}
+        for var_name, tsfms in tsfm_specs.items():
+            filtered: List[Union[str, Feature, TSFM]] = []
+            for tsfm in tsfms:
+                if feature_test is None:
+                    filtered.append(tsfm)
+                    if isinstance(tsfm, Feature):
+                        tsfm_lookup[tsfm.name] = tsfm
+                    elif isinstance(tsfm, str):
+                        tsfm_lookup[tsfm] = tsfm
+                    continue
+
+                cache_key = repr(tsfm)
+                if cache_key in pretest_cache:
+                    passes_feature = pretest_cache[cache_key]
+                else:
+                    feature_test.feature = tsfm
+                    try:
+                        passes_feature = bool(feature_test.test_filter)
+                    except Exception as exc:
+                        print(
+                            "Feature pre-test raised "
+                            f"{type(exc).__name__} for {cache_key!r}: {exc}"
+                        )
+                        passes_feature = True
+                    pretest_cache[cache_key] = passes_feature
+
+                if passes_feature:
+                    filtered.append(tsfm)
+                    if isinstance(tsfm, Feature):
+                        tsfm_lookup[tsfm.name] = tsfm
+                    elif isinstance(tsfm, str):
+                        tsfm_lookup[tsfm] = tsfm
+                elif cache_key not in excluded_seen:
+                    excluded_features.append(cache_key)
+                    excluded_seen.add(cache_key)
+
+            filtered_tsfm_specs[var_name] = filtered
+
+        if feature_test is not None and excluded_features and print_pretest:
+            # Surface exclusions as soon as pre-testing completes to aid inspection.
+            print("--- Feature Pre-Test Exclusions ---")
+            print(
+                "Excluded "
+                f"{len(excluded_features)} variant(s): "
+                + ", ".join(excluded_features)
+            )
+            print("")
+
+        # Generate all possible transformations for each variable after filtering.
+        # We also capture a mapping from the realized column names (which include
+        # frequency prefixes and lag suffixes resolved during apply()) back to the
+        # originating transform objects. This prevents plot_vars() from rebuilding
+        # an untransformed series when a top entry stems from a lagged or
+        # frequency-annotated TSFM whose name is finalized only after execution.
+        var_dfs: Dict[str, pd.DataFrame] = {}
+        for var_name, tsfms in filtered_tsfm_specs.items():
+            var_df = self.dm.build_features(tsfms)
+            var_dfs[var_name] = var_df
+
+            # Prefer a one-to-one mapping between the provided specs and the
+            # resulting columns when sizes align; otherwise, fall back to any
+            # explicit output_names defined on the feature object to preserve
+            # downstream plotting fidelity.
+            if len(tsfms) == len(var_df.columns):
+                for tsfm, col in zip(tsfms, var_df.columns):
+                    tsfm_lookup[col] = tsfm
+            else:
+                for tsfm in tsfms:
+                    output_names = getattr(tsfm, "output_names", None)
+                    if output_names:
+                        for col in output_names:
+                            tsfm_lookup[col] = tsfm
         
         # Get target data based on sample
         if sample == 'in':
@@ -766,6 +1045,32 @@ class Segment:
             target_idx = self.dm.in_sample_idx.union(self.dm.out_sample_idx)
 
         target_data = self.dm.internal_data.loc[target_idx, self.target]
+
+        if regime is not None:
+            if not isinstance(regime, str):
+                raise TypeError("regime must be provided as a column name string when set.")
+
+            try:
+                normalized_regime_on = int(regime_on)
+            except (TypeError, ValueError):
+                raise TypeError("regime_on must be a boolean or int interpretable as 0/1.")
+
+            if normalized_regime_on not in (0, 1):
+                raise ValueError("regime_on must be interpretable as 0/1 or boolean.")
+
+            if regime in self.dm.internal_data.columns:
+                regime_series = self.dm.internal_data[regime]
+            elif regime in self.dm.model_mev.columns:
+                regime_series = self.dm.model_mev[regime]
+            else:
+                raise KeyError(
+                    f"Regime column '{regime}' not found in internal_data or model_mev."
+                )
+
+            aligned_regime = regime_series.reindex(target_data.index)
+            active_regime_idx = aligned_regime.index[aligned_regime == normalized_regime_on]
+            # Restrict target observations to the active regime before applying other filters.
+            target_data = target_data.loc[target_data.index.intersection(active_regime_idx)]
 
         if outlier_labels is not None:
             target_data = target_data.drop(labels=outlier_labels, errors='ignore')
@@ -785,8 +1090,15 @@ class Segment:
         for var_name, var_df in var_dfs.items():
             var_df = var_df.copy()
 
+            expected_sign = None
+            if exp_sign_map is not None:
+                expected_sign = exp_sign_map.get(var_name)
+
             if outlier_labels is not None:
                 var_df = var_df.drop(index=outlier_labels, errors='ignore')
+
+            if active_regime_idx is not None:
+                var_df = var_df.loc[var_df.index.intersection(active_regime_idx)]
 
             # Apply same date range filter to variable data
             if date_range:
@@ -808,17 +1120,58 @@ class Segment:
                         corr = 0.0
                 else:
                     corr = 0.0
-                
+
+                # When expected signs are provided, only keep correlations aligned with the expectation.
+                if expected_sign in (-1, 0, 1):
+                    if expected_sign != 0:
+                        corr_sign = int(np.sign(corr)) if corr != 0 else 0
+                        if corr_sign != expected_sign:
+                            if print_pretest:
+                                excluded_sign_variants.append(col)
+                            continue
+
                 corr_results.append({
                     'variable': col,
                     'corr': corr,
                     'abs_corr': abs(corr)
                 })
-        
+
         # Create result DataFrame and sort by absolute correlation
         result_df = pd.DataFrame(corr_results)
         result_df = result_df.sort_values('abs_corr', ascending=False).reset_index(drop=True)
-        
+
+        if print_pretest and excluded_sign_variants:
+            print("--- Expected Sign Exclusions ---")
+            print(
+                "Excluded "
+                f"{len(excluded_sign_variants)} variant(s): "
+                + ", ".join(excluded_sign_variants)
+            )
+            print("")
+
+        if plot and plot_top is not None and not result_df.empty:
+            top_n = min(plot_top, len(result_df))
+            top_entries = result_df.head(top_n)['variable'].tolist()
+            # NOTE: Preserve Feature objects for transformed variants so plot_vars()
+            # can render the exact transformation instead of rebuilding all variants.
+            plot_specs: List[Union[str, Feature, TSFM]] = [
+                tsfm_lookup.get(var_name, var_name) for var_name in top_entries
+            ]
+
+            print(
+                "Plotting top "
+                f"{top_n} transformation(s) by absolute correlation: "
+                + ", ".join(map(str, top_entries))
+            )
+            self.plot_vars(
+                vars_list=plot_specs,
+                plot_type=plot_type,
+                sample=sample,
+                date_range=date_range,
+                outlier_idx=outlier_labels,
+                active_idx=active_regime_idx
+            )
+
         return result_df
 
     def export(
@@ -1579,6 +1932,7 @@ class Segment:
         max_lag: int = 3,
         periods: Optional[Sequence[int]] = None,
         category_limit: int = 1,
+        regime_limit: int = 1,
         exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1, 1, 1),
         test_update_func: Optional[Callable] = None,
@@ -1624,6 +1978,10 @@ class Segment:
         category_limit : int, default 1
             Maximum number of variables from each MEV category per combo.
             Only applies to top-level strings and TSFM instances in desired_pool.
+        regime_limit : int, default 1
+            Maximum number of :class:`RgmVar` instances from the same regime per
+            combo. Applies across the full combination, including forced
+            specifications.
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             Passed to ModelSearch.run_search().
@@ -1717,6 +2075,7 @@ class Segment:
             max_lag=max_lag,
             periods=resolved_periods,
             category_limit=category_limit,
+            regime_limit=regime_limit,
             rank_weights=rank_weights,
             test_update_func=test_update_func,
             outlier_idx=outlier_idx,

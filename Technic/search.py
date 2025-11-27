@@ -29,6 +29,7 @@ from .model import ModelBase
 from .pretest import PreTestSet, FeatureTest
 from .cm import CM
 from .periods import default_periods_for_freq, resolve_periods_argument
+from .regime import RgmVar
 
 
 def _sort_specs_with_dummies_first(spec_list: List[Any]) -> List[Any]:
@@ -182,6 +183,7 @@ class ModelSearch:
         max_lag: int = 3,
         periods: Optional[Sequence[int]] = None,
         category_limit: int = 1,
+        regime_limit: int = 1,
         exp_sign_map: Optional[Dict[str, int]] = None,
         **legacy_kwargs: Any
     ) -> List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]]:
@@ -191,12 +193,19 @@ class ModelSearch:
         - desired_pool can contain:
             * str, TSFM, Feature, tuple, or set.
           * tuple: items stay grouped together.
-          * set: treated as a pool where exactly one must be selected.
+          * set: treated as a pool where exactly one must be selected. When a
+            set contains :class:`RgmVar` instances, combinations of distinct
+            regimes are also enumerated (respecting ``regime_limit``) so
+            multi-regime variants are not excluded prematurely.
+        - Duplicate entries in desired_pool are removed before processing to
+          prevent redundant combination generation.
         - Strings at top-level are expanded into TSFM variants via DataManager.
         - Feature-level pre-tests (when configured) prune invalid candidates
           before combination enumeration.
         - Respects max_var_num (total features per combo).
         - Respects category_limit (max variables from each MEV category per combo).
+        - Excludes combinations containing a :class:`TSFM` and :class:`RgmVar`
+          referencing the same base variable.
 
         Parameters
         ----------
@@ -220,6 +229,13 @@ class ModelSearch:
             Max variables from each MEV category per combo. Only applies to
             top-level strings and TSFM instances in desired_pool; other Feature
             instances or items in nested structures are not subject to this constraint.
+        regime_limit : int, default 1
+            Maximum number of :class:`RgmVar` instances sharing the same
+            ``(regime, regime_on)`` signature per combo. Applies across the full
+            combination, including forced specifications.
+            Maximum number of :class:`RgmVar` instances from the same regime per
+            combo. Applies across the full combination, including forced
+            specifications.
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             Passed to DataManager.build_tsfm_specs() for string expansion.
@@ -229,6 +245,12 @@ class ModelSearch:
         combos : list of spec lists
             Each combo is a list including str, TSFM, Feature, or tuple elements.
         """
+        if not isinstance(regime_limit, int):
+            raise TypeError("regime_limit must be provided as an integer.")
+
+        if regime_limit < 1:
+            raise ValueError("regime_limit must be a positive integer.")
+
         # Run feature-level pretests later in the pipeline so TSFM expansions
         # can be evaluated directly before enumeration.
         feature_test = self._prepare_feature_pretest()
@@ -237,6 +259,36 @@ class ModelSearch:
         excluded_variant_seen: Set[str] = set()
         excluded_group_labels: List[str] = []
         excluded_group_seen: Set[str] = set()
+
+        def _has_tsfm_regime_conflict(items: Sequence[Any]) -> bool:
+            """Return ``True`` when a TSFM and RgmVar share the same variable."""
+
+            tsfm_vars: Set[str] = set()
+            rgm_vars: Set[str] = set()
+
+            def _collect(obj: Any, *, in_regime: bool = False) -> None:
+                # Track TSFM variables directly and those nested inside groups.
+                if isinstance(obj, TSFM):
+                    if not in_regime and obj.var is not None:
+                        tsfm_vars.add(str(obj.var))
+                elif isinstance(obj, RgmVar):
+                    # Regime-wrapped transforms should only set ``rgm_vars`` so
+                    # they conflict with standalone TSFMs of the same base
+                    # variable without double-counting as direct TSFMs.
+                    base_var = getattr(obj, "var", None)
+                    if base_var is None and getattr(obj, "var_feature", None) is not None:
+                        base_var = obj.var_feature.var
+
+                    if base_var is not None:
+                        rgm_vars.add(str(base_var))
+
+                    _collect(getattr(obj, "var_feature", None), in_regime=True)
+                elif isinstance(obj, (list, tuple, set)):
+                    for el in obj:
+                        _collect(el, in_regime=in_regime)
+
+            _collect(items)
+            return bool(tsfm_vars & rgm_vars)
 
         def _passes_feature(candidate: Any) -> bool:
             """Return ``True`` when ``candidate`` satisfies the feature pre-test."""
@@ -291,12 +343,31 @@ class ModelSearch:
         # Handle forced_in being optional
         forced_specs = (forced_in or []).copy()
 
+        # Remove duplicates from desired_pool to avoid repeated combinations
+        # when users inadvertently supply the same variable more than once.
+        seen_signatures: Set[str] = set()
+        unique_desired_pool: List[Union[str, TSFM, Feature, Tuple[Any, ...], set]] = []
+
+        def _dedup_signature(item: Any) -> str:
+            """Create a deterministic signature for deduplication."""
+
+            # Using repr ensures we can handle unhashable inputs such as sets and tuples
+            # while keeping ordering stable for repeated objects.
+            return f"{type(item).__name__}:{repr(item)}"
+
+        for pool_item in desired_pool:
+            signature = _dedup_signature(pool_item)
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+            unique_desired_pool.append(pool_item)
+
         # Step 1: Build raw combos from desired_pool with category constraints
         # Separate constrained and unconstrained items
         constrained_items = []  # top-level strings and TSFM instances
         unconstrained_items = []  # everything else (sets, tuples, other Features)
 
-        for item in desired_pool:
+        for item in unique_desired_pool:
             if isinstance(item, (str, TSFM)):
                 constrained_items.append(item)
             else:
@@ -357,7 +428,20 @@ class ModelSearch:
                         else:
                             flat.add(el)
                 _flatten(item)
-                pools.append(list(flat))
+                # When a set contains regime variables, allow combinations of
+                # distinct regimes to co-occur by generating subset options.
+                # Filtering by ``regime_limit`` later in the pipeline still
+                # enforces per-regime caps, but this expansion ensures we do
+                # not artificially limit combos to a single RgmVar.
+                if any(isinstance(el, RgmVar) for el in flat):
+                    subset_pool: List[List[Any]] = []
+                    flat_list = list(flat)
+                    for r in range(1, len(flat_list) + 1):
+                        for combo in itertools.combinations(flat_list, r):
+                            subset_pool.append(list(combo))
+                    pools.append(subset_pool)
+                else:
+                    pools.append(list(flat))
             else:
                 pools.append([item])
 
@@ -387,6 +471,49 @@ class ModelSearch:
         for rc in raw_combos:
             if len(forced_specs) + len(rc) <= max_var_num:
                 combos.append(forced_specs + rc)
+
+        def _regime_counts(items: Sequence[Any]) -> Dict[Tuple[str, int], int]:
+            """Return counts of regime occurrences for any nested :class:`RgmVar`.
+
+            Regime uniqueness accounts for the activation flag (``on``/``regime_on``)
+            so that variants targeting the same regime column with different active
+            states are treated as distinct. This enables combinations that include
+            both active and inactive variants of the same regime indicator.
+
+            Parameters
+            ----------
+            items : Sequence[Any]
+                Collection of specification elements to inspect.
+
+            Returns
+            -------
+            Dict[Tuple[str, int], int]
+                Mapping of ``(regime, regime_on)`` signatures to counts of
+                :class:`RgmVar` entries.
+            """
+
+            counts: Dict[Tuple[str, int], int] = defaultdict(int)
+
+            def _collect(obj: Any) -> None:
+                if isinstance(obj, RgmVar):
+                    # Include activation flag so on/off variants coexist.
+                    counts[(obj.regime, getattr(obj, "on", 1))] += 1
+                elif isinstance(obj, (list, tuple, set)):
+                    for el in obj:
+                        _collect(el)
+
+            _collect(items)
+            return counts
+
+        # Enforce per-regime limits across forced and desired combinations
+        filtered_combos: List[List[Any]] = []
+        for combo in combos:
+            regime_counts = _regime_counts(combo)
+            if any(count > regime_limit for count in regime_counts.values()):
+                continue
+            filtered_combos.append(combo)
+
+        combos = filtered_combos
 
         # Step 3: Expand only top-level strings into TSFM variants
         # Gather unique strings to expand
@@ -447,6 +574,9 @@ class ModelSearch:
             for prod in itertools.product(*variant_lists):
                 # Sort each spec list so quarterly and monthly dummies come first
                 sorted_prod = _sort_specs_with_dummies_first(list(prod))
+                # Skip combos that mix regime-aware and standard transforms of the same var
+                if _has_tsfm_regime_conflict(sorted_prod):
+                    continue
                 expanded.append(sorted_prod)
 
         if (feature_test is not None) and (excluded_variant_labels or excluded_group_labels):
@@ -768,6 +898,7 @@ class ModelSearch:
         max_lag: int = 3,
         periods: Optional[Sequence[int]] = None,
         category_limit: int = 1,
+        regime_limit: int = 1,
         exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
@@ -810,6 +941,10 @@ class ModelSearch:
             still accepted for backward compatibility.
         category_limit : int, default 1
             Maximum number of variables from each MEV category per combo.
+        regime_limit : int, default 1
+            Maximum number of :class:`RgmVar` instances sharing the same
+            ``(regime, regime_on)`` signature per combo. Applies across the full
+            combination, including forced specifications.
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             Passed to build_spec_combos() and ultimately to DataManager.build_tsfm_specs().
@@ -856,6 +991,7 @@ class ModelSearch:
                   f"Max lag         : {max_lag}\n"
                   f"Periods         : {periods_summary}\n"
                   f"Category limit  : {category_limit}\n"
+                  f"Regime limit    : {regime_limit}\n"
                   f"Exp sign map    : {exp_sign_map}\n"
                   f"Top N           : {top_n}\n"
                   f"Rank weights    : {rank_weights}\n"
@@ -933,6 +1069,7 @@ class ModelSearch:
                 max_lag,
                 periods=resolved_periods,
                 category_limit=category_limit,
+                regime_limit=regime_limit,
                 exp_sign_map=exp_sign_map,
             )
             print(f"Built {len(combos)} spec combinations.\n")
