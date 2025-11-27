@@ -266,22 +266,26 @@ class ModelSearch:
             tsfm_vars: Set[str] = set()
             rgm_vars: Set[str] = set()
 
-            def _collect(obj: Any) -> None:
+            def _collect(obj: Any, *, in_regime: bool = False) -> None:
                 # Track TSFM variables directly and those nested inside groups.
                 if isinstance(obj, TSFM):
-                    if obj.var is not None:
+                    if not in_regime and obj.var is not None:
                         tsfm_vars.add(str(obj.var))
                 elif isinstance(obj, RgmVar):
-                    if getattr(obj, "var", None) is not None:
-                        rgm_vars.add(str(obj.var))
-                    # Regime features can wrap TSFM; include the wrapped var too.
-                    if isinstance(getattr(obj, "var_feature", None), TSFM):
-                        inner_var = obj.var_feature.var
-                        if inner_var is not None:
-                            tsfm_vars.add(str(inner_var))
+                    # Regime-wrapped transforms should only set ``rgm_vars`` so
+                    # they conflict with standalone TSFMs of the same base
+                    # variable without double-counting as direct TSFMs.
+                    base_var = getattr(obj, "var", None)
+                    if base_var is None and getattr(obj, "var_feature", None) is not None:
+                        base_var = obj.var_feature.var
+
+                    if base_var is not None:
+                        rgm_vars.add(str(base_var))
+
+                    _collect(getattr(obj, "var_feature", None), in_regime=True)
                 elif isinstance(obj, (list, tuple, set)):
                     for el in obj:
-                        _collect(el)
+                        _collect(el, in_regime=in_regime)
 
             _collect(items)
             return bool(tsfm_vars & rgm_vars)
