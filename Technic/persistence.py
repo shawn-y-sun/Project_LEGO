@@ -3,14 +3,14 @@
 # Purpose: Utilities for persisting and restoring candidate models to disk.
 # Key Types/Classes: None
 # Key Functions: ensure_segment_dirs, save_index, load_index, save_cm, load_cm, get_segment_dirs
-# Dependencies: json, pathlib.Path, typing, pickle
+# Dependencies: json, pathlib.Path, typing, cloudpickle
 # =============================================================================
 """Persistence helpers for saving and loading candidate models."""
 
 from __future__ import annotations
 
 import json
-import pickle
+import cloudpickle
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -155,8 +155,11 @@ def save_cm(cm: CM, destination: Path, overwrite: bool) -> None:
     if destination.exists() and not overwrite:
         raise FileExistsError(f"CM file already exists at {destination}.")
 
+    # ``cloudpickle`` tolerates dynamically defined callables that may be
+    # attached to models (e.g., user-defined transforms), reducing failures
+    # from attribute lookups during standard pickle serialization.
     with destination.open("wb") as cm_file:
-        pickle.dump(cm, cm_file)
+        cloudpickle.dump(cm, cm_file)
 
 
 def load_cm(source: Path) -> CM:
@@ -182,4 +185,4 @@ def load_cm(source: Path) -> CM:
         raise FileNotFoundError(f"CM file not found at {source}.")
 
     with source.open("rb") as cm_file:
-        return pickle.load(cm_file)
+        return cloudpickle.load(cm_file)
