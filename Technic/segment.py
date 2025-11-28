@@ -2335,7 +2335,7 @@ class Segment:
         self,
         save_selected: bool = True,
         save_passed: bool = True,
-        overwrite: bool = False,
+        overwrite: bool = True,
         base_dir: Union[str, Path, None] = None,
     ) -> Dict[str, Path]:
         """
@@ -2343,7 +2343,7 @@ class Segment:
 
         Selected models come from ``self.cms`` and passed models originate from
         ``self.searcher.passed_cms`` when available. Each model is saved under
-        ``segment/<segment_id>/cms`` using its ``model_id`` as the filename and
+        ``Segment/<segment_id>/cms`` using its ``model_id`` as the filename and
         indexed via a minimal ``index.json`` file.
 
         Parameters
@@ -2354,12 +2354,12 @@ class Segment:
         save_passed : bool, default True
             When ``True``, persist models stored in ``self.searcher.passed_cms``
             to the ``passed_cms`` directory.
-        overwrite : bool, default False
+        overwrite : bool, default True
             When ``True``, existing pickles and indexes in the target directories
             may be replaced. When ``False``, a :class:`FileExistsError` is raised
             if a pickle or index already exists.
         base_dir : Union[str, Path], optional
-            Base directory under which the ``segment`` folder is created. When
+            Base directory under which the ``Segment`` folder is created. When
             ``None``, the current working directory is used.
 
         Returns
@@ -2454,7 +2454,7 @@ class Segment:
         which : {'selected', 'passed', 'both'}, default 'both'
             Controls which sets to load from disk.
         base_dir : Union[str, Path], optional
-            Base directory containing the ``segment`` folder. Defaults to the
+            Base directory containing the ``Segment`` folder. Defaults to the
             current working directory when ``None``.
 
         Returns

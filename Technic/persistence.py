@@ -29,7 +29,7 @@ def get_segment_dirs(segment_id: str, base_dir: Optional[Path] = None) -> Dict[s
     segment_id : str
         Unique identifier for the segment.
     base_dir : Path, optional
-        Base directory under which the ``segment`` folder resides. When ``None``,
+        Base directory under which the ``Segment`` folder resides. When ``None``,
         the current working directory is used.
 
     Returns
@@ -39,7 +39,7 @@ def get_segment_dirs(segment_id: str, base_dir: Optional[Path] = None) -> Dict[s
         ``selected_dir``, and ``passed_dir``.
     """
     base = base_dir or Path.cwd()
-    segments_root = base / "segment"
+    segments_root = base / "Segment"
     segment_dir = segments_root / segment_id
     cms_dir = segment_dir / "cms"
     selected_dir = cms_dir / "selected_cms"
@@ -62,7 +62,7 @@ def ensure_segment_dirs(segment_id: str, base_dir: Optional[Path] = None) -> Dic
     segment_id : str
         Unique identifier for the segment.
     base_dir : Path, optional
-        Base directory under which the ``segment`` folder resides. When ``None``,
+        Base directory under which the ``Segment`` folder resides. When ``None``,
         the current working directory is used.
 
     Returns
