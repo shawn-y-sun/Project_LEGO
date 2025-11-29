@@ -2215,7 +2215,8 @@ class Segment:
         rank_weights : Tuple[float, float, float]
             Weights for (Fit Measures, IS Error, OOS Error) used during ranking.
         all_passed : bool, default True
-            When ``True``, include every CM stored in ``self.searcher.passed_cms``.
+            When ``True``, include every CM stored in ``self.passed_cms`` when
+            available, otherwise use ``self.searcher.passed_cms``.
             When ``False``, limit the re-ranking to models currently in
             ``self.cms``.
         overwrite : bool, default False
@@ -2257,19 +2258,34 @@ class Segment:
 
         effective_overwrite = overwrite if legacy_overwrite is None else bool(legacy_overwrite)
 
+        # Ensure a ModelSearch instance exists so ``rank_cms`` can be reused even
+        # when candidate models were loaded directly from disk rather than
+        # produced by a prior search run.
         if self.searcher is None:
-            raise RuntimeError(
-                "Cannot rerank candidate models before running a search."
+            self.searcher = self.search_cls(
+                self.dm,
+                self.target,
+                self.model_cls,
+                model_type=self.model_type,
+                target_base=self.target_base,
+                target_exposure=self.target_exposure,
+                qtr_method=self.qtr_method
             )
+        self.searcher.segment = self
 
         # Determine which candidate models participate in the re-ranking.
         if all_passed:
-            passed_cms = getattr(self.searcher, 'passed_cms', None)
-            if not passed_cms:
-                raise RuntimeError(
-                    "ModelSearch has no passed candidate models to rerank."
-                )
-            candidate_cms: List[CM] = list(passed_cms)
+            # Prefer persisted/loaded passed CMs when available; otherwise fall
+            # back to any passed CMs retained on the searcher.
+            if self.passed_cms:
+                candidate_cms = list(self.passed_cms.values())
+            else:
+                passed_cms = getattr(self.searcher, 'passed_cms', None)
+                if not passed_cms:
+                    raise RuntimeError(
+                        "ModelSearch has no passed candidate models to rerank."
+                    )
+                candidate_cms = list(passed_cms)
         else:
             if not self.cms:
                 raise RuntimeError(
@@ -2585,7 +2601,7 @@ class Segment:
         self,
         which: str = "both",
         base_dir: Union[str, Path, None] = None,
-    ) -> Dict[str, CM]:
+    ) -> None:
         """
         Load persisted candidate models and bind them to the current DataManager.
 
@@ -2599,8 +2615,8 @@ class Segment:
 
         Returns
         -------
-        Dict[str, CM]
-            Combined mapping of loaded models keyed by ``model_id``.
+        None
+            This method prints a concise summary of loaded models.
 
         Notes
         -----
@@ -2626,8 +2642,6 @@ class Segment:
         # in save paths, but loading should still look in the same location.
         base_path = Path(base_dir) if base_dir is not None else Path.cwd()
         dirs = get_segment_dirs(self.segment_id, base_path)
-        loaded: Dict[str, CM] = {}
-
         def _load_group(target_dir: Path, container: Dict[str, CM]) -> List[Dict[str, Any]]:
             # Gracefully handle absent or empty CM folders by returning zero entries.
             if not target_dir.exists():
@@ -2648,7 +2662,6 @@ class Segment:
                 cm = load_cm(cm_path)
                 cm.bind_data_manager(self.dm)
                 container[model_id] = cm
-                loaded[model_id] = cm
             return index_entries
 
         if which in {"selected", "both"}:
@@ -2657,9 +2670,11 @@ class Segment:
         if which in {"passed", "both"}:
             _load_group(dirs["passed_dir"], self.passed_cms)
 
+        summary = {
+            "passed": len(self.passed_cms),
+            "selected": len(self.cms),
+        }
         print(
-            f"Loaded selected_cms={len(self.cms)}; "
-            f"passed_cms={len(self.passed_cms)}."
+            f"Loaded passed_cms={summary['passed']}; "
+            f"selected_cms={summary['selected']}."
         )
-
-        return loaded
