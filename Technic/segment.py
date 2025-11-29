@@ -2615,8 +2615,9 @@ class Segment:
 
         Returns
         -------
-        Dict[str, CM]
-            Combined mapping of loaded models keyed by ``model_id``.
+        Dict[str, int]
+            Summary counts for loaded models keyed by ``'selected'`` and
+            ``'passed'``.
 
         Notes
         -----
@@ -2642,8 +2643,6 @@ class Segment:
         # in save paths, but loading should still look in the same location.
         base_path = Path(base_dir) if base_dir is not None else Path.cwd()
         dirs = get_segment_dirs(self.segment_id, base_path)
-        loaded: Dict[str, CM] = {}
-
         def _load_group(target_dir: Path, container: Dict[str, CM]) -> List[Dict[str, Any]]:
             # Gracefully handle absent or empty CM folders by returning zero entries.
             if not target_dir.exists():
@@ -2664,7 +2663,6 @@ class Segment:
                 cm = load_cm(cm_path)
                 cm.bind_data_manager(self.dm)
                 container[model_id] = cm
-                loaded[model_id] = cm
             return index_entries
 
         if which in {"selected", "both"}:
@@ -2673,9 +2671,13 @@ class Segment:
         if which in {"passed", "both"}:
             _load_group(dirs["passed_dir"], self.passed_cms)
 
+        summary = {
+            "passed": len(self.passed_cms),
+            "selected": len(self.cms),
+        }
         print(
-            f"Loaded passed_cms={len(self.passed_cms)}; "
-            f"selected_cms={len(self.cms)}."
+            f"Loaded passed_cms={summary['passed']}; "
+            f"selected_cms={summary['selected']}."
         )
 
-        return loaded
+        return summary
