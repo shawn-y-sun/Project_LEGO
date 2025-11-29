@@ -2,12 +2,14 @@
 # module: segment.py
 # Purpose: Manage candidate model construction, evaluation, and visualization workflows.
 # Key Types/Classes: Segment
-# Key Functions: build_cm, plot_vars, explore_vars, export
-# Dependencies: warnings, pandas, numpy, matplotlib.pyplot, math, inspect, copy, typing, pathlib, internal modules
+# Key Functions: build_cm, plot_vars, explore_vars, export, save_cms, load_cms
+# Dependencies: warnings, pandas, numpy, matplotlib.pyplot, math, inspect, copy, typing, pathlib,
+#               datetime, internal modules
 # =============================================================================
 import warnings
 warnings.simplefilter(action="ignore", category=FutureWarning)
 import inspect
+from datetime import datetime
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -37,6 +39,14 @@ from .feature import Feature
 from .periods import resolve_periods_argument
 from .plot import _plot_segmented_series
 from .pretest import PreTestSet, FeatureTest
+from .persistence import (
+    ensure_segment_dirs,
+    get_segment_dirs,
+    load_cm,
+    load_index,
+    save_cm,
+    save_index,
+)
 from .transform import TSFM
 
 
@@ -75,6 +85,8 @@ class Segment:
     ----------
     cms : Dict[str, CM]
         Dictionary of candidate models, keyed by their IDs.
+    passed_cms : Dict[str, CM]
+        Dictionary of candidate models loaded from persisted passed_cms sets.
     top_cms : List[CM]
         List of top performing models from the last search.
     searcher : Optional[ModelSearch]
@@ -133,6 +145,7 @@ class Segment:
         # Will hold the ModelSearch instance once we've run a search
         self.searcher: Optional[ModelSearch] = None
         self.cms: Dict[str, CM] = {}               # existing CMs in this segment
+        self.passed_cms: Dict[str, CM] = {}        # loaded passed CMs
         self.top_cms: List[CM] = []                # placeholder for top models
 
     def build_cm(
@@ -2317,3 +2330,192 @@ class Segment:
                 print(formatted)
 
         return top_models
+
+    def save_cms(
+        self,
+        save_selected: bool = True,
+        save_passed: bool = True,
+        overwrite: bool = True,
+        base_dir: Union[str, Path, None] = None,
+    ) -> Dict[str, Path]:
+        """
+        Save candidate models for this segment to disk.
+
+        Selected models come from ``self.cms`` and passed models originate from
+        ``self.searcher.passed_cms`` when available. Each model is saved under
+        ``Segment/<segment_id>/cms`` using its ``model_id`` as the filename and
+        indexed via a minimal ``index.json`` file.
+
+        Parameters
+        ----------
+        save_selected : bool, default True
+            When ``True``, persist models stored in ``self.cms`` to the
+            ``selected_cms`` directory.
+        save_passed : bool, default True
+            When ``True``, persist models stored in ``self.searcher.passed_cms``
+            to the ``passed_cms`` directory.
+        overwrite : bool, default True
+            When ``True``, existing pickles and indexes in the target directories
+            may be replaced. When ``False``, a :class:`FileExistsError` is raised
+            if a pickle or index already exists.
+        base_dir : Union[str, Path], optional
+            Base directory under which the ``Segment`` folder is created. When
+            ``None``, the current working directory is used.
+
+        Returns
+        -------
+        Dict[str, Path]
+            Mapping with keys ``selected_cms`` and ``passed_cms`` pointing to
+            directories that were updated.
+
+        Raises
+        ------
+        RuntimeError
+            If saving passed CMs is requested but no search results are
+            available.
+        ValueError
+            If duplicate ``model_id`` values are encountered while preparing
+            pickles.
+        FileExistsError
+            If ``overwrite`` is ``False`` and a target pickle or index file
+            already exists.
+        """
+
+        def _normalize_collection(collection: Union[Dict[str, CM], List[CM]]) -> Dict[str, CM]:
+            cm_dict: Dict[str, CM] = {}
+            for cm in collection.values() if isinstance(collection, dict) else collection:
+                model_id = getattr(cm, "model_id", None)
+                if not model_id:
+                    raise ValueError("Each CM must expose a non-empty model_id for persistence.")
+                if model_id in cm_dict:
+                    raise ValueError(f"Duplicate model_id '{model_id}' encountered while saving CMs.")
+                cm_dict[model_id] = cm
+            return cm_dict
+
+        base_path = Path(base_dir) if base_dir is not None else Path.cwd()
+        dirs = ensure_segment_dirs(self.segment_id, base_path)
+        created_at = datetime.now().isoformat(timespec="seconds")
+        saved_paths: Dict[str, Path] = {}
+
+        if save_selected:
+            if not self.cms:
+                raise RuntimeError("No selected candidate models are available to save.")
+
+            selected_cms = _normalize_collection(self.cms)
+            selected_entries: List[Dict[str, Any]] = []
+            for model_id, cm in selected_cms.items():
+                filename = f"{model_id}.pkl"
+                save_cm(cm, dirs["selected_dir"] / filename, overwrite)
+                selected_entries.append(
+                    {
+                        "model_id": model_id,
+                        "filename": filename,
+                        "segment_id": self.segment_id,
+                        "created_at": created_at,
+                    }
+                )
+
+            save_index(dirs["selected_dir"], selected_entries, overwrite)
+            saved_paths["selected_cms"] = dirs["selected_dir"]
+
+        if save_passed:
+            if self.searcher is None or not getattr(self.searcher, "passed_cms", None):
+                raise RuntimeError("No passed candidate models available to save from ModelSearch.")
+
+            passed_cms = _normalize_collection(getattr(self.searcher, "passed_cms"))
+            passed_entries: List[Dict[str, Any]] = []
+            for model_id, cm in passed_cms.items():
+                filename = f"{model_id}.pkl"
+                save_cm(cm, dirs["passed_dir"] / filename, overwrite)
+                passed_entries.append(
+                    {
+                        "model_id": model_id,
+                        "filename": filename,
+                        "segment_id": self.segment_id,
+                        "created_at": created_at,
+                    }
+                )
+
+            save_index(dirs["passed_dir"], passed_entries, overwrite)
+            saved_paths["passed_cms"] = dirs["passed_dir"]
+
+        return saved_paths
+
+    def load_cms(
+        self,
+        which: str = "both",
+        base_dir: Union[str, Path, None] = None,
+    ) -> Dict[str, CM]:
+        """
+        Load persisted candidate models and bind them to the current DataManager.
+
+        Parameters
+        ----------
+        which : {'selected', 'passed', 'both'}, default 'both'
+            Controls which sets to load from disk.
+        base_dir : Union[str, Path], optional
+            Base directory containing the ``Segment`` folder. Defaults to the
+            current working directory when ``None``.
+
+        Returns
+        -------
+        Dict[str, CM]
+            Combined mapping of loaded models keyed by ``model_id``.
+
+        Notes
+        -----
+        Prints a brief summary of how many selected and passed models were loaded.
+
+        Empty CM directories (or missing ``index.json`` files) are tolerated and
+        will result in zero loaded models for that group.
+
+        Raises
+        ------
+        ValueError
+            If ``which`` is not one of ``'selected'``, ``'passed'``, or
+            ``'both'`` or if the segment lacks a bound DataManager.
+        """
+        if which not in {"selected", "passed", "both"}:
+            raise ValueError("Parameter 'which' must be 'selected', 'passed', or 'both'.")
+        if self.dm is None:
+            raise ValueError("Segment must have an attached DataManager before loading CMs.")
+
+        base_path = Path(base_dir) if base_dir is not None else Path.cwd()
+        dirs = get_segment_dirs(self.segment_id, base_path)
+        loaded: Dict[str, CM] = {}
+
+        def _load_group(target_dir: Path, container: Dict[str, CM]) -> List[Dict[str, Any]]:
+            # Gracefully handle absent or empty CM folders by returning zero entries.
+            if not target_dir.exists():
+                container.clear()
+                return []
+
+            try:
+                index_entries = load_index(target_dir)
+            except FileNotFoundError:
+                container.clear()
+                return []
+
+            # Reset container to mirror persisted state.
+            container.clear()
+            for entry in index_entries:
+                model_id = entry["model_id"]
+                cm_path = target_dir / entry["filename"]
+                cm = load_cm(cm_path)
+                cm.bind_data_manager(self.dm)
+                container[model_id] = cm
+                loaded[model_id] = cm
+            return index_entries
+
+        if which in {"selected", "both"}:
+            _load_group(dirs["selected_dir"], self.cms)
+
+        if which in {"passed", "both"}:
+            _load_group(dirs["passed_dir"], self.passed_cms)
+
+        print(
+            f"Loaded selected_cms={len(self.cms)}; "
+            f"passed_cms={len(self.passed_cms)}."
+        )
+
+        return loaded
