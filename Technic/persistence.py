@@ -1,15 +1,20 @@
 # =============================================================================
 # module: persistence.py
 # Purpose: Utilities for persisting and restoring candidate models to disk.
-# Key Types/Classes: None
-# Key Functions: ensure_segment_dirs, save_index, load_index, save_cm, load_cm, get_segment_dirs
-# Dependencies: json, pathlib.Path, typing, cloudpickle
 # =============================================================================
-"""Persistence helpers for saving and loading candidate models."""
+# module: persistence.py
+# Purpose: Persistence helpers for candidate model artifacts and search metadata.
+# Key Types/Classes: None
+# Key Functions: ensure_segment_dirs, save_index, load_index, save_cm, load_cm, get_segment_dirs,
+#                sanitize_segment_id, generate_search_id
+# Dependencies: json, pathlib.Path, typing, cloudpickle, datetime
+# =============================================================================
+"""Persistence helpers for saving and loading candidate models and search metadata."""
 
 from __future__ import annotations
 
 import json
+from datetime import datetime
 import cloudpickle
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -36,7 +41,7 @@ def get_segment_dirs(segment_id: str, base_dir: Optional[Path] = None) -> Dict[s
     -------
     Dict[str, Path]
         Mapping with keys ``segments_root``, ``segment_dir``, ``cms_dir``,
-        ``selected_dir``, and ``passed_dir``.
+        ``selected_dir``, ``passed_dir``, and ``log_dir``.
     """
     base = base_dir or Path.cwd()
     segments_root = base / "Segment"
@@ -44,12 +49,14 @@ def get_segment_dirs(segment_id: str, base_dir: Optional[Path] = None) -> Dict[s
     cms_dir = segment_dir / "cms"
     selected_dir = cms_dir / "selected_cms"
     passed_dir = cms_dir / "passed_cms"
+    log_dir = segment_dir / "log"
     return {
         "segments_root": segments_root,
         "segment_dir": segment_dir,
         "cms_dir": cms_dir,
         "selected_dir": selected_dir,
         "passed_dir": passed_dir,
+        "log_dir": log_dir,
     }
 
 
@@ -77,6 +84,58 @@ def ensure_segment_dirs(segment_id: str, base_dir: Optional[Path] = None) -> Dic
             continue
         path.mkdir(parents=True, exist_ok=True)
     return dirs
+
+
+def sanitize_segment_id(segment_id: Any) -> str:
+    """
+    Sanitize a segment identifier for filesystem-safe usage.
+
+    Parameters
+    ----------
+    segment_id : Any
+        Identifier to sanitize.
+
+    Returns
+    -------
+    str
+        Segment identifier containing only letters, digits, underscores, or hyphens.
+
+    Examples
+    --------
+    >>> sanitize_segment_id("Seg 1")
+    'Seg_1'
+    """
+
+    raw = str(segment_id)
+    return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in raw)
+
+
+def generate_search_id(segment_id: Any) -> str:
+    """
+    Generate a timestamped search identifier scoped to a segment.
+
+    The identifier follows ``search_<segment_id>_<YYYYMMDD_HHMMSS>`` and uses a
+    sanitized ``segment_id`` suitable for filesystem paths.
+
+    Parameters
+    ----------
+    segment_id : Any
+        Segment identifier to embed in the search ID.
+
+    Returns
+    -------
+    str
+        Unique search identifier incorporating the sanitized segment label.
+
+    Examples
+    --------
+    >>> generate_search_id("CNIBusiness")  # doctest: +SKIP
+    'search_CNIBusiness_20250101_120000'
+    """
+
+    sanitized = sanitize_segment_id(segment_id)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"search_{sanitized}_{timestamp}"
 
 
 def save_index(directory: Path, entries: List[Dict[str, Any]], overwrite: bool) -> None:

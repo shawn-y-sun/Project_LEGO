@@ -11,6 +11,7 @@ import itertools
 import time
 import datetime
 import inspect
+import json
 from copy import deepcopy
 from collections import defaultdict
 import warnings
@@ -35,7 +36,7 @@ from .pretest import PreTestSet, FeatureTest
 from .cm import CM
 from .periods import default_periods_for_freq, resolve_periods_argument
 from .regime import RgmVar
-from .persistence import ensure_segment_dirs
+from .persistence import ensure_segment_dirs, sanitize_segment_id, generate_search_id
 
 
 def _sort_specs_with_dummies_first(spec_list: List[Any]) -> List[Any]:
@@ -132,6 +133,87 @@ class ModelSearch:
         self.top_cms: List[CM] = []
         self.model_pretestset: Optional[PreTestSet] = None
         self.target_pretest_result: Optional[Any] = None
+        self.current_search_config_raw: Optional[Dict[str, Any]] = None
+        self.current_search_config: Optional[Dict[str, Any]] = None
+        self.search_id: Optional[str] = None
+        self.total_combos: int = 0
+        self.completed_combos: int = 0
+
+    @staticmethod
+    def _make_serializable(obj: Any) -> Any:
+        """
+        Convert potentially non-serializable objects into JSON-safe forms.
+
+        Parameters
+        ----------
+        obj : Any
+            Object to serialize.
+
+        Returns
+        -------
+        Any
+            JSON-serializable representation.
+        """
+
+        if obj is None or isinstance(obj, (str, int, float, bool)):
+            return obj
+
+        if callable(obj):
+            module = getattr(obj, "__module__", None)
+            name = getattr(obj, "__name__", None)
+            if module and name:
+                return f"{module}.{name}"
+            return repr(obj)
+
+        if isinstance(obj, dict):
+            return {ModelSearch._make_serializable(k): ModelSearch._make_serializable(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple, set)):
+            return [ModelSearch._make_serializable(v) for v in obj]
+
+        return repr(obj)
+
+    @staticmethod
+    def _configs_equivalent(config_a: Dict[str, Any], config_b: Dict[str, Any]) -> bool:
+        """
+        Compare two search configurations ignoring metadata-only keys.
+
+        Parameters
+        ----------
+        config_a : dict
+            First configuration mapping.
+        config_b : dict
+            Second configuration mapping.
+
+        Returns
+        -------
+        bool
+            ``True`` when configurations match on meaningful search parameters.
+        """
+
+        ignored_keys = {"search_id", "timestamp", "total_combos"}
+        def _filtered(config: Dict[str, Any]) -> Dict[str, Any]:
+            return {k: v for k, v in config.items() if k not in ignored_keys}
+
+        return _filtered(config_a) == _filtered(config_b)
+
+    @staticmethod
+    def _read_progress(progress_path: Path) -> Optional[Dict[str, int]]:
+        """Read a progress file if present."""
+
+        if not progress_path.exists():
+            return None
+        try:
+            with progress_path.open("r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    @staticmethod
+    def _write_progress(progress_path: Path, total_combos: int, completed_combos: int) -> None:
+        """Persist progress to disk overwriting any prior file."""
+
+        with progress_path.open("w", encoding="utf-8") as handle:
+            json.dump({"total_combos": total_combos, "completed_combos": completed_combos}, handle, indent=2)
 
     def _resolve_model_pretestset(self) -> Optional[PreTestSet]:
         """Return a deep-copied default pretest bundle for ``self.model_cls``.
@@ -752,7 +834,11 @@ class ModelSearch:
         sample: str = 'in',
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
         outlier_idx: Optional[List[Any]] = None,
-        log: bool = True
+        log: bool = True,
+        start_index: int = 0,
+        total_count: Optional[int] = None,
+        log_file_path: Optional[Path] = None,
+        progress_callback: Optional[Callable[[int], None]] = None
     ) -> Tuple[List[CM], List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]], List[Tuple[List[Any], str, str]]]:
         """
         Assess all built spec combos and separate passed and failed results,
@@ -774,6 +860,20 @@ class ModelSearch:
             segment ``log`` directory under the capitalized ``Segment`` root. A
             notice describing the log destination is printed before filtering
             begins.
+        start_index : int, default 0
+            Number of spec combinations already completed in a resumed search.
+            This value feeds progress reporting but the provided ``all_specs``
+            sequence will still be evaluated in full.
+        total_count : int, optional
+            Total number of combinations in the full search. When provided, the
+            progress indicator uses this denominator rather than the length of
+            the current ``all_specs`` slice.
+        log_file_path : pathlib.Path, optional
+            Explicit path for progress logging. When omitted, a timestamped
+            search-specific log file is created automatically.
+        progress_callback : callable, optional
+            Invoked after each spec is evaluated with the current completed
+            combination count. Useful for writing incremental progress files.
 
         Notes
         -----
@@ -810,7 +910,7 @@ class ModelSearch:
             test_info_header_printed = False
             batch_filter_test_infos: Dict[str, Dict[str, str]] = {}  # Collect all filter_test_info in current batch
 
-            total = len(self.all_specs)
+            total = total_count if total_count is not None else len(self.all_specs)
             start_time = time.time()
             last_log_ts = start_time
 
@@ -829,8 +929,7 @@ class ModelSearch:
             # per-segment artifacts and write logs to a lowercase ``log``
             # subfolder when optional logging is enabled.
             log_dir: Optional[Path] = None
-            log_file_path: Optional[Path] = None
-            if log:
+            if log and log_file_path is None:
                 if segment_dirs is None:
                     segment_dirs = ensure_segment_dirs(str(segment_id), working_root)
                 log_dir = Path(segment_dirs["segment_dir"]) / "log"
@@ -838,17 +937,18 @@ class ModelSearch:
                 log_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 log_file_path = log_dir / f"search_{segment_id}_{log_ts}.log"
 
-                # Announce the log destination prior to filtering for operator
-                # visibility, mirroring the segment-scoped logging convention.
+            if log and log_file_path is not None:
+                log_dir = log_file_path.parent
+                log_dir.mkdir(parents=True, exist_ok=True)
                 print(f"Log will be saved to: {log_file_path}")
 
             # Print initial empty line for spacing
             print("")
 
-            for i, specs in enumerate(self.all_specs):
+            for idx, specs in enumerate(self.all_specs, start=start_index):
                 # Use temporary identifiers during assessment to avoid reusing
                 # final passed_* labels before models pass all tests.
-                model_id = f"temp_{i}"
+                model_id = f"temp_{idx}"
                 try:
                     # Suppress all output during assessment
                     with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
@@ -892,12 +992,13 @@ class ModelSearch:
                     
                     # Update batch filter_test_info (will overwrite duplicates)
                     batch_filter_test_infos.update(filter_test_info)
-                    
+
                     # Determine batch size based on progress
-                    batch_size = 100 if i < 10000 else 10000
+                    relative_i = idx - start_index
+                    batch_size = 100 if relative_i < 10000 else 10000
                     
                     # Process batch based on dynamic batch size or on first run
-                    if (i + 1) % batch_size == 0 or i == 0:
+                    if (relative_i + 1) % batch_size == 0 or relative_i == 0:
                         # Get all test names from the current batch
                         batch_test_names = set(batch_filter_test_infos.keys())
                         
@@ -930,21 +1031,25 @@ class ModelSearch:
                     error_log.append((specs, type(e).__name__, str(e)))
 
                 # Emit periodic heartbeat logs to track long-running searches.
+                processed_count = idx + 1
                 if log and log_file_path:
                     last_log_ts = self._log_progress_heartbeat(
                         log_file=str(log_file_path),
                         segment_id=str(segment_id),
                         start_ts=start_time,
                         last_log_ts=last_log_ts,
-                        evaluated_count=i + 1,
+                        evaluated_count=processed_count,
                         passed_cms=passed_cms,
                         failed_info=failed_info,
                         error_log=error_log,
                     )
 
+                if progress_callback is not None:
+                    progress_callback(processed_count)
+
                 # Progress and ETA update (only every 10 iterations to reduce interference)
-                if (i + 1) % 10 == 0 or i == 0 or i == len(self.all_specs) - 1:
-                    processed = i + 1
+                if (relative_i + 1) % 10 == 0 or relative_i == 0 or relative_i == len(self.all_specs) - 1:
+                    processed = processed_count
                     elapsed = time.time() - start_time
                     progress = processed / total if total > 0 else 1
                     if progress > 0:
@@ -960,9 +1065,9 @@ class ModelSearch:
                     bar_width = 30
                     filled_width = int(bar_width * progress)
                     bar = '█' * filled_width + '-' * (bar_width - filled_width)
-                    processed_count = f"{processed}/{total}"
+                    processed_count_str = f"{processed}/{total}"
                     speed = processed / elapsed if elapsed > 0 else 0
-                    progress_line = f"Filtering Specs: {progress_pct:3d}%|{bar}| {processed_count} [{elapsed:,.0f}s, {speed:.2f}it/s, estimated_finish={eta}]"
+                    progress_line = f"Filtering Specs: {progress_pct:3d}%|{bar}| {processed_count_str} [{elapsed:,.0f}s, {speed:.2f}it/s, estimated_finish={eta}]"
                     print(f"\r{progress_line}", end='', flush=True)
             
             # Final newline after progress bar
