@@ -2549,17 +2549,13 @@ class Segment:
         created_at = datetime.now().isoformat(timespec="seconds")
         saved_paths: Dict[str, Path] = {}
 
-        if overwrite:
-            if save_selected:
-                self._clear_cm_directory(dirs["selected_dir"])
-            if save_passed:
-                self._clear_cm_directory(dirs["passed_dir"])
-
         if save_selected:
             if not self.cms:
                 raise RuntimeError("No selected candidate models are available to save.")
 
             selected_cms = self._normalize_cm_collection(self.cms)
+            if overwrite:
+                self._clear_cm_directory(dirs["selected_dir"])
             selected_entries: List[Dict[str, Any]] = []
             for cm in selected_cms.values():
                 entry = self._save_cm_entry(cm, dirs["selected_dir"], created_at, overwrite)
@@ -2573,6 +2569,8 @@ class Segment:
                 raise RuntimeError("No passed candidate models available to save from ModelSearch.")
 
             passed_cms = self._normalize_cm_collection(getattr(self.searcher, "passed_cms"))
+            if overwrite:
+                self._clear_cm_directory(dirs["passed_dir"])
             passed_entries: List[Dict[str, Any]] = []
             for cm in passed_cms.values():
                 entry = self._save_cm_entry(cm, dirs["passed_dir"], created_at, overwrite)
