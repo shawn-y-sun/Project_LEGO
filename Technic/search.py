@@ -19,6 +19,7 @@ import os
 import logging
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
+from pathlib import Path
 
 
 LOGGER = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ from .pretest import PreTestSet, FeatureTest
 from .cm import CM
 from .periods import default_periods_for_freq, resolve_periods_argument
 from .regime import RgmVar
+from .persistence import ensure_segment_dirs
 
 
 def _sort_specs_with_dummies_first(spec_list: List[Any]) -> List[Any]:
@@ -99,7 +101,7 @@ class ModelSearch:
         Aggregation method for quarterly transformations.
     progress_log_interval_sec : float, optional
         Minimum elapsed seconds between heartbeat progress logs emitted during
-        lengthy ``filter_specs`` runs. Defaults to 15 minutes.
+        lengthy ``filter_specs`` runs. Defaults to 5 minutes.
     """
 
     def __init__(
@@ -111,7 +113,7 @@ class ModelSearch:
         target_base: Optional[str] = None,
         target_exposure: Optional[str] = None,
         qtr_method: str = 'mean',
-        progress_log_interval_sec: float = 15 * 60
+        progress_log_interval_sec: float = 5 * 60
     ):
         self.dm = dm
         self.target = target
@@ -769,8 +771,9 @@ class ModelSearch:
             a ValueError is raised.
         log : bool, default True
             When True, emit heartbeat logs to ``INFO`` and persist them to the
-            segment ``Log`` directory. A notice describing the log destination is
-            printed before filtering begins.
+            segment ``log`` directory under the capitalized ``Segment`` root. A
+            notice describing the log destination is printed before filtering
+            begins.
 
         Notes
         -----
@@ -780,7 +783,10 @@ class ModelSearch:
         non-positive number to disable periodic logging. A final summary is
         always appended at completion. Candidate models are labeled
         ``temp_<index>`` during assessment and renamed sequentially to
-        ``pass_<n>`` upon successfully passing all tests.
+        ``passed_<n>`` upon successfully passing all tests. Passed models are
+        immediately persisted under ``Segment/<segment_id>/cms/passed_cms``
+        when a :class:`Segment` context is attached, mirroring
+        :meth:`Segment.save_cms` conventions.
 
         Returns
         -------
@@ -811,18 +817,26 @@ class ModelSearch:
             # Resolve segment-scoped log destination and ensure folder readiness.
             segment_obj = getattr(self, "segment", None)
             segment_id = getattr(segment_obj, "segment_id", "unknown_segment")
-            working_root = getattr(segment_obj, "working_dir", os.getcwd())
+            working_root = Path(getattr(segment_obj, "working_dir", Path.cwd()))
+            segment_dirs: Optional[Dict[str, Path]] = None
+            if segment_obj is not None:
+                # Guarantee the capitalized Segment root exists when a Segment
+                # context is attached so persisted artifacts follow the expected
+                # directory casing.
+                segment_dirs = ensure_segment_dirs(str(segment_id), working_root)
 
-            # Preserve existing output convention that uses the capitalized
-            # "Segment" directory as the root for per-segment artifacts when
-            # optional logging is enabled.
-            log_dir = None
-            log_file_path = None
+            # Preserve the capitalized "Segment" directory as the root for
+            # per-segment artifacts and write logs to a lowercase ``log``
+            # subfolder when optional logging is enabled.
+            log_dir: Optional[Path] = None
+            log_file_path: Optional[Path] = None
             if log:
-                log_dir = os.path.join(working_root, "Segment", str(segment_id), "Log")
-                os.makedirs(log_dir, exist_ok=True)
+                if segment_dirs is None:
+                    segment_dirs = ensure_segment_dirs(str(segment_id), working_root)
+                log_dir = Path(segment_dirs["segment_dir"]) / "log"
+                log_dir.mkdir(parents=True, exist_ok=True)
                 log_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                log_file_path = os.path.join(log_dir, f"search_{segment_id}_{log_ts}.log")
+                log_file_path = log_dir / f"search_{segment_id}_{log_ts}.log"
 
                 # Announce the log destination prior to filtering for operator
                 # visibility, mirroring the segment-scoped logging convention.
@@ -833,7 +847,7 @@ class ModelSearch:
 
             for i, specs in enumerate(self.all_specs):
                 # Use temporary identifiers during assessment to avoid reusing
-                # final pass_* labels before models pass all tests.
+                # final passed_* labels before models pass all tests.
                 model_id = f"temp_{i}"
                 try:
                     # Suppress all output during assessment
@@ -847,10 +861,27 @@ class ModelSearch:
                         )
 
                     if isinstance(result, CM):
-                        # Promote passed models to sequential pass_* IDs so the
-                        # persisted identifier reflects success ordering.
-                        result.model_id = f"pass_{len(passed_cms) + 1}"
+                        # Promote passed models to sequential passed_* IDs so
+                        # the persisted identifier reflects success ordering.
+                        result.model_id = f"passed_{len(passed_cms) + 1}"
                         passed_cms.append(result)
+                        # Persist passed CMs immediately so long-running runs do
+                        # not lose progress if interrupted. This reuses the
+                        # segment's save_cms logic for consistent naming and
+                        # index maintenance.
+                        if segment_obj is not None:
+                            try:
+                                segment_obj.save_passed_cm(
+                                    result,
+                                    base_dir=working_root,
+                                    overwrite=True,
+                                )
+                            except Exception as exc:  # pragma: no cover - best-effort persistence
+                                LOGGER.warning(
+                                    "Unable to persist passed CM %s: %s",
+                                    result.model_id,
+                                    exc,
+                                )
                         # Get filter test info from successful CM
                         mdl = result.model_in if sample == 'in' else result.model_full
                         filter_test_info = mdl.testset.filter_test_info
@@ -901,7 +932,7 @@ class ModelSearch:
                 # Emit periodic heartbeat logs to track long-running searches.
                 if log and log_file_path:
                     last_log_ts = self._log_progress_heartbeat(
-                        log_file=log_file_path,
+                        log_file=str(log_file_path),
                         segment_id=str(segment_id),
                         start_ts=start_time,
                         last_log_ts=last_log_ts,
@@ -938,7 +969,7 @@ class ModelSearch:
             print("")
             if log and log_file_path:
                 self._log_progress_heartbeat(
-                    log_file=log_file_path,
+                    log_file=str(log_file_path),
                     segment_id=str(segment_id),
                     start_ts=start_time,
                     last_log_ts=last_log_ts,

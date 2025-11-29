@@ -4,7 +4,7 @@
 # Key Types/Classes: Segment
 # Key Functions: build_cm, plot_vars, explore_vars, export, save_cms, load_cms
 # Dependencies: warnings, pandas, numpy, matplotlib.pyplot, math, inspect, copy, typing, pathlib,
-#               datetime, internal modules
+#               datetime, shutil, internal modules
 # =============================================================================
 import warnings
 warnings.simplefilter(action="ignore", category=FutureWarning)
@@ -14,6 +14,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import math
+import shutil
 from copy import deepcopy
 from typing import Type, Dict, List, Optional, Any, Union, Callable, Tuple, Set, Sequence
 from pathlib import Path
@@ -1951,7 +1952,7 @@ class Segment:
         test_update_func: Optional[Callable] = None,
         outlier_idx: Optional[List[Any]] = None,
         add_in: bool = True,
-        override: bool = False,
+        overwrite: bool = False,
         re_rank: bool = True,
         **legacy_kwargs: Any
     ) -> None:
@@ -2006,11 +2007,12 @@ class Segment:
             List of index labels corresponding to outliers to exclude.
         add_in : bool, default True
             If True, add the resulting top CMs to self.cms.
-        override : bool, default False
+        overwrite : bool, default False
             If True, clear existing cms before adding new ones. Only applies
-            when add_in=True.
+            when add_in=True. The legacy ``override`` keyword is still honored
+            for backward compatibility.
         re_rank : bool, default True
-            If True and add_in=True and override=False, rank new top_cms
+            If True and add_in=True and overwrite=False, rank new top_cms
             along with pre-existing cms and update model_ids based on ranking.
             If False, simply append new cms with collision-resolved IDs.
 
@@ -2027,10 +2029,10 @@ class Segment:
         ... )
         >>> top_models = segment.top_cms  # access results
         >>> 
-        >>> # Search and override existing models
+        >>> # Search and overwrite existing models
         >>> segment.search_cms(
         ...     desired_pool=["new_var1", "new_var2"],
-        ...     override=True  # clears existing models first
+        ...     overwrite=True  # clears existing models first
         ... )
         >>> 
         >>> # Search and add without re-ranking
@@ -2068,10 +2070,13 @@ class Segment:
         searcher = self.searcher
         searcher.segment = self
 
+        legacy_overwrite = legacy_kwargs.pop("override", None)
         legacy_max_periods = legacy_kwargs.pop("max_periods", None)
         if legacy_kwargs:
             unexpected = ", ".join(sorted(legacy_kwargs.keys()))
             raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+
+        effective_overwrite = overwrite if legacy_overwrite is None else bool(legacy_overwrite)
 
         resolved_periods = resolve_periods_argument(
             self.dm.freq,
@@ -2101,7 +2106,7 @@ class Segment:
 
         # 4) Optionally add them to this segment's cms
         if add_in:
-            if override:
+            if effective_overwrite:
                 # Clear existing cms and add new ones with simple IDs
                 self.cms.clear()
                 for i, cm in enumerate(self.top_cms):
@@ -2197,9 +2202,10 @@ class Segment:
         self,
         rank_weights: Tuple[float, float, float],
         all_passed: bool = True,
-        override: bool = False,
+        overwrite: bool = False,
         top_n: int = 10,
-        sample: str = 'in'
+        sample: str = 'in',
+        **legacy_kwargs: Any
     ) -> List[CM]:
         """
         Re-compute rankings for candidate models using new weights.
@@ -2212,9 +2218,10 @@ class Segment:
             When ``True``, include every CM stored in ``self.searcher.passed_cms``.
             When ``False``, limit the re-ranking to models currently in
             ``self.cms``.
-        override : bool, default False
+        overwrite : bool, default False
             If ``True``, replace ``self.cms`` and ``self.searcher.top_cms`` with
-            the newly ranked ``top_n`` models.
+            the newly ranked ``top_n`` models. The legacy ``override`` keyword
+            remains supported for backward compatibility.
         top_n : int, default 10
             Number of models to display and return from the refreshed ranking.
         sample : {'in', 'full'}, default 'in'
@@ -2243,6 +2250,13 @@ class Segment:
         >>> refreshed[0].model_id
         'cm1'
         """
+        legacy_overwrite = legacy_kwargs.pop("override", None)
+        if legacy_kwargs:
+            unexpected = ", ".join(sorted(legacy_kwargs.keys()))
+            raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+
+        effective_overwrite = overwrite if legacy_overwrite is None else bool(legacy_overwrite)
+
         if self.searcher is None:
             raise RuntimeError(
                 "Cannot rerank candidate models before running a search."
@@ -2297,8 +2311,8 @@ class Segment:
             self.searcher.passed_cms = ordered_cms
         self.searcher.df_scores = df_updated
 
-        # Persist cms registry depending on override preference.
-        if override:
+        # Persist cms registry depending on overwrite preference.
+        if effective_overwrite:
             self.cms.clear()
             for cm in top_models:
                 self.cms[cm.model_id] = cm
@@ -2332,6 +2346,151 @@ class Segment:
 
         return top_models
 
+    def _normalize_cm_collection(
+        self, collection: Union[Dict[str, CM], List[CM]]
+    ) -> Dict[str, CM]:
+        """Return a model_id-keyed mapping while validating CMs for persistence."""
+
+        cm_dict: Dict[str, CM] = {}
+        for cm in collection.values() if isinstance(collection, dict) else collection:
+            model_id = getattr(cm, "model_id", None)
+            if not model_id:
+                raise ValueError("Each CM must expose a non-empty model_id for persistence.")
+            if model_id in cm_dict:
+                raise ValueError(f"Duplicate model_id '{model_id}' encountered while saving CMs.")
+            cm_dict[model_id] = cm
+        return cm_dict
+
+    def _save_cm_entry(
+        self,
+        cm: CM,
+        target_dir: Path,
+        created_at: str,
+        overwrite: bool,
+    ) -> Dict[str, Any]:
+        """
+        Persist a single CM pickle and return its index entry payload.
+
+        Parameters
+        ----------
+        cm : CM
+            Candidate model to persist.
+        target_dir : Path
+            Directory in which to store the pickle and related index entry.
+        created_at : str
+            Timestamp used for the index metadata.
+        overwrite : bool
+            Forwarded to :func:`save_cm` to control clobbering behavior.
+
+        Returns
+        -------
+        Dict[str, Any]
+            Index payload describing the saved CM.
+        """
+
+        model_id = getattr(cm, "model_id", None)
+        if not model_id:
+            raise ValueError("Each CM must expose a non-empty model_id for persistence.")
+
+        filename = f"{model_id}.pkl"
+        save_cm(cm, target_dir / filename, overwrite)
+        return {
+            "model_id": model_id,
+            "filename": filename,
+            "segment_id": self.segment_id,
+            "created_at": created_at,
+        }
+
+    @staticmethod
+    def _clear_cm_directory(target_dir: Path) -> None:
+        """
+        Remove persisted CM artifacts from a CM directory.
+
+        Parameters
+        ----------
+        target_dir : Path
+            Directory whose contents should be removed prior to saving.
+
+        Notes
+        -----
+        This helper leaves the target directory in place while deleting any
+        existing files or nested folders so that subsequent save operations
+        write into a clean location when ``overwrite`` is requested.
+        """
+
+        if not target_dir.exists():
+            return
+
+        # Ensure stale pickles and indexes do not linger when overwrite=True.
+        for item in target_dir.iterdir():
+            if item.is_file():
+                item.unlink()
+            elif item.is_dir():
+                shutil.rmtree(item)
+
+    def save_passed_cm(
+        self,
+        cm: CM,
+        *,
+        base_dir: Union[str, Path, None] = None,
+        overwrite: bool = True,
+    ) -> Path:
+        """
+        Save a single passed candidate model to the ``passed_cms`` directory.
+
+        Parameters
+        ----------
+        cm : CM
+            Candidate model to persist. ``cm.model_id`` must be populated.
+        base_dir : Union[str, Path], optional
+            Base directory under which the capitalized ``Segment`` folder is
+            created. Defaults to the current working directory when ``None``.
+        overwrite : bool, default True
+            When ``True``, replace any existing pickle or index entry for the
+            same ``model_id``. When ``False``, raises :class:`FileExistsError`
+            if the pickle or index record already exists.
+
+        Returns
+        -------
+        Path
+            Filesystem path to the saved pickle.
+
+        Raises
+        ------
+        ValueError
+            If ``cm`` is missing a ``model_id``.
+        FileExistsError
+            If ``overwrite`` is ``False`` and a duplicate pickle or index entry
+            is detected.
+
+        Examples
+        --------
+        >>> segment.save_passed_cm(cm)
+        PosixPath('.../Segment/my_segment/cms/passed_cms/passed_1.pkl')
+        """
+
+        base_path = Path(base_dir) if base_dir is not None else Path.cwd()
+        dirs = ensure_segment_dirs(self.segment_id, base_path)
+        created_at = datetime.now().isoformat(timespec="seconds")
+
+        entry = self._save_cm_entry(cm, dirs["passed_dir"], created_at, overwrite)
+
+        try:
+            existing_entries = load_index(dirs["passed_dir"])
+        except FileNotFoundError:
+            existing_entries = []
+
+        if not overwrite and any(e["model_id"] == entry["model_id"] for e in existing_entries):
+            raise FileExistsError(
+                f"Index entry for model_id '{entry['model_id']}' already exists in passed_cms."
+            )
+
+        # Replace any pre-existing entry for this model_id before writing.
+        updated_entries = [e for e in existing_entries if e["model_id"] != entry["model_id"]]
+        updated_entries.append(entry)
+        save_index(dirs["passed_dir"], updated_entries, overwrite=True)
+        return dirs["passed_dir"] / entry["filename"]
+
     def save_cms(
         self,
         save_selected: bool = True,
@@ -2357,8 +2516,8 @@ class Segment:
             to the ``passed_cms`` directory.
         overwrite : bool, default True
             When ``True``, existing pickles and indexes in the target directories
-            may be replaced. When ``False``, a :class:`FileExistsError` is raised
-            if a pickle or index already exists.
+            are cleared before saving. When ``False``, a :class:`FileExistsError`
+            is raised if a pickle or index already exists.
         base_dir : Union[str, Path], optional
             Base directory under which the ``Segment`` folder is created. When
             ``None``, the current working directory is used.
@@ -2382,17 +2541,9 @@ class Segment:
             already exists.
         """
 
-        def _normalize_collection(collection: Union[Dict[str, CM], List[CM]]) -> Dict[str, CM]:
-            cm_dict: Dict[str, CM] = {}
-            for cm in collection.values() if isinstance(collection, dict) else collection:
-                model_id = getattr(cm, "model_id", None)
-                if not model_id:
-                    raise ValueError("Each CM must expose a non-empty model_id for persistence.")
-                if model_id in cm_dict:
-                    raise ValueError(f"Duplicate model_id '{model_id}' encountered while saving CMs.")
-                cm_dict[model_id] = cm
-            return cm_dict
-
+        # Normalize the base directory so all persisted CMs live under a
+        # capitalized "Segment" folder. ``ensure_segment_dirs`` will create the
+        # hierarchy when it does not yet exist.
         base_path = Path(base_dir) if base_dir is not None else Path.cwd()
         dirs = ensure_segment_dirs(self.segment_id, base_path)
         created_at = datetime.now().isoformat(timespec="seconds")
@@ -2402,19 +2553,13 @@ class Segment:
             if not self.cms:
                 raise RuntimeError("No selected candidate models are available to save.")
 
-            selected_cms = _normalize_collection(self.cms)
+            selected_cms = self._normalize_cm_collection(self.cms)
+            if overwrite:
+                self._clear_cm_directory(dirs["selected_dir"])
             selected_entries: List[Dict[str, Any]] = []
-            for model_id, cm in selected_cms.items():
-                filename = f"{model_id}.pkl"
-                save_cm(cm, dirs["selected_dir"] / filename, overwrite)
-                selected_entries.append(
-                    {
-                        "model_id": model_id,
-                        "filename": filename,
-                        "segment_id": self.segment_id,
-                        "created_at": created_at,
-                    }
-                )
+            for cm in selected_cms.values():
+                entry = self._save_cm_entry(cm, dirs["selected_dir"], created_at, overwrite)
+                selected_entries.append(entry)
 
             save_index(dirs["selected_dir"], selected_entries, overwrite)
             saved_paths["selected_cms"] = dirs["selected_dir"]
@@ -2423,19 +2568,13 @@ class Segment:
             if self.searcher is None or not getattr(self.searcher, "passed_cms", None):
                 raise RuntimeError("No passed candidate models available to save from ModelSearch.")
 
-            passed_cms = _normalize_collection(getattr(self.searcher, "passed_cms"))
+            passed_cms = self._normalize_cm_collection(getattr(self.searcher, "passed_cms"))
+            if overwrite:
+                self._clear_cm_directory(dirs["passed_dir"])
             passed_entries: List[Dict[str, Any]] = []
-            for model_id, cm in passed_cms.items():
-                filename = f"{model_id}.pkl"
-                save_cm(cm, dirs["passed_dir"] / filename, overwrite)
-                passed_entries.append(
-                    {
-                        "model_id": model_id,
-                        "filename": filename,
-                        "segment_id": self.segment_id,
-                        "created_at": created_at,
-                    }
-                )
+            for cm in passed_cms.values():
+                entry = self._save_cm_entry(cm, dirs["passed_dir"], created_at, overwrite)
+                passed_entries.append(entry)
 
             save_index(dirs["passed_dir"], passed_entries, overwrite)
             saved_paths["passed_cms"] = dirs["passed_dir"]
@@ -2481,6 +2620,10 @@ class Segment:
         if self.dm is None:
             raise ValueError("Segment must have an attached DataManager before loading CMs.")
 
+        # Always resolve directories relative to a capitalized "Segment" root
+        # so loading mirrors the persistence convention used in ``save_cms``.
+        # ``ensure_segment_dirs`` guarantees the structure exists when invoked
+        # in save paths, but loading should still look in the same location.
         base_path = Path(base_dir) if base_dir is not None else Path.cwd()
         dirs = get_segment_dirs(self.segment_id, base_path)
         loaded: Dict[str, CM] = {}
