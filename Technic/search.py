@@ -101,7 +101,7 @@ class ModelSearch:
         Aggregation method for quarterly transformations.
     progress_log_interval_sec : float, optional
         Minimum elapsed seconds between heartbeat progress logs emitted during
-        lengthy ``filter_specs`` runs. Defaults to 15 minutes.
+        lengthy ``filter_specs`` runs. Defaults to 5 minutes.
     """
 
     def __init__(
@@ -113,7 +113,7 @@ class ModelSearch:
         target_base: Optional[str] = None,
         target_exposure: Optional[str] = None,
         qtr_method: str = 'mean',
-        progress_log_interval_sec: float = 15 * 60
+        progress_log_interval_sec: float = 5 * 60
     ):
         self.dm = dm
         self.target = target
