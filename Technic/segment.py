@@ -2601,7 +2601,7 @@ class Segment:
         self,
         which: str = "both",
         base_dir: Union[str, Path, None] = None,
-    ) -> Dict[str, CM]:
+    ) -> None:
         """
         Load persisted candidate models and bind them to the current DataManager.
 
@@ -2615,9 +2615,8 @@ class Segment:
 
         Returns
         -------
-        Dict[str, int]
-            Summary counts for loaded models keyed by ``'selected'`` and
-            ``'passed'``.
+        None
+            This method prints a concise summary of loaded models.
 
         Notes
         -----
@@ -2679,5 +2678,3 @@ class Segment:
             f"Loaded passed_cms={summary['passed']}; "
             f"selected_cms={summary['selected']}."
         )
-
-        return summary
