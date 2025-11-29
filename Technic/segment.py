@@ -2466,13 +2466,14 @@ class Segment:
         -----
         Prints a brief summary of how many selected and passed models were loaded.
 
+        Empty CM directories (or missing ``index.json`` files) are tolerated and
+        will result in zero loaded models for that group.
+
         Raises
         ------
         ValueError
             If ``which`` is not one of ``'selected'``, ``'passed'``, or
             ``'both'`` or if the segment lacks a bound DataManager.
-        FileNotFoundError
-            If required directories or index files are missing.
         """
         if which not in {"selected", "passed", "both"}:
             raise ValueError("Parameter 'which' must be 'selected', 'passed', or 'both'.")
@@ -2484,9 +2485,16 @@ class Segment:
         loaded: Dict[str, CM] = {}
 
         def _load_group(target_dir: Path, container: Dict[str, CM]) -> List[Dict[str, Any]]:
+            # Gracefully handle absent or empty CM folders by returning zero entries.
             if not target_dir.exists():
-                raise FileNotFoundError(f"CM directory not found at {target_dir}.")
-            index_entries = load_index(target_dir)
+                container.clear()
+                return []
+
+            try:
+                index_entries = load_index(target_dir)
+            except FileNotFoundError:
+                container.clear()
+                return []
 
             # Reset container to mirror persisted state.
             container.clear()
