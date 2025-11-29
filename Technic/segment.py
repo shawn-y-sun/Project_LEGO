@@ -2674,8 +2674,8 @@ class Segment:
             _load_group(dirs["passed_dir"], self.passed_cms)
 
         print(
-            f"Loaded selected_cms={len(self.cms)}; "
-            f"passed_cms={len(self.passed_cms)}."
+            f"Loaded passed_cms={len(self.passed_cms)}; "
+            f"selected_cms={len(self.cms)}."
         )
 
         return loaded
