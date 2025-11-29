@@ -2462,6 +2462,10 @@ class Segment:
         Dict[str, CM]
             Combined mapping of loaded models keyed by ``model_id``.
 
+        Notes
+        -----
+        Prints a brief summary of how many selected and passed models were loaded.
+
         Raises
         ------
         ValueError
@@ -2500,5 +2504,10 @@ class Segment:
 
         if which in {"passed", "both"}:
             _load_group(dirs["passed_dir"], self.passed_cms)
+
+        print(
+            f"Loaded selected_cms={len(self.cms)}; "
+            f"passed_cms={len(self.passed_cms)}."
+        )
 
         return loaded
