@@ -19,6 +19,7 @@ import os
 import logging
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
+from pathlib import Path
 
 
 LOGGER = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ from .pretest import PreTestSet, FeatureTest
 from .cm import CM
 from .periods import default_periods_for_freq, resolve_periods_argument
 from .regime import RgmVar
+from .persistence import ensure_segment_dirs
 
 
 def _sort_specs_with_dummies_first(spec_list: List[Any]) -> List[Any]:
@@ -815,18 +817,26 @@ class ModelSearch:
             # Resolve segment-scoped log destination and ensure folder readiness.
             segment_obj = getattr(self, "segment", None)
             segment_id = getattr(segment_obj, "segment_id", "unknown_segment")
-            working_root = getattr(segment_obj, "working_dir", os.getcwd())
+            working_root = Path(getattr(segment_obj, "working_dir", Path.cwd()))
+            segment_dirs: Optional[Dict[str, Path]] = None
+            if segment_obj is not None:
+                # Guarantee the capitalized Segment root exists when a Segment
+                # context is attached so persisted artifacts follow the expected
+                # directory casing.
+                segment_dirs = ensure_segment_dirs(str(segment_id), working_root)
 
             # Preserve the capitalized "Segment" directory as the root for
             # per-segment artifacts and write logs to a lowercase ``log``
             # subfolder when optional logging is enabled.
-            log_dir = None
-            log_file_path = None
+            log_dir: Optional[Path] = None
+            log_file_path: Optional[Path] = None
             if log:
-                log_dir = os.path.join(working_root, "Segment", str(segment_id), "log")
-                os.makedirs(log_dir, exist_ok=True)
+                if segment_dirs is None:
+                    segment_dirs = ensure_segment_dirs(str(segment_id), working_root)
+                log_dir = Path(segment_dirs["segment_dir"]) / "log"
+                log_dir.mkdir(parents=True, exist_ok=True)
                 log_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                log_file_path = os.path.join(log_dir, f"search_{segment_id}_{log_ts}.log")
+                log_file_path = log_dir / f"search_{segment_id}_{log_ts}.log"
 
                 # Announce the log destination prior to filtering for operator
                 # visibility, mirroring the segment-scoped logging convention.
@@ -922,7 +932,7 @@ class ModelSearch:
                 # Emit periodic heartbeat logs to track long-running searches.
                 if log and log_file_path:
                     last_log_ts = self._log_progress_heartbeat(
-                        log_file=log_file_path,
+                        log_file=str(log_file_path),
                         segment_id=str(segment_id),
                         start_ts=start_time,
                         last_log_ts=last_log_ts,
@@ -959,7 +969,7 @@ class ModelSearch:
             print("")
             if log and log_file_path:
                 self._log_progress_heartbeat(
-                    log_file=log_file_path,
+                    log_file=str(log_file_path),
                     segment_id=str(segment_id),
                     start_ts=start_time,
                     last_log_ts=last_log_ts,
