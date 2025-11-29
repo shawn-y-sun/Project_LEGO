@@ -769,8 +769,9 @@ class ModelSearch:
             a ValueError is raised.
         log : bool, default True
             When True, emit heartbeat logs to ``INFO`` and persist them to the
-            segment ``Log`` directory. A notice describing the log destination is
-            printed before filtering begins.
+            segment ``log`` directory under the capitalized ``Segment`` root. A
+            notice describing the log destination is printed before filtering
+            begins.
 
         Notes
         -----
@@ -780,7 +781,10 @@ class ModelSearch:
         non-positive number to disable periodic logging. A final summary is
         always appended at completion. Candidate models are labeled
         ``temp_<index>`` during assessment and renamed sequentially to
-        ``pass_<n>`` upon successfully passing all tests.
+        ``passed_<n>`` upon successfully passing all tests. Passed models are
+        immediately persisted under ``Segment/<segment_id>/cms/passed_cms``
+        when a :class:`Segment` context is attached, mirroring
+        :meth:`Segment.save_cms` conventions.
 
         Returns
         -------
@@ -813,13 +817,13 @@ class ModelSearch:
             segment_id = getattr(segment_obj, "segment_id", "unknown_segment")
             working_root = getattr(segment_obj, "working_dir", os.getcwd())
 
-            # Preserve existing output convention that uses the capitalized
-            # "Segment" directory as the root for per-segment artifacts when
-            # optional logging is enabled.
+            # Preserve the capitalized "Segment" directory as the root for
+            # per-segment artifacts and write logs to a lowercase ``log``
+            # subfolder when optional logging is enabled.
             log_dir = None
             log_file_path = None
             if log:
-                log_dir = os.path.join(working_root, "Segment", str(segment_id), "Log")
+                log_dir = os.path.join(working_root, "Segment", str(segment_id), "log")
                 os.makedirs(log_dir, exist_ok=True)
                 log_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 log_file_path = os.path.join(log_dir, f"search_{segment_id}_{log_ts}.log")
@@ -833,7 +837,7 @@ class ModelSearch:
 
             for i, specs in enumerate(self.all_specs):
                 # Use temporary identifiers during assessment to avoid reusing
-                # final pass_* labels before models pass all tests.
+                # final passed_* labels before models pass all tests.
                 model_id = f"temp_{i}"
                 try:
                     # Suppress all output during assessment
@@ -847,10 +851,27 @@ class ModelSearch:
                         )
 
                     if isinstance(result, CM):
-                        # Promote passed models to sequential pass_* IDs so the
-                        # persisted identifier reflects success ordering.
-                        result.model_id = f"pass_{len(passed_cms) + 1}"
+                        # Promote passed models to sequential passed_* IDs so
+                        # the persisted identifier reflects success ordering.
+                        result.model_id = f"passed_{len(passed_cms) + 1}"
                         passed_cms.append(result)
+                        # Persist passed CMs immediately so long-running runs do
+                        # not lose progress if interrupted. This reuses the
+                        # segment's save_cms logic for consistent naming and
+                        # index maintenance.
+                        if segment_obj is not None:
+                            try:
+                                segment_obj.save_passed_cm(
+                                    result,
+                                    base_dir=working_root,
+                                    overwrite=True,
+                                )
+                            except Exception as exc:  # pragma: no cover - best-effort persistence
+                                LOGGER.warning(
+                                    "Unable to persist passed CM %s: %s",
+                                    result.model_id,
+                                    exc,
+                                )
                         # Get filter test info from successful CM
                         mdl = result.model_in if sample == 'in' else result.model_full
                         filter_test_info = mdl.testset.filter_test_info
