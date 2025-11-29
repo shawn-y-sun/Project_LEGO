@@ -47,6 +47,7 @@ from .persistence import (
     load_index,
     save_cm,
     save_index,
+    generate_search_id,
 )
 from .transform import TSFM
 
@@ -148,6 +149,8 @@ class Segment:
         self.cms: Dict[str, CM] = {}               # existing CMs in this segment
         self.passed_cms: Dict[str, CM] = {}        # loaded passed CMs
         self.top_cms: List[CM] = []                # placeholder for top models
+        self.last_search_id: Optional[str] = None
+        self.working_dir: Path = Path.cwd()
 
     def build_cm(
         self,
@@ -1954,6 +1957,7 @@ class Segment:
         add_in: bool = True,
         overwrite: bool = False,
         re_rank: bool = True,
+        search_id: Optional[str] = None,
         **legacy_kwargs: Any
     ) -> None:
         """
@@ -2015,6 +2019,10 @@ class Segment:
             If True and add_in=True and overwrite=False, rank new top_cms
             along with pre-existing cms and update model_ids based on ranking.
             If False, simply append new cms with collision-resolved IDs.
+        search_id : str, optional
+            Explicit search identifier to use. When omitted, a new identifier
+            of the form ``search_<segment_id>_<YYYYMMDD_HHMMSS>`` is generated
+            and stored on ``self.last_search_id``.
 
         Returns
         -------
@@ -2085,6 +2093,8 @@ class Segment:
         )
 
         # 2) Run the search (populates searcher.top_cms; no return value)
+        active_search_id = search_id or generate_search_id(self.segment_id)
+        self.last_search_id = active_search_id
         searcher.run_search(
             desired_pool=desired_pool,
             forced_in=forced_in or [],
@@ -2098,7 +2108,9 @@ class Segment:
             rank_weights=rank_weights,
             test_update_func=test_update_func,
             outlier_idx=outlier_idx,
-            exp_sign_map=exp_sign_map
+            exp_sign_map=exp_sign_map,
+            search_id=active_search_id,
+            base_dir=self.working_dir,
         )
 
         # 3) Collect the top_n results from the searcher
@@ -2513,6 +2525,7 @@ class Segment:
         save_passed: bool = True,
         overwrite: bool = True,
         base_dir: Union[str, Path, None] = None,
+        search_id: Optional[str] = None,
     ) -> Dict[str, Path]:
         """
         Save candidate models for this segment to disk.
@@ -2537,6 +2550,10 @@ class Segment:
         base_dir : Union[str, Path], optional
             Base directory under which the ``Segment`` folder is created. When
             ``None``, the current working directory is used.
+        search_id : str, optional
+            Search identifier whose passed models should be saved under
+            ``cms/<search_id>``. When omitted, ``self.last_search_id`` is used
+            if available, otherwise the legacy ``passed_cms`` path is used.
 
         Returns
         -------
@@ -2562,6 +2579,7 @@ class Segment:
         # hierarchy when it does not yet exist.
         base_path = Path(base_dir) if base_dir is not None else Path.cwd()
         dirs = ensure_segment_dirs(self.segment_id, base_path)
+        search_target_id = search_id or self.last_search_id
         created_at = datetime.now().isoformat(timespec="seconds")
         saved_paths: Dict[str, Path] = {}
 
@@ -2585,15 +2603,17 @@ class Segment:
                 raise RuntimeError("No passed candidate models available to save from ModelSearch.")
 
             passed_cms = self._normalize_cm_collection(getattr(self.searcher, "passed_cms"))
+            target_dir = dirs["passed_dir"] if search_target_id is None else dirs["cms_dir"] / search_target_id
             if overwrite:
-                self._clear_cm_directory(dirs["passed_dir"])
+                self._clear_cm_directory(target_dir)
+            target_dir.mkdir(parents=True, exist_ok=True)
             passed_entries: List[Dict[str, Any]] = []
             for cm in passed_cms.values():
-                entry = self._save_cm_entry(cm, dirs["passed_dir"], created_at, overwrite)
+                entry = self._save_cm_entry(cm, target_dir, created_at, overwrite)
                 passed_entries.append(entry)
 
-            save_index(dirs["passed_dir"], passed_entries, overwrite)
-            saved_paths["passed_cms"] = dirs["passed_dir"]
+            save_index(target_dir, passed_entries, overwrite)
+            saved_paths["passed_cms"] = target_dir
 
         return saved_paths
 
@@ -2601,6 +2621,7 @@ class Segment:
         self,
         which: str = "both",
         base_dir: Union[str, Path, None] = None,
+        search_id: Optional[str] = None,
     ) -> None:
         """
         Load persisted candidate models and bind them to the current DataManager.
@@ -2612,6 +2633,9 @@ class Segment:
         base_dir : Union[str, Path], optional
             Base directory containing the ``Segment`` folder. Defaults to the
             current working directory when ``None``.
+        search_id : str, optional
+            When provided, loads passed candidate models exclusively from
+            ``cms/<search_id>``. Defaults to ``self.last_search_id`` when set.
 
         Returns
         -------
@@ -2642,6 +2666,7 @@ class Segment:
         # in save paths, but loading should still look in the same location.
         base_path = Path(base_dir) if base_dir is not None else Path.cwd()
         dirs = get_segment_dirs(self.segment_id, base_path)
+        target_search_id = search_id or self.last_search_id
         def _load_group(target_dir: Path, container: Dict[str, CM]) -> List[Dict[str, Any]]:
             # Gracefully handle absent or empty CM folders by returning zero entries.
             if not target_dir.exists():
@@ -2668,7 +2693,12 @@ class Segment:
             _load_group(dirs["selected_dir"], self.cms)
 
         if which in {"passed", "both"}:
-            _load_group(dirs["passed_dir"], self.passed_cms)
+            passed_dir = (
+                dirs["passed_dir"]
+                if target_search_id is None
+                else dirs["cms_dir"] / target_search_id
+            )
+            _load_group(passed_dir, self.passed_cms)
 
         summary = {
             "passed": len(self.passed_cms),

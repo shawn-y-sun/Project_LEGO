@@ -1,13 +1,10 @@
 # =============================================================================
 # module: persistence.py
-# Purpose: Utilities for persisting and restoring candidate models to disk.
-# =============================================================================
-# module: persistence.py
-# Purpose: Persistence helpers for candidate model artifacts and search metadata.
+# Purpose: Persistence helpers for saving and loading candidate models, indexes, and search metadata.
 # Key Types/Classes: None
-# Key Functions: ensure_segment_dirs, save_index, load_index, save_cm, load_cm, get_segment_dirs,
-#                sanitize_segment_id, generate_search_id
-# Dependencies: json, pathlib.Path, typing, cloudpickle, datetime
+# Key Functions: ensure_segment_dirs, get_segment_dirs, sanitize_segment_id, generate_search_id,
+#                get_search_paths, save_index, load_index, save_cm, load_cm
+# Dependencies: json, datetime, cloudpickle, pathlib.Path, typing, internal cm
 # =============================================================================
 """Persistence helpers for saving and loading candidate models and search metadata."""
 
@@ -136,6 +133,50 @@ def generate_search_id(segment_id: Any) -> str:
     sanitized = sanitize_segment_id(segment_id)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"search_{sanitized}_{timestamp}"
+
+
+def get_search_paths(segment_id: Any, search_id: str, base_dir: Optional[Path] = None) -> Dict[str, Path]:
+    """
+    Return search-scoped directories and file paths for a segment search run.
+
+    Parameters
+    ----------
+    segment_id : Any
+        Identifier for the segment whose search artifacts should be located.
+    search_id : str
+        Concrete search identifier (``search_<segment>_<YYYYMMDD_HHMMSS>``).
+    base_dir : Path, optional
+        Base working directory; defaults to the current working directory when omitted.
+
+    Returns
+    -------
+    Dict[str, Path]
+        Mapping that includes ``cms_root``, ``search_cms_dir``, ``log_dir``,
+        ``log_file``, ``progress_file``, and ``config_file``.
+
+    Examples
+    --------
+    >>> paths = get_search_paths("seg1", "search_seg1_20250101_120000")
+    >>> paths["search_cms_dir"].name
+    'search_seg1_20250101_120000'
+    """
+
+    base = base_dir or Path.cwd()
+    dirs = ensure_segment_dirs(str(segment_id), base)
+    cms_root = dirs["cms_dir"]
+    search_cms_dir = cms_root / search_id
+    log_dir = dirs["log_dir"]
+    log_file = log_dir / f"{search_id}.log"
+    progress_file = log_dir / f"{search_id}.progress"
+    config_file = search_cms_dir / "config.json"
+    return {
+        "cms_root": cms_root,
+        "search_cms_dir": search_cms_dir,
+        "log_dir": log_dir,
+        "log_file": log_file,
+        "progress_file": progress_file,
+        "config_file": config_file,
+    }
 
 
 def save_index(directory: Path, entries: List[Dict[str, Any]], overwrite: bool) -> None:
