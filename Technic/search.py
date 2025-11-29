@@ -3,7 +3,7 @@
 # Purpose: Provide model search utilities for generating and ranking CM specs.
 # Key Types/Classes: ModelSearch
 # Key Functions: _sort_specs_with_dummies_first
-# Dependencies: itertools, datetime, pandas, tqdm, .pretest.PreTestSet
+# Dependencies: itertools, datetime, pandas, tqdm, logging, .pretest.PreTestSet
 # =============================================================================
 
 from typing import List, Union, Tuple, Type, Any, Optional, Callable, Dict, Sequence, Set
@@ -16,8 +16,12 @@ from collections import defaultdict
 import warnings
 import sys
 import os
+import logging
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
+
+
+LOGGER = logging.getLogger(__name__)
 
 import pandas as pd
 from tqdm import tqdm
@@ -85,6 +89,17 @@ class ModelSearch:
         Name of the response variable/target for modeling.
     model_cls : Type[ModelBase]
         The ModelBase subclass to instantiate and fit within CM.
+    model_type : Any, optional
+        Optional model type metadata forwarded to downstream builders.
+    target_base : str, optional
+        Base variable associated with the modeling target.
+    target_exposure : str, optional
+        Exposure variable when ratio models are in use.
+    qtr_method : str, default 'mean'
+        Aggregation method for quarterly transformations.
+    progress_log_interval_sec : float, optional
+        Minimum elapsed seconds between heartbeat progress logs emitted during
+        lengthy ``filter_specs`` runs. Defaults to 15 minutes.
     """
 
     def __init__(
@@ -95,7 +110,8 @@ class ModelSearch:
         model_type: Optional[Any] = None,
         target_base: Optional[str] = None,
         target_exposure: Optional[str] = None,
-        qtr_method: str = 'mean'
+        qtr_method: str = 'mean',
+        progress_log_interval_sec: float = 15 * 60
     ):
         self.dm = dm
         self.target = target
@@ -104,6 +120,8 @@ class ModelSearch:
         self.target_base = target_base
         self.target_exposure = target_exposure
         self.qtr_method = qtr_method
+        self.progress_log_interval_sec = progress_log_interval_sec
+        self.segment: Optional[Any] = None
         self.all_specs: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
         self.passed_cms: List[CM] = []
         self.failed_info: List[Tuple[List[Any], List[str]]] = []
@@ -174,6 +192,69 @@ class ModelSearch:
             feature_test.target_test_result = self.target_pretest_result
 
         return feature_test
+
+    def _log_progress_heartbeat(
+        self,
+        *,
+        log_file: str,
+        segment_id: str,
+        start_ts: float,
+        last_log_ts: float,
+        evaluated_count: int,
+        passed_cms: List[CM],
+        failed_info: List[Tuple[List[Any], List[str]]],
+        error_log: List[Tuple[List[Any], str, str]],
+        force: bool = False,
+    ) -> float:
+        """Log filtering progress to stdout logger and a persistent log file.
+
+        Parameters
+        ----------
+        log_file : str
+            Destination path for the heartbeat entry.
+        segment_id : str
+            Identifier for the active segment.
+        start_ts : float
+            Start timestamp (``time.time()``) of the filtering run.
+        last_log_ts : float
+            Timestamp of the previous heartbeat.
+        evaluated_count : int
+            Number of specs evaluated so far.
+        passed_cms : List[CM]
+            Successfully passed candidate models.
+        failed_info : List[Tuple[List[Any], List[str]]]
+            Failed specifications captured during filtering.
+        error_log : List[Tuple[List[Any], str, str]]
+            Specs that raised errors during filtering.
+        force : bool, default False
+            When True, emit a log regardless of the configured interval.
+
+        Returns
+        -------
+        float
+            Updated ``last_log_ts`` timestamp.
+        """
+
+        now_ts = time.time()
+        interval = self.progress_log_interval_sec or 0
+
+        # Respect disabled heartbeat configuration unless explicitly forced.
+        if not force and (interval <= 0 or (now_ts - last_log_ts) < interval):
+            return last_log_ts
+
+        elapsed_min = (now_ts - start_ts) / 60 if start_ts else 0.0
+        timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        message = (
+            f"[{timestamp_str}] segment={segment_id}, elapsed={elapsed_min:.1f} min, "
+            f"evaluated={evaluated_count}, passed={len(passed_cms)}, errors={len(error_log)}, "
+            f"failures={len(failed_info)}"
+        )
+
+        LOGGER.info(message)
+        with open(log_file, "a", encoding="utf-8") as log_handle:
+            log_handle.write(message + "\n")
+
+        return now_ts
 
     def build_spec_combos(
         self,
@@ -666,10 +747,10 @@ class ModelSearch:
 
     def filter_specs(
         self,
-        model_id_prefix: str = 'cm',
         sample: str = 'in',
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
-        outlier_idx: Optional[List[Any]] = None
+        outlier_idx: Optional[List[Any]] = None,
+        log: bool = True
     ) -> Tuple[List[CM], List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]], List[Tuple[List[Any], str, str]]]:
         """
         Assess all built spec combos and separate passed and failed results,
@@ -677,8 +758,6 @@ class ModelSearch:
 
         Parameters
         ----------
-        model_id_prefix : str, default 'cm'
-            Prefix for auto-generated model IDs (appended with index).
         sample : {'in','full'}
             Sample to use for all assessments (default 'in').
         test_update_func : callable, optional
@@ -688,6 +767,20 @@ class ModelSearch:
             records to remove from the in-sample data. If provided and `build_in`
             is True, each label must exist within the in-sample period; otherwise,
             a ValueError is raised.
+        log : bool, default True
+            When True, emit heartbeat logs to ``INFO`` and persist them to the
+            segment ``Log`` directory. A notice describing the log destination is
+            printed before filtering begins.
+
+        Notes
+        -----
+        When ``log`` is True, emits heartbeat progress logs at ``INFO`` level
+        and to a segment-scoped log file during lengthy runs. Heartbeats respect
+        ``progress_log_interval_sec`` configured on initialization; set to a
+        non-positive number to disable periodic logging. A final summary is
+        always appended at completion. Candidate models are labeled
+        ``temp_<index>`` during assessment and renamed sequentially to
+        ``pass_<n>`` upon successfully passing all tests.
 
         Returns
         -------
@@ -710,15 +803,38 @@ class ModelSearch:
             seen_test_names: set = set()
             test_info_header_printed = False
             batch_filter_test_infos: Dict[str, Dict[str, str]] = {}  # Collect all filter_test_info in current batch
-            
+
             total = len(self.all_specs)
             start_time = time.time()
-            
+            last_log_ts = start_time
+
+            # Resolve segment-scoped log destination and ensure folder readiness.
+            segment_obj = getattr(self, "segment", None)
+            segment_id = getattr(segment_obj, "segment_id", "unknown_segment")
+            working_root = getattr(segment_obj, "working_dir", os.getcwd())
+
+            # Preserve existing output convention that uses the capitalized
+            # "Segment" directory as the root for per-segment artifacts when
+            # optional logging is enabled.
+            log_dir = None
+            log_file_path = None
+            if log:
+                log_dir = os.path.join(working_root, "Segment", str(segment_id), "Log")
+                os.makedirs(log_dir, exist_ok=True)
+                log_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                log_file_path = os.path.join(log_dir, f"search_{segment_id}_{log_ts}.log")
+
+                # Announce the log destination prior to filtering for operator
+                # visibility, mirroring the segment-scoped logging convention.
+                print(f"Log will be saved to: {log_file_path}")
+
             # Print initial empty line for spacing
             print("")
-            
+
             for i, specs in enumerate(self.all_specs):
-                model_id = f"{model_id_prefix}{i}"
+                # Use temporary identifiers during assessment to avoid reusing
+                # final pass_* labels before models pass all tests.
+                model_id = f"temp_{i}"
                 try:
                     # Suppress all output during assessment
                     with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
@@ -729,8 +845,11 @@ class ModelSearch:
                             test_update_func,
                             outlier_idx=outlier_idx
                         )
-                    
+
                     if isinstance(result, CM):
+                        # Promote passed models to sequential pass_* IDs so the
+                        # persisted identifier reflects success ordering.
+                        result.model_id = f"pass_{len(passed_cms) + 1}"
                         passed_cms.append(result)
                         # Get filter test info from successful CM
                         mdl = result.model_in if sample == 'in' else result.model_full
@@ -778,7 +897,20 @@ class ModelSearch:
                             
                 except Exception as e:
                     error_log.append((specs, type(e).__name__, str(e)))
-     
+
+                # Emit periodic heartbeat logs to track long-running searches.
+                if log and log_file_path:
+                    last_log_ts = self._log_progress_heartbeat(
+                        log_file=log_file_path,
+                        segment_id=str(segment_id),
+                        start_ts=start_time,
+                        last_log_ts=last_log_ts,
+                        evaluated_count=i + 1,
+                        passed_cms=passed_cms,
+                        failed_info=failed_info,
+                        error_log=error_log,
+                    )
+
                 # Progress and ETA update (only every 10 iterations to reduce interference)
                 if (i + 1) % 10 == 0 or i == 0 or i == len(self.all_specs) - 1:
                     processed = i + 1
@@ -804,6 +936,18 @@ class ModelSearch:
             
             # Final newline after progress bar
             print("")
+            if log and log_file_path:
+                self._log_progress_heartbeat(
+                    log_file=log_file_path,
+                    segment_id=str(segment_id),
+                    start_ts=start_time,
+                    last_log_ts=last_log_ts,
+                    evaluated_count=total,
+                    passed_cms=passed_cms,
+                    failed_info=failed_info,
+                    error_log=error_log,
+                    force=True,
+                )
             return passed_cms, failed_info, error_log
 
     @staticmethod

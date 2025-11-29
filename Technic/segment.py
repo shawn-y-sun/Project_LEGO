@@ -2057,8 +2057,8 @@ class Segment:
         # 1) Reuse existing searcher if present, else create & store one
         if self.searcher is None:
             self.searcher = self.search_cls(
-                self.dm, 
-                self.target, 
+                self.dm,
+                self.target,
                 self.model_cls,
                 model_type=self.model_type,
                 target_base=self.target_base,
@@ -2066,6 +2066,7 @@ class Segment:
                 qtr_method=self.qtr_method
             )
         searcher = self.searcher
+        searcher.segment = self
 
         legacy_max_periods = legacy_kwargs.pop("max_periods", None)
         if legacy_kwargs:
