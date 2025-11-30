@@ -1,4 +1,5 @@
 # =============================================================================
+# =============================================================================
 # module: segment.py
 # Purpose: Manage candidate model construction, evaluation, and visualization workflows.
 # Key Types/Classes: Segment
@@ -9,6 +10,7 @@
 import warnings
 warnings.simplefilter(action="ignore", category=FutureWarning)
 import inspect
+import json
 from datetime import datetime
 import pandas as pd
 import numpy as np
@@ -47,6 +49,7 @@ from .persistence import (
     load_index,
     save_cm,
     save_index,
+    generate_search_id,
 )
 from .transform import TSFM
 
@@ -148,6 +151,8 @@ class Segment:
         self.cms: Dict[str, CM] = {}               # existing CMs in this segment
         self.passed_cms: Dict[str, CM] = {}        # loaded passed CMs
         self.top_cms: List[CM] = []                # placeholder for top models
+        self.last_search_id: Optional[str] = None
+        self.working_dir: Path = Path.cwd()
 
     def build_cm(
         self,
@@ -1954,6 +1959,7 @@ class Segment:
         add_in: bool = True,
         overwrite: bool = False,
         re_rank: bool = True,
+        search_id: Optional[str] = None,
         **legacy_kwargs: Any
     ) -> None:
         """
@@ -2015,6 +2021,10 @@ class Segment:
             If True and add_in=True and overwrite=False, rank new top_cms
             along with pre-existing cms and update model_ids based on ranking.
             If False, simply append new cms with collision-resolved IDs.
+        search_id : str, optional
+            Explicit search identifier to use. When omitted, a new identifier
+            of the form ``search_<segment_id>_<YYYYMMDD_HHMMSS>`` is generated
+            and stored on ``self.last_search_id``.
 
         Returns
         -------
@@ -2085,6 +2095,8 @@ class Segment:
         )
 
         # 2) Run the search (populates searcher.top_cms; no return value)
+        active_search_id = search_id or generate_search_id(self.segment_id)
+        self.last_search_id = active_search_id
         searcher.run_search(
             desired_pool=desired_pool,
             forced_in=forced_in or [],
@@ -2098,8 +2110,13 @@ class Segment:
             rank_weights=rank_weights,
             test_update_func=test_update_func,
             outlier_idx=outlier_idx,
-            exp_sign_map=exp_sign_map
+            exp_sign_map=exp_sign_map,
+            search_id=active_search_id,
+            base_dir=self.working_dir,
         )
+
+        # Honor the search_id actually used (may differ when resuming).
+        self.last_search_id = getattr(self.searcher, "search_id", active_search_id)
 
         # 3) Collect the top_n results from the searcher
         self.top_cms = self.searcher.top_cms[:top_n]
@@ -2444,6 +2461,41 @@ class Segment:
             elif item.is_dir():
                 shutil.rmtree(item)
 
+    @staticmethod
+    def _latest_search_id(cms_dir: Path) -> Optional[str]:
+        """
+        Return the most recent search_id tracked within a CMS directory.
+
+        Parameters
+        ----------
+        cms_dir : Path
+            Base ``cms`` directory that may contain ``search_<segment>_*``
+            folders and an optional ``search_index.json``.
+
+        Returns
+        -------
+        Optional[str]
+            The newest search identifier based on the timestamp suffix. ``None``
+            is returned when no search directories are available.
+        """
+
+        index_path = cms_dir / "search_index.json"
+        try:
+            index_data = json.loads(index_path.read_text(encoding="utf-8"))
+            search_ids = list(index_data.keys())
+        except (FileNotFoundError, json.JSONDecodeError):
+            # Fall back to scanning directories when index is missing.
+            search_ids = [p.name for p in cms_dir.iterdir() if p.is_dir() and p.name.startswith("search_")]
+
+        if not search_ids:
+            return None
+
+        def _timestamp_value(search_label: str) -> str:
+            # Timestamp component is always the suffix after the final underscore.
+            return search_label.rsplit("_", 1)[-1]
+
+        return max(search_ids, key=_timestamp_value)
+
     def save_passed_cm(
         self,
         cm: CM,
@@ -2513,14 +2565,17 @@ class Segment:
         save_passed: bool = True,
         overwrite: bool = True,
         base_dir: Union[str, Path, None] = None,
+        search_id: Optional[str] = None,
     ) -> Dict[str, Path]:
         """
         Save candidate models for this segment to disk.
 
         Selected models come from ``self.cms`` and passed models originate from
         ``self.searcher.passed_cms`` when available. Each model is saved under
-        ``Segment/<segment_id>/cms`` using its ``model_id`` as the filename and
-        indexed via a minimal ``index.json`` file.
+        ``Segment/<segment_id>/cms/<search_id>/<group>`` using its ``model_id``
+        as the filename and indexed via a minimal ``index.json`` file. Both
+        ``selected_cms`` and ``passed_cms`` folders are scoped to the same
+        ``search_id`` so that artifacts stay grouped by search run.
 
         Parameters
         ----------
@@ -2537,6 +2592,11 @@ class Segment:
         base_dir : Union[str, Path], optional
             Base directory under which the ``Segment`` folder is created. When
             ``None``, the current working directory is used.
+        search_id : str, optional
+            Search identifier whose selected and passed models should be saved
+            under ``cms/<search_id>``. When omitted, the most recent search for
+            this segment is used; a :class:`RuntimeError` is raised if no search
+            metadata can be located.
 
         Returns
         -------
@@ -2548,7 +2608,7 @@ class Segment:
         ------
         RuntimeError
             If saving passed CMs is requested but no search results are
-            available.
+            available or no ``search_id`` can be resolved.
         ValueError
             If duplicate ``model_id`` values are encountered while preparing
             pickles.
@@ -2562,8 +2622,26 @@ class Segment:
         # hierarchy when it does not yet exist.
         base_path = Path(base_dir) if base_dir is not None else Path.cwd()
         dirs = ensure_segment_dirs(self.segment_id, base_path)
+        search_target_id = (
+            search_id
+            or self.last_search_id
+            or getattr(self.searcher, "search_id", None)
+            or self._latest_search_id(dirs["cms_dir"])
+        )
         created_at = datetime.now().isoformat(timespec="seconds")
         saved_paths: Dict[str, Path] = {}
+
+        if search_target_id is None:
+            raise RuntimeError(
+                "A search_id is required to save selected or passed CMs. Run a search "
+                "first or supply search_id explicitly."
+            )
+
+        search_root = dirs["cms_dir"] / search_target_id
+        passed_dir = search_root / "passed_cms"
+        selected_dir = search_root / "selected_cms"
+        passed_dir.mkdir(parents=True, exist_ok=True)
+        selected_dir.mkdir(parents=True, exist_ok=True)
 
         if save_selected:
             if not self.cms:
@@ -2571,29 +2649,30 @@ class Segment:
 
             selected_cms = self._normalize_cm_collection(self.cms)
             if overwrite:
-                self._clear_cm_directory(dirs["selected_dir"])
+                self._clear_cm_directory(selected_dir)
             selected_entries: List[Dict[str, Any]] = []
             for cm in selected_cms.values():
-                entry = self._save_cm_entry(cm, dirs["selected_dir"], created_at, overwrite)
+                entry = self._save_cm_entry(cm, selected_dir, created_at, overwrite)
                 selected_entries.append(entry)
 
-            save_index(dirs["selected_dir"], selected_entries, overwrite)
-            saved_paths["selected_cms"] = dirs["selected_dir"]
+            save_index(selected_dir, selected_entries, overwrite)
+            saved_paths["selected_cms"] = selected_dir
 
         if save_passed:
             if self.searcher is None or not getattr(self.searcher, "passed_cms", None):
                 raise RuntimeError("No passed candidate models available to save from ModelSearch.")
 
             passed_cms = self._normalize_cm_collection(getattr(self.searcher, "passed_cms"))
+            target_dir = passed_dir
             if overwrite:
-                self._clear_cm_directory(dirs["passed_dir"])
+                self._clear_cm_directory(target_dir)
             passed_entries: List[Dict[str, Any]] = []
             for cm in passed_cms.values():
-                entry = self._save_cm_entry(cm, dirs["passed_dir"], created_at, overwrite)
+                entry = self._save_cm_entry(cm, target_dir, created_at, overwrite)
                 passed_entries.append(entry)
 
-            save_index(dirs["passed_dir"], passed_entries, overwrite)
-            saved_paths["passed_cms"] = dirs["passed_dir"]
+            save_index(target_dir, passed_entries, overwrite)
+            saved_paths["passed_cms"] = target_dir
 
         return saved_paths
 
@@ -2601,6 +2680,7 @@ class Segment:
         self,
         which: str = "both",
         base_dir: Union[str, Path, None] = None,
+        search_id: Optional[str] = None,
     ) -> None:
         """
         Load persisted candidate models and bind them to the current DataManager.
@@ -2612,6 +2692,11 @@ class Segment:
         base_dir : Union[str, Path], optional
             Base directory containing the ``Segment`` folder. Defaults to the
             current working directory when ``None``.
+        search_id : str, optional
+            When provided, loads passed candidate models exclusively from
+            ``cms/<search_id>``. When omitted, the most recent search tracked
+            for this segment is used if present, otherwise legacy locations are
+            scanned.
 
         Returns
         -------
@@ -2621,6 +2706,10 @@ class Segment:
         Notes
         -----
         Prints a brief summary of how many selected and passed models were loaded.
+        Both selected and passed models are expected under
+        ``Segment/<segment_id>/cms/<search_id>/(selected_cms|passed_cms)`` for
+        recent runs while still tolerating legacy top-level folders when no
+        search metadata is available.
 
         Empty CM directories (or missing ``index.json`` files) are tolerated and
         will result in zero loaded models for that group.
@@ -2642,6 +2731,15 @@ class Segment:
         # in save paths, but loading should still look in the same location.
         base_path = Path(base_dir) if base_dir is not None else Path.cwd()
         dirs = get_segment_dirs(self.segment_id, base_path)
+        target_search_id = (
+            search_id
+            or self.last_search_id
+            or self._latest_search_id(dirs["cms_dir"])
+        )
+
+        if target_search_id is not None:
+            self.last_search_id = target_search_id
+
         def _load_group(target_dir: Path, container: Dict[str, CM]) -> List[Dict[str, Any]]:
             # Gracefully handle absent or empty CM folders by returning zero entries.
             if not target_dir.exists():
@@ -2665,10 +2763,20 @@ class Segment:
             return index_entries
 
         if which in {"selected", "both"}:
-            _load_group(dirs["selected_dir"], self.cms)
+            selected_dir = (
+                dirs["cms_dir"] / target_search_id / "selected_cms"
+                if target_search_id is not None
+                else dirs["selected_dir"]
+            )
+            _load_group(selected_dir, self.cms)
 
         if which in {"passed", "both"}:
-            _load_group(dirs["passed_dir"], self.passed_cms)
+            passed_dir = (
+                dirs["cms_dir"] / target_search_id / "passed_cms"
+                if target_search_id is not None
+                else dirs["passed_dir"]
+            )
+            _load_group(passed_dir, self.passed_cms)
 
         summary = {
             "passed": len(self.passed_cms),
