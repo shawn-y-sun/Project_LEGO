@@ -2115,6 +2115,9 @@ class Segment:
             base_dir=self.working_dir,
         )
 
+        # Honor the search_id actually used (may differ when resuming).
+        self.last_search_id = getattr(self.searcher, "search_id", active_search_id)
+
         # 3) Collect the top_n results from the searcher
         self.top_cms = self.searcher.top_cms[:top_n]
 
@@ -2472,8 +2475,10 @@ class Segment:
         Returns
         -------
         Optional[str]
-            The newest search identifier based on the timestamp suffix. ``None``
-            is returned when no search directories are available.
+            The newest search identifier based on the timestamp suffix with a
+            preference for runs that remain incomplete according to their
+            progress metadata. ``None`` is returned when no search directories
+            are available.
         """
 
         index_path = cms_dir / "search_index.json"
@@ -2491,7 +2496,26 @@ class Segment:
             # Timestamp component is always the suffix after the final underscore.
             return search_label.rsplit("_", 1)[-1]
 
-        return max(search_ids, key=_timestamp_value)
+        # Prefer the newest run that is still incomplete according to its
+        # progress metadata. This allows load_cms() to surface models produced
+        # during an active or recently interrupted search instead of defaulting
+        # to the last finished run.
+        log_dir = cms_dir.parent / "log"
+        incomplete_ids = []
+        for search_id in search_ids:
+            progress_path = log_dir / f"{search_id}.progress"
+            try:
+                progress_data = json.loads(progress_path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError):
+                continue
+
+            total = progress_data.get("total_combos")
+            completed = progress_data.get("completed_combos")
+            if isinstance(total, int) and isinstance(completed, int) and completed < total:
+                incomplete_ids.append(search_id)
+
+        target_pool = incomplete_ids if incomplete_ids else search_ids
+        return max(target_pool, key=_timestamp_value)
 
     def save_passed_cm(
         self,
@@ -2730,6 +2754,7 @@ class Segment:
         dirs = get_segment_dirs(self.segment_id, base_path)
         target_search_id = (
             search_id
+            or getattr(self.searcher, "search_id", None)
             or self.last_search_id
             or self._latest_search_id(dirs["cms_dir"])
         )
@@ -2783,3 +2808,7 @@ class Segment:
             f"Loaded passed_cms={summary['passed']}; "
             f"selected_cms={summary['selected']}."
         )
+        if target_search_id:
+            print(f"Search artifacts loaded from search_id={target_search_id}.")
+        else:
+            print("Loaded CMS artifacts from legacy locations (no search_id resolved).")

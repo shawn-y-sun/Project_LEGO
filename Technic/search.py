@@ -42,6 +42,7 @@ from .persistence import (
     generate_search_id,
     get_search_paths,
     load_index,
+    load_cm,
     save_cm,
     save_index,
 )
@@ -203,6 +204,151 @@ class ModelSearch:
             return {k: v for k, v in config.items() if k not in ignored_keys}
 
         return _filtered(config_a) == _filtered(config_b)
+
+    @staticmethod
+    def _latest_search_config(
+        segment_id: str, base_dir: Path
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """
+        Return the most recent search configuration for a segment.
+
+        Parameters
+        ----------
+        segment_id : str
+            Segment identifier to inspect.
+        base_dir : pathlib.Path
+            Working directory that contains the capitalized ``Segment`` root.
+
+        Returns
+        -------
+        tuple[str, dict] or None
+            ``(search_id, config)`` for the most recent search when available;
+            otherwise ``None``.
+        """
+
+        dirs = ensure_segment_dirs(segment_id, base_dir)
+        index_path = dirs["cms_dir"] / "search_index.json"
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+
+        prefix = f"search_{sanitize_segment_id(segment_id)}_"
+
+        def _timestamp_value(search_label: str) -> str:
+            return search_label.rsplit("_", 1)[-1]
+
+        matching_ids = [sid for sid in index if sid.startswith(prefix)]
+        if not matching_ids:
+            return None
+
+        latest_id = max(matching_ids, key=_timestamp_value)
+        return latest_id, index.get(latest_id)
+
+    @staticmethod
+    def _find_resume_candidate(
+        segment_id: str,
+        base_dir: Path,
+        prospective_config: Dict[str, Any],
+        total_combos: int,
+    ) -> Optional[Tuple[str, Dict[str, Any], int]]:
+        """
+        Locate the newest compatible search configuration for potential resume.
+
+        Parameters
+        ----------
+        segment_id : str
+            Identifier for the active segment.
+        base_dir : pathlib.Path
+            Working directory that houses the ``Segment`` folder.
+        prospective_config : dict
+            Search parameters prepared for the current invocation.
+        total_combos : int
+            Number of combinations calculated for the current search.
+
+        Returns
+        -------
+        tuple[str, dict, int] or None
+            ``(search_id, config, completed_combos)`` for the most recent
+            matching search when available. Returns ``None`` when no compatible
+            search is found. Preference is given to the newest *incomplete*
+            search based on progress metadata; a finished run is only returned
+            when no interrupted counterpart exists.
+        """
+
+        dirs = ensure_segment_dirs(segment_id, base_dir)
+        index_path = dirs["cms_dir"] / "search_index.json"
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+
+        prefix = f"search_{sanitize_segment_id(segment_id)}_"
+
+        def _timestamp_value(search_label: str) -> str:
+            return search_label.rsplit("_", 1)[-1]
+
+        # Scan all matching search IDs in reverse chronological order so the
+        # newest compatible run is selected. Only incomplete runs are eligible
+        # for resume; fully finished searches should not trigger prompts for
+        # continuation.
+        matching_ids = [sid for sid in index if sid.startswith(prefix)]
+        matching_ids.sort(key=_timestamp_value, reverse=True)
+
+        for search_id in matching_ids:
+            config_body = index.get(search_id) or {}
+            if not ModelSearch._configs_equivalent(config_body, prospective_config):
+                continue
+            if config_body.get("total_combos") != total_combos:
+                continue
+
+            progress_path = dirs["log_dir"] / f"{search_id}.progress"
+            progress_info = ModelSearch._read_progress(progress_path)
+            completed = int(progress_info.get("completed_combos", 0)) if progress_info else 0
+            if progress_info and progress_info.get("total_combos") != total_combos:
+                continue
+
+            # Only incomplete runs can be resumed.
+            if completed < total_combos:
+                return search_id, config_body, completed
+
+        # No interrupted run available for these parameters.
+        return None
+
+    @staticmethod
+    def _load_passed_cms_from_dir(target_dir: Path, dm: Optional[DataManager]) -> List[CM]:
+        """
+        Load persisted passed candidate models from disk.
+
+        Parameters
+        ----------
+        target_dir : pathlib.Path
+            Directory containing the ``index.json`` file and CM pickles.
+        dm : DataManager, optional
+            Data manager to bind to each loaded CM if provided.
+
+        Returns
+        -------
+        List[CM]
+            Loaded candidate models; empty when none are present.
+        """
+
+        try:
+            index_entries = load_index(target_dir)
+        except FileNotFoundError:
+            return []
+
+        restored: List[CM] = []
+        for entry in index_entries:
+            cm_path = target_dir / entry["filename"]
+            try:
+                cm = load_cm(cm_path)
+                if dm is not None:
+                    cm.bind_data_manager(dm)
+                restored.append(cm)
+            except Exception:  # pragma: no cover - corrupted pickles handled gracefully
+                continue
+        return restored
 
     @staticmethod
     def _read_progress(progress_path: Path) -> Optional[Dict[str, int]]:
@@ -848,6 +994,7 @@ class ModelSearch:
         log_file_path: Optional[Path] = None,
         progress_callback: Optional[Callable[[int], None]] = None,
         passed_cms_dir: Optional[Path] = None,
+        initial_passed: Optional[List[CM]] = None,
     ) -> Tuple[List[CM], List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]], List[Tuple[List[Any], str, str]]]:
         """
         Assess all built spec combos and separate passed and failed results,
@@ -887,6 +1034,10 @@ class ModelSearch:
             Destination directory for persisting passed candidate models under
             ``cms/<search_id>/passed_cms``. When omitted, passed models are
             not persisted to disk during filtering.
+        initial_passed : list of CM, optional
+            Previously passed models to seed the run with when resuming an
+            interrupted search. These models are included in progress updates
+            and will be re-indexed alongside newly evaluated specifications.
 
         Notes
         -----
@@ -914,7 +1065,7 @@ class ModelSearch:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             
-            passed_cms: List[CM] = []
+            passed_cms: List[CM] = list(initial_passed) if initial_passed else []
             failed_info: List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]] = []
             error_log: List[Tuple[List[Any], str, str]] = []
 
@@ -1300,6 +1451,16 @@ class ModelSearch:
         -------
         top_models : list of CM
             The top_n CM instances sorted by composite score.
+
+        Notes
+        -----
+        When parameters and total combinations match the most recent search for
+        the same segment, the method prompts to resume the previous run using
+        its ``search_id``. On resume, previously passed models are loaded from
+        ``cms/<search_id>/passed_cms``, combinations recorded as completed in
+        ``log/<search_id>.progress`` are skipped, and progress continues in the
+        same per-search log and progress files. New runs always generate a
+        ``search_<segment_id>_<YYYYMMDD_HHMMSS>`` identifier.
         """
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -1350,6 +1511,7 @@ class ModelSearch:
             print("==================================\n")
 
             search_config_raw = {
+                "search_id": None,
                 "search_id": effective_search_id,
                 "segment_id": segment_label,
                 "target": self.target,
@@ -1449,6 +1611,57 @@ class ModelSearch:
             self.total_combos = len(combos)
             self.completed_combos = 0
             search_config_raw["total_combos"] = self.total_combos
+
+            # Determine whether a prior run should be resumed.
+            resume_from = 0
+            initial_passed: List[CM] = []
+            resume_paths: Optional[Dict[str, Path]] = None
+            prospective_config = self._make_serializable(search_config_raw)
+            resume_candidate = self._find_resume_candidate(
+                segment_label, working_root, prospective_config, self.total_combos
+            )
+            if resume_candidate is not None:
+                latest_search_id, _, prior_completed = resume_candidate
+                answer = input(
+                    "A previous search with identical parameters was found:\n"
+                    f"  search_id = {latest_search_id}\n"
+                    f"  total_combos = {self.total_combos}\n"
+                    "It appears that run may have been interrupted.\n"
+                    "Do you want to continue from where it stopped? [y/N]: "
+                ).strip()
+                if answer.lower() == "y":
+                    resume_paths = get_search_paths(segment_label, latest_search_id, working_root)
+                    progress_info = self._read_progress(resume_paths["progress_file"])
+                    if (
+                        progress_info is not None
+                        and progress_info.get("total_combos") == self.total_combos
+                    ):
+                        resume_from = int(progress_info.get("completed_combos", 0))
+                        initial_passed = self._load_passed_cms_from_dir(
+                            resume_paths["passed_cms_dir"], self.dm
+                        )
+                    else:
+                        # Fall back to prior completed count recorded via index when
+                        # progress metadata is missing.
+                        resume_from = prior_completed
+                        if resume_from:
+                            initial_passed = self._load_passed_cms_from_dir(
+                                resume_paths["passed_cms_dir"], self.dm
+                            )
+
+                    if resume_from:
+                        effective_search_id = latest_search_id
+                        self.search_id = effective_search_id
+                    else:
+                        resume_paths = None
+
+            if resume_paths is None:
+                effective_search_id = search_id or generate_search_id(sanitized_segment)
+                self.search_id = effective_search_id
+                resume_paths = get_search_paths(segment_label, effective_search_id, working_root)
+
+            search_config_raw["search_id"] = effective_search_id
+            search_paths = resume_paths
             search_config_serializable = self._make_serializable(search_config_raw)
             self.current_search_config_raw = search_config_raw
             self.current_search_config = search_config_serializable
@@ -1459,6 +1672,8 @@ class ModelSearch:
                     f"Search started at {datetime.datetime.now().isoformat(timespec='seconds')}\n"
                 )
                 log_handle.write(f"search_id: {effective_search_id}\n")
+                if resume_from:
+                    log_handle.write(f"Resuming from combo {resume_from + 1}.\n")
                 log_handle.write("Configuration:\n")
                 log_handle.write(json.dumps(search_config_serializable, indent=2))
                 log_handle.write("\n")
@@ -1480,6 +1695,8 @@ class ModelSearch:
                 encoding="utf-8",
             )
 
+            self.completed_combos = resume_from
+
             def _progress_callback(completed: int) -> None:
                 self.completed_combos = completed
                 if completed % 1000 == 0 or completed == self.total_combos:
@@ -1489,6 +1706,13 @@ class ModelSearch:
                         completed,
                     )
 
+            self._write_progress(search_paths["progress_file"], self.total_combos, resume_from)
+
+            # Skip combinations already evaluated when resuming.
+            if resume_from:
+                self.all_specs = combos[resume_from:]
+            else:
+                self.all_specs = combos
             self._write_progress(search_paths["progress_file"], self.total_combos, 0)
 
             # 3) Filter specs
@@ -1496,10 +1720,12 @@ class ModelSearch:
                 sample=sample,
                 test_update_func=test_update_func,
                 outlier_idx=outlier_idx,
+                start_index=resume_from,
                 total_count=self.total_combos,
                 log_file_path=search_paths["log_file"],
                 progress_callback=_progress_callback,
                 passed_cms_dir=search_paths["passed_cms_dir"],
+                initial_passed=initial_passed,
             )
             # Print empty line after test info
             print("")  # Empty line after test info
