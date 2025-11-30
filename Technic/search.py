@@ -41,6 +41,7 @@ from .persistence import (
     sanitize_segment_id,
     generate_search_id,
     get_search_paths,
+    load_index,
     save_cm,
 )
 
@@ -978,7 +979,9 @@ class ModelSearch:
                         passed_cms.append(result)
                         # Persist passed CMs immediately so long-running runs do
                         # not lose progress if interrupted. Prefer a
-                        # search-scoped directory when provided.
+                        # search-scoped directory when provided and maintain an
+                        # up-to-date index so Segment.load_cms() can observe
+                        # in-flight results.
                         target_dir = passed_cms_dir
                         if target_dir is None and segment_obj is not None:
                             try:
@@ -990,11 +993,38 @@ class ModelSearch:
                         if target_dir is not None:
                             try:
                                 target_dir.mkdir(parents=True, exist_ok=True)
-                                save_cm(
-                                    result,
-                                    target_dir / f"{result.model_id}.pkl",
-                                    overwrite=True,
-                                )
+                                created_at = datetime.datetime.now().isoformat(timespec="seconds")
+                                existing_entries: List[Dict[str, Any]] = []
+                                try:
+                                    existing_entries = load_index(target_dir)
+                                except FileNotFoundError:
+                                    existing_entries = []
+
+                                if segment_obj is not None:
+                                    entry = segment_obj._save_cm_entry(
+                                        result,
+                                        target_dir,
+                                        created_at,
+                                        overwrite=True,
+                                    )
+                                else:
+                                    save_cm(
+                                        result,
+                                        target_dir / f"{result.model_id}.pkl",
+                                        overwrite=True,
+                                    )
+                                    entry = {
+                                        "model_id": result.model_id,
+                                        "filename": f"{result.model_id}.pkl",
+                                        "segment_id": segment_id,
+                                        "created_at": created_at,
+                                    }
+
+                                existing_entries = [
+                                    e for e in existing_entries if e.get("model_id") != entry["model_id"]
+                                ]
+                                existing_entries.append(entry)
+                                save_index(target_dir, existing_entries, overwrite=True)
                             except Exception as exc:  # pragma: no cover - best-effort persistence
                                 LOGGER.warning(
                                     "Unable to persist passed CM %s: %s",

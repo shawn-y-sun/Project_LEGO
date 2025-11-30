@@ -37,23 +37,24 @@ def get_segment_dirs(segment_id: str, base_dir: Optional[Path] = None) -> Dict[s
     Returns
     -------
     Dict[str, Path]
-        Mapping with keys ``segments_root``, ``segment_dir``, ``cms_dir``,
-        ``selected_dir``, ``passed_dir``, and ``log_dir``.
+        Mapping with keys ``segments_root``, ``segment_dir``, ``cms_dir`` and
+        ``log_dir``. Legacy keys ``selected_dir`` and ``passed_dir`` are
+        included for backward compatibility but are not automatically created.
     """
     base = base_dir or Path.cwd()
     segments_root = base / "Segment"
     segment_dir = segments_root / segment_id
     cms_dir = segment_dir / "cms"
-    selected_dir = cms_dir / "selected_cms"
-    passed_dir = cms_dir / "passed_cms"
     log_dir = segment_dir / "log"
     return {
         "segments_root": segments_root,
         "segment_dir": segment_dir,
         "cms_dir": cms_dir,
-        "selected_dir": selected_dir,
-        "passed_dir": passed_dir,
         "log_dir": log_dir,
+        # Legacy lookups retained for callers that still reference top-level
+        # passed/selected directories. These paths are not created implicitly.
+        "selected_dir": cms_dir / "selected_cms",
+        "passed_dir": cms_dir / "passed_cms",
     }
 
 
@@ -72,10 +73,17 @@ def ensure_segment_dirs(segment_id: str, base_dir: Optional[Path] = None) -> Dic
     Returns
     -------
     Dict[str, Path]
-        Same mapping as :func:`get_segment_dirs`, guaranteeing each path exists.
+        Same mapping as :func:`get_segment_dirs`. Only ``segments_root``,
+        ``segment_dir``, ``cms_dir``, and ``log_dir`` are guaranteed to exist;
+        legacy ``selected_dir`` and ``passed_dir`` paths are returned without
+        implicit creation to keep search artifacts scoped under each search_id.
     """
     dirs = get_segment_dirs(segment_id, base_dir)
-    for path in dirs.values():
+    for key, path in dirs.items():
+        if key in {"selected_dir", "passed_dir"}:
+            # Do not create top-level passed/selected folders; per-search
+            # directories own those resources.
+            continue
         if path.suffix:
             # Skip filename-like entries; all values here are directories.
             continue
