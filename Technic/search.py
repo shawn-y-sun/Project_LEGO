@@ -882,8 +882,8 @@ class ModelSearch:
             Invoked after each spec is evaluated with the current completed
             combination count. Useful for writing incremental progress files.
         passed_cms_dir : pathlib.Path, optional
-            Destination directory for persisting passed candidate models for a
-            specific ``search_id``. When omitted, the legacy
+            Destination directory for persisting passed candidate models under
+            ``cms/<search_id>/passed_cms``. When omitted, the legacy
             ``Segment/<id>/cms/passed_cms`` path is used.
 
         Notes
@@ -895,7 +895,7 @@ class ModelSearch:
         always appended at completion. Candidate models are labeled
         ``temp_<index>`` during assessment and renamed sequentially to
         ``passed_<n>`` upon successfully passing all tests. Passed models are
-        immediately persisted under ``Segment/<segment_id>/cms/passed_cms``
+        immediately persisted under ``Segment/<segment_id>/cms/<search_id>/passed_cms``
         when a :class:`Segment` context is attached, mirroring
         :meth:`Segment.save_cms` conventions.
 
@@ -1471,7 +1471,7 @@ class ModelSearch:
                 total_count=self.total_combos,
                 log_file_path=search_paths["log_file"],
                 progress_callback=_progress_callback,
-                passed_cms_dir=search_paths["search_cms_dir"],
+                passed_cms_dir=search_paths["passed_cms_dir"],
             )
             # Print empty line after test info
             print("")  # Empty line after test info

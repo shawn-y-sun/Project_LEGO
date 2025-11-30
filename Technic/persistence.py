@@ -151,8 +151,9 @@ def get_search_paths(segment_id: Any, search_id: str, base_dir: Optional[Path] =
     Returns
     -------
     Dict[str, Path]
-        Mapping that includes ``cms_root``, ``search_cms_dir``, ``log_dir``,
-        ``log_file``, ``progress_file``, and ``config_file``.
+        Mapping that includes ``cms_root``, ``search_cms_dir``, ``passed_cms_dir``,
+        ``selected_cms_dir``, ``log_dir``, ``log_file``, ``progress_file``, and
+        ``config_file``.
 
     Examples
     --------
@@ -165,13 +166,23 @@ def get_search_paths(segment_id: Any, search_id: str, base_dir: Optional[Path] =
     dirs = ensure_segment_dirs(str(segment_id), base)
     cms_root = dirs["cms_dir"]
     search_cms_dir = cms_root / search_id
+    passed_cms_dir = search_cms_dir / "passed_cms"
+    selected_cms_dir = search_cms_dir / "selected_cms"
     log_dir = dirs["log_dir"]
     log_file = log_dir / f"{search_id}.log"
     progress_file = log_dir / f"{search_id}.progress"
     config_file = search_cms_dir / "config.json"
+
+    # Ensure search-scoped directories exist so early logging/saving succeeds.
+    search_cms_dir.mkdir(parents=True, exist_ok=True)
+    passed_cms_dir.mkdir(parents=True, exist_ok=True)
+    selected_cms_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
     return {
         "cms_root": cms_root,
         "search_cms_dir": search_cms_dir,
+        "passed_cms_dir": passed_cms_dir,
+        "selected_cms_dir": selected_cms_dir,
         "log_dir": log_dir,
         "log_file": log_file,
         "progress_file": progress_file,
