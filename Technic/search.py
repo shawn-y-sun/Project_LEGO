@@ -289,12 +289,12 @@ class ModelSearch:
             return search_label.rsplit("_", 1)[-1]
 
         # Scan all matching search IDs in reverse chronological order so the
-        # newest compatible run is selected. Prefer incomplete runs when a
-        # progress file indicates work remains.
+        # newest compatible run is selected. Only incomplete runs are eligible
+        # for resume; fully finished searches should not trigger prompts for
+        # continuation.
         matching_ids = [sid for sid in index if sid.startswith(prefix)]
         matching_ids.sort(key=_timestamp_value, reverse=True)
 
-        fallback: Optional[Tuple[str, Dict[str, Any], int]] = None
         for search_id in matching_ids:
             config_body = index.get(search_id) or {}
             if not ModelSearch._configs_equivalent(config_body, prospective_config):
@@ -308,14 +308,12 @@ class ModelSearch:
             if progress_info and progress_info.get("total_combos") != total_combos:
                 continue
 
+            # Only incomplete runs can be resumed.
             if completed < total_combos:
                 return search_id, config_body, completed
 
-            if fallback is None:
-                fallback = (search_id, config_body, completed)
-
-        # Only return a completed run when no interrupted counterpart exists.
-        return fallback
+        # No interrupted run available for these parameters.
+        return None
 
     @staticmethod
     def _load_passed_cms_from_dir(target_dir: Path, dm: Optional[DataManager]) -> List[CM]:
