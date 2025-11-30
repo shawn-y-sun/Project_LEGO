@@ -1485,6 +1485,11 @@ class ModelSearch:
             working_root = Path(base_dir) if base_dir is not None else Path.cwd()
             segment_label = getattr(self.segment, "segment_id", "unknown_segment")
             sanitized_segment = sanitize_segment_id(segment_label)
+            effective_search_id = search_id or generate_search_id(sanitized_segment)
+            self.search_id = effective_search_id
+            search_paths = get_search_paths(segment_label, effective_search_id, working_root)
+            search_paths["search_cms_dir"].mkdir(parents=True, exist_ok=True)
+            search_paths["log_dir"].mkdir(parents=True, exist_ok=True)
 
             # 1. Configuration
             print("=== ModelSearch Configuration ===")
@@ -1507,6 +1512,7 @@ class ModelSearch:
 
             search_config_raw = {
                 "search_id": None,
+                "search_id": effective_search_id,
                 "segment_id": segment_label,
                 "target": self.target,
                 "model_cls": self.model_cls.__name__,
@@ -1707,6 +1713,7 @@ class ModelSearch:
                 self.all_specs = combos[resume_from:]
             else:
                 self.all_specs = combos
+            self._write_progress(search_paths["progress_file"], self.total_combos, 0)
 
             # 3) Filter specs
             passed, failed, errors = self.filter_specs(
