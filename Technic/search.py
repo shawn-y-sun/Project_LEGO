@@ -43,6 +43,7 @@ from .persistence import (
     get_search_paths,
     load_index,
     save_cm,
+    save_index,
 )
 
 
@@ -879,13 +880,13 @@ class ModelSearch:
         log_file_path : pathlib.Path, optional
             Explicit path for progress logging. When omitted, a timestamped
             search-specific log file is created automatically.
-            progress_callback : callable, optional
+        progress_callback : callable, optional
             Invoked after each spec is evaluated with the current completed
             combination count. Useful for writing incremental progress files.
         passed_cms_dir : pathlib.Path, optional
             Destination directory for persisting passed candidate models under
-            ``cms/<search_id>/passed_cms``. When omitted, the legacy
-            ``Segment/<id>/cms/passed_cms`` path is used.
+            ``cms/<search_id>/passed_cms``. When omitted, passed models are
+            not persisted to disk during filtering.
 
         Notes
         -----
@@ -983,13 +984,10 @@ class ModelSearch:
                         # up-to-date index so Segment.load_cms() can observe
                         # in-flight results.
                         target_dir = passed_cms_dir
-                        if target_dir is None and segment_obj is not None:
-                            try:
-                                segment_dirs = ensure_segment_dirs(str(segment_id), working_root)
-                                target_dir = Path(segment_dirs["cms_dir"]) / "passed_cms"
-                            except Exception:  # pragma: no cover - fallback to current working dir
-                                target_dir = None
-
+                        # When no per-search destination is provided, skip disk
+                        # persistence to avoid recreating legacy top-level
+                        # folders. This keeps all artifacts scoped under the
+                        # active search_id structure.
                         if target_dir is not None:
                             try:
                                 target_dir.mkdir(parents=True, exist_ok=True)
