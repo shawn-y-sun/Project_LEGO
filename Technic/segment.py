@@ -2733,6 +2733,7 @@ class Segment:
         dirs = get_segment_dirs(self.segment_id, base_path)
         target_search_id = (
             search_id
+            or getattr(self.searcher, "search_id", None)
             or self.last_search_id
             or self._latest_search_id(dirs["cms_dir"])
         )
@@ -2786,3 +2787,7 @@ class Segment:
             f"Loaded passed_cms={summary['passed']}; "
             f"selected_cms={summary['selected']}."
         )
+        if target_search_id:
+            print(f"Search artifacts loaded from search_id={target_search_id}.")
+        else:
+            print("Loaded CMS artifacts from legacy locations (no search_id resolved).")
