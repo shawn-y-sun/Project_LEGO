@@ -11,6 +11,7 @@ import itertools
 import time
 import datetime
 import inspect
+import json
 from copy import deepcopy
 from collections import defaultdict
 import warnings
@@ -35,7 +36,15 @@ from .pretest import PreTestSet, FeatureTest
 from .cm import CM
 from .periods import default_periods_for_freq, resolve_periods_argument
 from .regime import RgmVar
-from .persistence import ensure_segment_dirs
+from .persistence import (
+    ensure_segment_dirs,
+    sanitize_segment_id,
+    generate_search_id,
+    get_search_paths,
+    load_index,
+    save_cm,
+    save_index,
+)
 
 
 def _sort_specs_with_dummies_first(spec_list: List[Any]) -> List[Any]:
@@ -132,6 +141,87 @@ class ModelSearch:
         self.top_cms: List[CM] = []
         self.model_pretestset: Optional[PreTestSet] = None
         self.target_pretest_result: Optional[Any] = None
+        self.current_search_config_raw: Optional[Dict[str, Any]] = None
+        self.current_search_config: Optional[Dict[str, Any]] = None
+        self.search_id: Optional[str] = None
+        self.total_combos: int = 0
+        self.completed_combos: int = 0
+
+    @staticmethod
+    def _make_serializable(obj: Any) -> Any:
+        """
+        Convert potentially non-serializable objects into JSON-safe forms.
+
+        Parameters
+        ----------
+        obj : Any
+            Object to serialize.
+
+        Returns
+        -------
+        Any
+            JSON-serializable representation.
+        """
+
+        if obj is None or isinstance(obj, (str, int, float, bool)):
+            return obj
+
+        if callable(obj):
+            module = getattr(obj, "__module__", None)
+            name = getattr(obj, "__name__", None)
+            if module and name:
+                return f"{module}.{name}"
+            return repr(obj)
+
+        if isinstance(obj, dict):
+            return {ModelSearch._make_serializable(k): ModelSearch._make_serializable(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple, set)):
+            return [ModelSearch._make_serializable(v) for v in obj]
+
+        return repr(obj)
+
+    @staticmethod
+    def _configs_equivalent(config_a: Dict[str, Any], config_b: Dict[str, Any]) -> bool:
+        """
+        Compare two search configurations ignoring metadata-only keys.
+
+        Parameters
+        ----------
+        config_a : dict
+            First configuration mapping.
+        config_b : dict
+            Second configuration mapping.
+
+        Returns
+        -------
+        bool
+            ``True`` when configurations match on meaningful search parameters.
+        """
+
+        ignored_keys = {"search_id", "timestamp", "total_combos"}
+        def _filtered(config: Dict[str, Any]) -> Dict[str, Any]:
+            return {k: v for k, v in config.items() if k not in ignored_keys}
+
+        return _filtered(config_a) == _filtered(config_b)
+
+    @staticmethod
+    def _read_progress(progress_path: Path) -> Optional[Dict[str, int]]:
+        """Read a progress file if present."""
+
+        if not progress_path.exists():
+            return None
+        try:
+            with progress_path.open("r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    @staticmethod
+    def _write_progress(progress_path: Path, total_combos: int, completed_combos: int) -> None:
+        """Persist progress to disk overwriting any prior file."""
+
+        with progress_path.open("w", encoding="utf-8") as handle:
+            json.dump({"total_combos": total_combos, "completed_combos": completed_combos}, handle, indent=2)
 
     def _resolve_model_pretestset(self) -> Optional[PreTestSet]:
         """Return a deep-copied default pretest bundle for ``self.model_cls``.
@@ -752,7 +842,12 @@ class ModelSearch:
         sample: str = 'in',
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
         outlier_idx: Optional[List[Any]] = None,
-        log: bool = True
+        log: bool = True,
+        start_index: int = 0,
+        total_count: Optional[int] = None,
+        log_file_path: Optional[Path] = None,
+        progress_callback: Optional[Callable[[int], None]] = None,
+        passed_cms_dir: Optional[Path] = None,
     ) -> Tuple[List[CM], List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]], List[Tuple[List[Any], str, str]]]:
         """
         Assess all built spec combos and separate passed and failed results,
@@ -774,6 +869,24 @@ class ModelSearch:
             segment ``log`` directory under the capitalized ``Segment`` root. A
             notice describing the log destination is printed before filtering
             begins.
+        start_index : int, default 0
+            Number of spec combinations already completed in a resumed search.
+            This value feeds progress reporting but the provided ``all_specs``
+            sequence will still be evaluated in full.
+        total_count : int, optional
+            Total number of combinations in the full search. When provided, the
+            progress indicator uses this denominator rather than the length of
+            the current ``all_specs`` slice.
+        log_file_path : pathlib.Path, optional
+            Explicit path for progress logging. When omitted, a timestamped
+            search-specific log file is created automatically.
+        progress_callback : callable, optional
+            Invoked after each spec is evaluated with the current completed
+            combination count. Useful for writing incremental progress files.
+        passed_cms_dir : pathlib.Path, optional
+            Destination directory for persisting passed candidate models under
+            ``cms/<search_id>/passed_cms``. When omitted, passed models are
+            not persisted to disk during filtering.
 
         Notes
         -----
@@ -784,7 +897,7 @@ class ModelSearch:
         always appended at completion. Candidate models are labeled
         ``temp_<index>`` during assessment and renamed sequentially to
         ``passed_<n>`` upon successfully passing all tests. Passed models are
-        immediately persisted under ``Segment/<segment_id>/cms/passed_cms``
+        immediately persisted under ``Segment/<segment_id>/cms/<search_id>/passed_cms``
         when a :class:`Segment` context is attached, mirroring
         :meth:`Segment.save_cms` conventions.
 
@@ -810,7 +923,7 @@ class ModelSearch:
             test_info_header_printed = False
             batch_filter_test_infos: Dict[str, Dict[str, str]] = {}  # Collect all filter_test_info in current batch
 
-            total = len(self.all_specs)
+            total = total_count if total_count is not None else len(self.all_specs)
             start_time = time.time()
             last_log_ts = start_time
 
@@ -829,8 +942,7 @@ class ModelSearch:
             # per-segment artifacts and write logs to a lowercase ``log``
             # subfolder when optional logging is enabled.
             log_dir: Optional[Path] = None
-            log_file_path: Optional[Path] = None
-            if log:
+            if log and log_file_path is None:
                 if segment_dirs is None:
                     segment_dirs = ensure_segment_dirs(str(segment_id), working_root)
                 log_dir = Path(segment_dirs["segment_dir"]) / "log"
@@ -838,17 +950,18 @@ class ModelSearch:
                 log_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 log_file_path = log_dir / f"search_{segment_id}_{log_ts}.log"
 
-                # Announce the log destination prior to filtering for operator
-                # visibility, mirroring the segment-scoped logging convention.
+            if log and log_file_path is not None:
+                log_dir = log_file_path.parent
+                log_dir.mkdir(parents=True, exist_ok=True)
                 print(f"Log will be saved to: {log_file_path}")
 
             # Print initial empty line for spacing
             print("")
 
-            for i, specs in enumerate(self.all_specs):
+            for idx, specs in enumerate(self.all_specs, start=start_index):
                 # Use temporary identifiers during assessment to avoid reusing
                 # final passed_* labels before models pass all tests.
-                model_id = f"temp_{i}"
+                model_id = f"temp_{idx}"
                 try:
                     # Suppress all output during assessment
                     with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
@@ -866,16 +979,50 @@ class ModelSearch:
                         result.model_id = f"passed_{len(passed_cms) + 1}"
                         passed_cms.append(result)
                         # Persist passed CMs immediately so long-running runs do
-                        # not lose progress if interrupted. This reuses the
-                        # segment's save_cms logic for consistent naming and
-                        # index maintenance.
-                        if segment_obj is not None:
+                        # not lose progress if interrupted. Prefer a
+                        # search-scoped directory when provided and maintain an
+                        # up-to-date index so Segment.load_cms() can observe
+                        # in-flight results.
+                        target_dir = passed_cms_dir
+                        # When no per-search destination is provided, skip disk
+                        # persistence to avoid recreating legacy top-level
+                        # folders. This keeps all artifacts scoped under the
+                        # active search_id structure.
+                        if target_dir is not None:
                             try:
-                                segment_obj.save_passed_cm(
-                                    result,
-                                    base_dir=working_root,
-                                    overwrite=True,
-                                )
+                                target_dir.mkdir(parents=True, exist_ok=True)
+                                created_at = datetime.datetime.now().isoformat(timespec="seconds")
+                                existing_entries: List[Dict[str, Any]] = []
+                                try:
+                                    existing_entries = load_index(target_dir)
+                                except FileNotFoundError:
+                                    existing_entries = []
+
+                                if segment_obj is not None:
+                                    entry = segment_obj._save_cm_entry(
+                                        result,
+                                        target_dir,
+                                        created_at,
+                                        overwrite=True,
+                                    )
+                                else:
+                                    save_cm(
+                                        result,
+                                        target_dir / f"{result.model_id}.pkl",
+                                        overwrite=True,
+                                    )
+                                    entry = {
+                                        "model_id": result.model_id,
+                                        "filename": f"{result.model_id}.pkl",
+                                        "segment_id": segment_id,
+                                        "created_at": created_at,
+                                    }
+
+                                existing_entries = [
+                                    e for e in existing_entries if e.get("model_id") != entry["model_id"]
+                                ]
+                                existing_entries.append(entry)
+                                save_index(target_dir, existing_entries, overwrite=True)
                             except Exception as exc:  # pragma: no cover - best-effort persistence
                                 LOGGER.warning(
                                     "Unable to persist passed CM %s: %s",
@@ -892,12 +1039,13 @@ class ModelSearch:
                     
                     # Update batch filter_test_info (will overwrite duplicates)
                     batch_filter_test_infos.update(filter_test_info)
-                    
+
                     # Determine batch size based on progress
-                    batch_size = 100 if i < 10000 else 10000
+                    relative_i = idx - start_index
+                    batch_size = 100 if relative_i < 10000 else 10000
                     
                     # Process batch based on dynamic batch size or on first run
-                    if (i + 1) % batch_size == 0 or i == 0:
+                    if (relative_i + 1) % batch_size == 0 or relative_i == 0:
                         # Get all test names from the current batch
                         batch_test_names = set(batch_filter_test_infos.keys())
                         
@@ -930,21 +1078,25 @@ class ModelSearch:
                     error_log.append((specs, type(e).__name__, str(e)))
 
                 # Emit periodic heartbeat logs to track long-running searches.
+                processed_count = idx + 1
                 if log and log_file_path:
                     last_log_ts = self._log_progress_heartbeat(
                         log_file=str(log_file_path),
                         segment_id=str(segment_id),
                         start_ts=start_time,
                         last_log_ts=last_log_ts,
-                        evaluated_count=i + 1,
+                        evaluated_count=processed_count,
                         passed_cms=passed_cms,
                         failed_info=failed_info,
                         error_log=error_log,
                     )
 
+                if progress_callback is not None:
+                    progress_callback(processed_count)
+
                 # Progress and ETA update (only every 10 iterations to reduce interference)
-                if (i + 1) % 10 == 0 or i == 0 or i == len(self.all_specs) - 1:
-                    processed = i + 1
+                if (relative_i + 1) % 10 == 0 or relative_i == 0 or relative_i == len(self.all_specs) - 1:
+                    processed = processed_count
                     elapsed = time.time() - start_time
                     progress = processed / total if total > 0 else 1
                     if progress > 0:
@@ -960,9 +1112,9 @@ class ModelSearch:
                     bar_width = 30
                     filled_width = int(bar_width * progress)
                     bar = '█' * filled_width + '-' * (bar_width - filled_width)
-                    processed_count = f"{processed}/{total}"
+                    processed_count_str = f"{processed}/{total}"
                     speed = processed / elapsed if elapsed > 0 else 0
-                    progress_line = f"Filtering Specs: {progress_pct:3d}%|{bar}| {processed_count} [{elapsed:,.0f}s, {speed:.2f}it/s, estimated_finish={eta}]"
+                    progress_line = f"Filtering Specs: {progress_pct:3d}%|{bar}| {processed_count_str} [{elapsed:,.0f}s, {speed:.2f}it/s, estimated_finish={eta}]"
                     print(f"\r{progress_line}", end='', flush=True)
             
             # Final newline after progress bar
@@ -1084,6 +1236,8 @@ class ModelSearch:
         rank_weights: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
         outlier_idx: Optional[List[Any]] = None,
+        search_id: Optional[str] = None,
+        base_dir: Optional[Union[str, Path]] = None,
         **legacy_kwargs: Any
     ) -> List[CM]:
         """
@@ -1135,6 +1289,12 @@ class ModelSearch:
             Optional function to update each CM's test set.
         outlier_idx : list, optional
             List of index labels corresponding to outliers to exclude.
+        search_id : str, optional
+            Identifier for this search run. When omitted, a new value of the
+            form ``search_<segment_id>_<YYYYMMDD_HHMMSS>`` is generated.
+        base_dir : str or pathlib.Path, optional
+            Working directory for search artifacts. Defaults to the current
+            working directory.
 
         Returns
         -------
@@ -1161,6 +1321,15 @@ class ModelSearch:
             else:
                 periods_summary = resolved_periods
 
+            working_root = Path(base_dir) if base_dir is not None else Path.cwd()
+            segment_label = getattr(self.segment, "segment_id", "unknown_segment")
+            sanitized_segment = sanitize_segment_id(segment_label)
+            effective_search_id = search_id or generate_search_id(sanitized_segment)
+            self.search_id = effective_search_id
+            search_paths = get_search_paths(segment_label, effective_search_id, working_root)
+            search_paths["search_cms_dir"].mkdir(parents=True, exist_ok=True)
+            search_paths["log_dir"].mkdir(parents=True, exist_ok=True)
+
             # 1. Configuration
             print("=== ModelSearch Configuration ===")
             print(f"Target          : {self.target}")
@@ -1179,6 +1348,28 @@ class ModelSearch:
                   f"Test update func: {test_update_func}\n"
                   f"Outlier idx     : {outlier_idx}\n")
             print("==================================\n")
+
+            search_config_raw = {
+                "search_id": effective_search_id,
+                "segment_id": segment_label,
+                "target": self.target,
+                "model_cls": self.model_cls.__name__,
+                "model_type": self.model_type,
+                "target_base": self.target_base,
+                "target_exposure": self.target_exposure,
+                "max_var_num": max_var_num,
+                "desired_pool": desired_pool,
+                "forced_in": forced,
+                "sample": sample,
+                "max_lag": max_lag,
+                "periods": periods_summary,
+                "category_limit": category_limit,
+                "regime_limit": regime_limit,
+                "exp_sign_map": exp_sign_map,
+                "rank_weights": rank_weights,
+                "test_update_func": test_update_func,
+                "outlier_idx": outlier_idx,
+            }
 
             # Execute optional target-level pretests before heavy computations.
             self.model_pretestset = self._resolve_model_pretestset()
@@ -1255,11 +1446,60 @@ class ModelSearch:
             )
             print(f"Built {len(combos)} spec combinations.\n")
 
+            self.total_combos = len(combos)
+            self.completed_combos = 0
+            search_config_raw["total_combos"] = self.total_combos
+            search_config_serializable = self._make_serializable(search_config_raw)
+            self.current_search_config_raw = search_config_raw
+            self.current_search_config = search_config_serializable
+
+            with search_paths["log_file"].open("a", encoding="utf-8") as log_handle:
+                log_handle.write("=" * 80 + "\n")
+                log_handle.write(
+                    f"Search started at {datetime.datetime.now().isoformat(timespec='seconds')}\n"
+                )
+                log_handle.write(f"search_id: {effective_search_id}\n")
+                log_handle.write("Configuration:\n")
+                log_handle.write(json.dumps(search_config_serializable, indent=2))
+                log_handle.write("\n")
+
+            index_path = search_paths["cms_root"] / "search_index.json"
+            try:
+                existing_index = json.loads(index_path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                existing_index = {}
+            except json.JSONDecodeError:
+                existing_index = {}
+            existing_index[effective_search_id] = search_config_serializable
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            index_path.write_text(json.dumps(existing_index, indent=2, sort_keys=True), encoding="utf-8")
+
+            search_paths["config_file"].parent.mkdir(parents=True, exist_ok=True)
+            search_paths["config_file"].write_text(
+                json.dumps(search_config_serializable, indent=2),
+                encoding="utf-8",
+            )
+
+            def _progress_callback(completed: int) -> None:
+                self.completed_combos = completed
+                if completed % 1000 == 0 or completed == self.total_combos:
+                    self._write_progress(
+                        search_paths["progress_file"],
+                        self.total_combos,
+                        completed,
+                    )
+
+            self._write_progress(search_paths["progress_file"], self.total_combos, 0)
+
             # 3) Filter specs
             passed, failed, errors = self.filter_specs(
                 sample=sample,
                 test_update_func=test_update_func,
-                outlier_idx=outlier_idx
+                outlier_idx=outlier_idx,
+                total_count=self.total_combos,
+                log_file_path=search_paths["log_file"],
+                progress_callback=_progress_callback,
+                passed_cms_dir=search_paths["passed_cms_dir"],
             )
             # Print empty line after test info
             print("")  # Empty line after test info
