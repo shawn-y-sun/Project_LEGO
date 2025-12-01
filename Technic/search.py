@@ -1487,9 +1487,6 @@ class ModelSearch:
             sanitized_segment = sanitize_segment_id(segment_label)
             effective_search_id = search_id or generate_search_id(sanitized_segment)
             self.search_id = effective_search_id
-            search_paths = get_search_paths(segment_label, effective_search_id, working_root)
-            search_paths["search_cms_dir"].mkdir(parents=True, exist_ok=True)
-            search_paths["log_dir"].mkdir(parents=True, exist_ok=True)
 
             # 1. Configuration
             print("=== ModelSearch Configuration ===")
@@ -1660,8 +1657,11 @@ class ModelSearch:
                 self.search_id = effective_search_id
                 resume_paths = get_search_paths(segment_label, effective_search_id, working_root)
 
-            search_config_raw["search_id"] = effective_search_id
             search_paths = resume_paths
+            search_paths["search_cms_dir"].mkdir(parents=True, exist_ok=True)
+            search_paths["log_dir"].mkdir(parents=True, exist_ok=True)
+
+            search_config_raw["search_id"] = effective_search_id
             search_config_serializable = self._make_serializable(search_config_raw)
             self.current_search_config_raw = search_config_raw
             self.current_search_config = search_config_serializable
