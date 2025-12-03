@@ -1951,7 +1951,7 @@ class Segment:
         max_lag: int = 3,
         periods: Optional[Sequence[int]] = None,
         category_limit: int = 1,
-        regime_limit: int = 1,
+        regime_limit: Optional[int] = None,
         exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1, 1, 1),
         test_update_func: Optional[Callable] = None,
@@ -1997,11 +1997,13 @@ class Segment:
             still accepted for backward compatibility.
         category_limit : int, default 1
             Maximum number of variables from each MEV category per combo.
-            Only applies to top-level strings and TSFM instances in desired_pool.
-        regime_limit : int, default 1
+            Applies to both top-level strings/TSFM instances in ``desired_pool``
+            and :class:`RgmVar` entries, evaluated per ``(regime, regime_on)``
+            signature so active/inactive variants are constrained separately.
+        regime_limit : Optional[int], default None
             Maximum number of :class:`RgmVar` instances from the same regime per
             combo. Applies across the full combination, including forced
-            specifications.
+            specifications. When ``None`` (default), no limit is applied.
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             Passed to ModelSearch.run_search().

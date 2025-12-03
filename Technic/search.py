@@ -502,7 +502,7 @@ class ModelSearch:
         max_lag: int = 3,
         periods: Optional[Sequence[int]] = None,
         category_limit: int = 1,
-        regime_limit: int = 1,
+        regime_limit: Optional[int] = None,
         exp_sign_map: Optional[Dict[str, int]] = None,
         **legacy_kwargs: Any
     ) -> List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]]:
@@ -545,16 +545,16 @@ class ModelSearch:
             are applied automatically. The deprecated ``max_periods`` keyword is
             still accepted for backward compatibility.
         category_limit : int, default 1
-            Max variables from each MEV category per combo. Only applies to
-            top-level strings and TSFM instances in desired_pool; other Feature
-            instances or items in nested structures are not subject to this constraint.
-        regime_limit : int, default 1
+            Max variables from each MEV category per combo. Applies to both
+            top-level strings/TSFM instances in ``desired_pool`` and
+            :class:`RgmVar` entries. For regimes, the limit is evaluated per
+            ``(regime, regime_on)`` signature so that distinct activation states
+            are independently constrained.
+        regime_limit : Optional[int], default None
             Maximum number of :class:`RgmVar` instances sharing the same
             ``(regime, regime_on)`` signature per combo. Applies across the full
             combination, including forced specifications.
-            Maximum number of :class:`RgmVar` instances from the same regime per
-            combo. Applies across the full combination, including forced
-            specifications.
+            When ``None`` (default), no limit is applied.
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             Passed to DataManager.build_tsfm_specs() for string expansion.
@@ -564,11 +564,11 @@ class ModelSearch:
         combos : list of spec lists
             Each combo is a list including str, TSFM, Feature, or tuple elements.
         """
-        if not isinstance(regime_limit, int):
-            raise TypeError("regime_limit must be provided as an integer.")
-
-        if regime_limit < 1:
-            raise ValueError("regime_limit must be a positive integer.")
+        if regime_limit is not None:
+            if not isinstance(regime_limit, int):
+                raise TypeError("regime_limit must be provided as an integer.")
+            if regime_limit < 1:
+                raise ValueError("regime_limit must be a positive integer.")
 
         # Run feature-level pretests later in the pipeline so TSFM expansions
         # can be evaluated directly before enumeration.
@@ -829,15 +829,70 @@ class ModelSearch:
             _collect(items)
             return counts
 
-        # Enforce per-regime limits across forced and desired combinations
-        filtered_combos: List[List[Any]] = []
-        for combo in combos:
-            regime_counts = _regime_counts(combo)
-            if any(count > regime_limit for count in regime_counts.values()):
-                continue
-            filtered_combos.append(combo)
+        # Enforce per-regime limits across forced and desired combinations when requested
+        if regime_limit is not None:
+            filtered_combos: List[List[Any]] = []
+            for combo in combos:
+                regime_counts = _regime_counts(combo)
+                if any(count > regime_limit for count in regime_counts.values()):
+                    continue
+                filtered_combos.append(combo)
 
-        combos = filtered_combos
+            combos = filtered_combos
+
+        def _regime_category_counts(items: Sequence[Any]) -> Dict[Tuple[str, int], Dict[str, int]]:
+            """Return category counts for regime variables grouped by signature.
+
+            The category limit is enforced separately for each ``(regime, on)``
+            signature so active/inactive variants do not share a single bucket.
+            Items lacking a category definition are ignored for this constraint.
+
+            Parameters
+            ----------
+            items : Sequence[Any]
+                Specification elements to inspect.
+
+            Returns
+            -------
+            Dict[Tuple[str, int], Dict[str, int]]
+                Mapping of regime signatures to per-category counts.
+            """
+
+            counts: Dict[Tuple[str, int], Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+            def _collect(obj: Any) -> None:
+                if isinstance(obj, RgmVar):
+                    base_var = getattr(obj, "var", None)
+                    if base_var is None and getattr(obj, "var_feature", None) is not None:
+                        base_var = obj.var_feature.var
+
+                    if base_var is not None:
+                        category = self.dm.var_map.get(base_var, {}).get("category")
+                        if category:
+                            signature = (obj.regime, getattr(obj, "on", getattr(obj, "regime_on", 1)))
+                            counts[signature][category] += 1
+                elif isinstance(obj, (list, tuple, set)):
+                    for el in obj:
+                        _collect(el)
+
+            _collect(items)
+            return counts
+
+        # Enforce per-category limits for regime-aware variables per signature
+        if category_limit is not None:
+            filtered_combos: List[List[Any]] = []
+            for combo in combos:
+                signature_counts = _regime_category_counts(combo)
+                over_limit = False
+                for category_counts in signature_counts.values():
+                    if any(count > category_limit for count in category_counts.values()):
+                        over_limit = True
+                        break
+
+                if not over_limit:
+                    filtered_combos.append(combo)
+
+            combos = filtered_combos
 
         # Step 3: Expand only top-level strings into TSFM variants
         # Gather unique strings to expand
@@ -1381,7 +1436,7 @@ class ModelSearch:
         max_lag: int = 3,
         periods: Optional[Sequence[int]] = None,
         category_limit: int = 1,
-        regime_limit: int = 1,
+        regime_limit: Optional[int] = None,
         exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
@@ -1426,10 +1481,11 @@ class ModelSearch:
             still accepted for backward compatibility.
         category_limit : int, default 1
             Maximum number of variables from each MEV category per combo.
-        regime_limit : int, default 1
+        regime_limit : Optional[int], default None
             Maximum number of :class:`RgmVar` instances sharing the same
             ``(regime, regime_on)`` signature per combo. Applies across the full
-            combination, including forced specifications.
+            combination, including forced specifications. When ``None`` (default),
+            no limit is applied.
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             Passed to build_spec_combos() and ultimately to DataManager.build_tsfm_specs().
