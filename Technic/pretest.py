@@ -292,19 +292,20 @@ class BasePreTest(ABC):
         if self.testset_func is None:
             raise ValueError("testset_func must be provided before building testset")
 
-        # Wrap the pretest-specific builder and updater to match the
+        # Wrap the pretest-specific builder to match the
         # ``TestSet.from_functions`` signature while preserving the subject,
-        # sample, and outlier context captured by this instance.
+        # sample, and outlier context captured by this instance and updates.
         def _base_builder(_: object) -> Dict[str, ModelTestBase]:
             return self.testset_func(self.subject, self.dm, self.sample, self.outlier_idx)
-
-        def _update_builder(_: object) -> Dict[str, Any]:
-            return self.test_update_func(self.subject, self.dm, self.sample, self.outlier_idx)
 
         return TestSet.from_functions(
             self,
             _base_builder,
-            _update_builder if self.test_update_func else None,
+            self.test_update_func if self.test_update_func else None,
+            subject=self.subject,
+            dm=self.dm,
+            sample=self.sample,
+            outlier_idx=self.outlier_idx,
         )
 
     @property

@@ -16,6 +16,8 @@
 # for model reporting and evaluation. Define these before other tests.
 # =============================================================================
 
+import inspect
+
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
@@ -55,7 +57,12 @@ class TestSet:
         cls,
         model: 'ModelBase',
         testset_func: Callable[['ModelBase'], Dict[str, ModelTestBase]],
-        test_update_func: Optional[Callable[['ModelBase'], Dict[str, Any]]] = None
+        test_update_func: Optional[Callable[..., Dict[str, Any]]] = None,
+        *,
+        subject: Any = None,
+        dm: Any = None,
+        sample: Optional[str] = None,
+        outlier_idx: Optional[Any] = None,
     ) -> 'TestSet':
         """
         Build a TestSet from initializer and update functions.
@@ -73,6 +80,18 @@ class TestSet:
             tests) or dictionaries of attribute overrides for existing tests.
             Override dictionaries targeting aliases outside the base mapping
             are ignored to allow lenient payloads.
+        subject : Any, optional
+            Optional subject identifier (e.g., feature name) supplied to
+            ``test_update_func`` when requested by its signature.
+        dm : Any, optional
+            Optional data manager instance supplied to ``test_update_func``
+            when requested by its signature.
+        sample : str, optional
+            Optional sample flag supplied to ``test_update_func`` when
+            requested by its signature.
+        outlier_idx : Any, optional
+            Optional outlier index collection supplied to ``test_update_func``
+            when requested by its signature.
 
         Returns
         -------
@@ -85,8 +104,9 @@ class TestSet:
         ValueError
             If ``testset_func`` is not provided.
         TypeError
-            If ``test_update_func`` returns values that are not ModelTestBase
-            instances or dictionaries of overrides.
+            If ``test_update_func`` requests unsupported parameters or returns
+            values that are not ModelTestBase instances or dictionaries of
+            overrides.
 
         Examples
         --------
@@ -101,7 +121,14 @@ class TestSet:
 
         # Apply optional updates from the provided update function.
         if test_update_func:
-            updates = test_update_func(model)
+            updates = cls._invoke_update(
+                test_update_func,
+                model=model,
+                subject=subject,
+                dm=dm,
+                sample=sample,
+                outlier_idx=outlier_idx,
+            )
             for alias, val in updates.items():
                 if isinstance(val, ModelTestBase):
                     tests[alias] = val
@@ -119,6 +146,80 @@ class TestSet:
 
         # Aliases are enforced in the constructor, so instantiate via cls.
         return cls(tests)
+
+    @staticmethod
+    def _invoke_update(
+        update_func: Callable[..., Dict[str, Any]],
+        *,
+        model: 'ModelBase',
+        subject: Any = None,
+        dm: Any = None,
+        sample: Optional[str] = None,
+        outlier_idx: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """
+        Call an update function with only the parameters it declares.
+
+        Parameters
+        ----------
+        update_func : callable
+            Update function supplied to :meth:`from_functions`.
+        model : ModelBase
+            Core model instance; always passed when requested.
+        subject : Any, optional
+            Optional subject passed when the callable declares it.
+        dm : Any, optional
+            Optional data manager passed when the callable declares it.
+        sample : str, optional
+            Optional sample flag passed when the callable declares it.
+        outlier_idx : Any, optional
+            Optional outlier index collection passed when the callable
+            declares it.
+
+        Returns
+        -------
+        dict
+            Update mapping returned by ``update_func``.
+
+        Raises
+        ------
+        TypeError
+            If the callable requests parameters outside the supported set of
+            ``model``, ``subject``, ``dm``, ``sample``, or ``outlier_idx``.
+        """
+
+        available_args = {
+            "model": model,
+            "subject": subject,
+            "dm": dm,
+            "sample": sample,
+            "outlier_idx": outlier_idx,
+        }
+
+        positional_args = []
+        keyword_args: Dict[str, Any] = {}
+
+        for param in inspect.signature(update_func).parameters.values():
+            if param.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}:
+                # Allow *args/**kwargs to be handled naturally by the callable.
+                continue
+
+            if param.name not in available_args:
+                if param.default is inspect._empty:
+                    raise TypeError(
+                        f"Unsupported parameter '{param.name}' in test_update_func; "
+                        "expected one of model, subject, dm, sample, or outlier_idx."
+                    )
+                # Parameter has a default; omit to allow default binding.
+                continue
+
+            arg_value = available_args[param.name]
+            if param.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}:
+                positional_args.append(arg_value)
+            else:
+                keyword_args[param.name] = arg_value
+
+        return update_func(*positional_args, **keyword_args)
 
     @property
     def all_test_results(self) -> Dict[str, Any]:
