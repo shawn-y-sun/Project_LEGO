@@ -1411,7 +1411,8 @@ class ModelSearch:
         regime_limit: int = 1,
         exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1.0, 1.0, 1.0),
-        test_update_func: Optional[Callable[[ModelBase], dict]] = None,
+        modeltest_update_func: Optional[Callable[[ModelBase], dict]] = None,
+        pretest_update_func: Optional[Callable[[], Dict[str, Any]]] = None,
         outlier_idx: Optional[List[Any]] = None,
         search_id: Optional[str] = None,
         base_dir: Optional[Union[str, Path]] = None,
@@ -1462,10 +1463,16 @@ class ModelSearch:
             Passed to build_spec_combos() and ultimately to DataManager.build_tsfm_specs().
         rank_weights : tuple, default (1.0, 1.0, 1.0)
             Weights for (Fit Measures, IS Error, OOS Error) when ranking models.
-        test_update_func : callable, optional
-            Optional function to update each CM's test set. When provided, the
-            same updater is also forwarded to any configured pretests so
-            target- and feature-level TestSets reflect the same overrides.
+        modeltest_update_func : callable, optional
+            Optional legacy updater for each CM's test set. The callable must
+            accept a single :class:`ModelBase` instance and return a mapping of
+            test alias to either a :class:`ModelTestBase` replacement or a
+            dictionary of overrides.
+        pretest_update_func : callable, optional
+            Optional updater for target/feature/spec pretests. The callable
+            takes no arguments and returns a mapping compatible with
+            :meth:`TestSet.from_functions`, enabling context-free pretest
+            overrides separate from model test updates.
         outlier_idx : list, optional
             List of index labels corresponding to outliers to exclude.
         search_id : str, optional
@@ -1535,7 +1542,8 @@ class ModelSearch:
                   f"Exp sign map    : {exp_sign_map}\n"
                   f"Top N           : {top_n}\n"
                   f"Rank weights    : {rank_weights}\n"
-                  f"Test update func: {test_update_func}\n"
+                  f"Model test update func: {modeltest_update_func}\n"
+                  f"Pretest update func   : {pretest_update_func}\n"
                   f"Outlier idx     : {outlier_idx}\n")
             print("==================================\n")
 
@@ -1558,23 +1566,25 @@ class ModelSearch:
                 "regime_limit": regime_limit,
                 "exp_sign_map": exp_sign_map,
                 "rank_weights": rank_weights,
-                "test_update_func": test_update_func,
+                "modeltest_update_func": modeltest_update_func,
+                "pretest_update_func": pretest_update_func,
                 "outlier_idx": outlier_idx,
             }
 
             # Execute optional target-level pretests before heavy computations.
             self.model_pretestset = self._resolve_model_pretestset()
-            # Ensure any caller-provided test updates are forwarded to all
+            # Ensure any caller-provided pretest updates are forwarded to all
             # configured pretests so their TestSet construction mirrors the
-            # updates applied during model evaluation.
-            if self.model_pretestset is not None and test_update_func is not None:
+            # overrides intended for the pretest stage (distinct from model
+            # evaluations).
+            if self.model_pretestset is not None and pretest_update_func is not None:
                 for pretest in (
                     self.model_pretestset.target_test,
                     self.model_pretestset.feature_test,
                     self.model_pretestset.spec_test,
                 ):
                     if pretest is not None:
-                        pretest.test_update_func = test_update_func
+                        pretest.test_update_func = pretest_update_func
             target_test_result: Optional[Any] = None
             if (
                 self.model_pretestset is not None
@@ -1768,7 +1778,7 @@ class ModelSearch:
             # 3) Filter specs
             passed, failed, errors = self.filter_specs(
                 sample=sample,
-                test_update_func=test_update_func,
+                test_update_func=modeltest_update_func,
                 outlier_idx=outlier_idx,
                 start_index=resume_from,
                 total_count=self.total_combos,

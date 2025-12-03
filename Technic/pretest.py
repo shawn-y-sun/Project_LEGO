@@ -226,9 +226,12 @@ class BasePreTest(ABC):
         Function that returns a mapping of test alias to :class:`ModelTestBase`
         given ``subject``, ``dm``, ``sample``, and ``outlier_idx``.
     test_update_func : callable, optional
-        Function that returns updates to apply to the base test mapping. Values
-        can be :class:`ModelTestBase` instances (added or replaced) or
-        dictionaries of attribute overrides targeting existing aliases.
+        Function that returns updates to apply to the base test mapping. The
+        callable may accept no arguments or any subset of the constructor
+        context (``subject``, ``dm``, ``sample``, ``outlier_idx``) and should
+        return a dictionary whose values are :class:`ModelTestBase` instances
+        (added or replaced) or dictionaries of attribute overrides targeting
+        existing aliases.
 
     Raises
     ------
@@ -252,9 +255,7 @@ class BasePreTest(ABC):
         testset_func: Optional[
             Callable[[object, DataManager, str, Optional[Sequence[Any]]], Dict[str, ModelTestBase]]
         ] = None,
-        test_update_func: Optional[
-            Callable[[object, DataManager, str, Optional[Sequence[Any]]], Dict[str, Any]]
-        ] = None,
+        test_update_func: Optional[Callable[..., Dict[str, Any]]] = None,
     ) -> None:
         normalized_sample = str(sample).lower()
         if normalized_sample not in {"in", "full"}:
@@ -366,9 +367,7 @@ class TargetTest(BasePreTest):
         testset_func: Optional[
             Callable[[object, DataManager, str, Optional[Sequence[Any]]], Dict[str, ModelTestBase]]
         ] = None,
-        test_update_func: Optional[
-            Callable[[object, DataManager, str, Optional[Sequence[Any]]], Dict[str, Any]]
-        ] = None,
+        test_update_func: Optional[Callable[..., Dict[str, Any]]] = None,
     ) -> None:
         super().__init__(
             subject=subject,
@@ -429,9 +428,7 @@ class FeatureTest(BasePreTest):
         testset_func: Optional[
             Callable[[object, DataManager, str, Optional[Sequence[Any]]], Dict[str, ModelTestBase]]
         ] = None,
-        test_update_func: Optional[
-            Callable[[object, DataManager, str, Optional[Sequence[Any]]], Dict[str, Any]]
-        ] = None,
+        test_update_func: Optional[Callable[..., Dict[str, Any]]] = None,
         target_test_result: Optional[bool] = None,
     ) -> None:
         super().__init__(
@@ -557,9 +554,7 @@ class SpecTest(BasePreTest):
         testset_func: Optional[
             Callable[[object, DataManager, str, Optional[Sequence[Any]]], Dict[str, ModelTestBase]]
         ] = None,
-        test_update_func: Optional[
-            Callable[[object, DataManager, str, Optional[Sequence[Any]]], Dict[str, Any]]
-        ] = None,
+        test_update_func: Optional[Callable[..., Dict[str, Any]]] = None,
     ) -> None:
         super().__init__(
             subject=subject,

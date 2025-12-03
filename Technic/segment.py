@@ -1951,7 +1951,8 @@ class Segment:
         regime_limit: int = 1,
         exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1, 1, 1),
-        test_update_func: Optional[Callable] = None,
+        modeltest_update_func: Optional[Callable] = None,
+        pretest_update_func: Optional[Callable[[], Dict[str, Any]]] = None,
         outlier_idx: Optional[List[Any]] = None,
         add_in: bool = True,
         overwrite: bool = False,
@@ -2004,8 +2005,15 @@ class Segment:
             Passed to ModelSearch.run_search().
         rank_weights : Tuple[float, float, float], default (1, 1, 1)
             Weights for (Fit Measures, IS Error, OOS Error) when ranking models.
-        test_update_func : Optional[Callable], default None
-            Optional function to update each CM's test set.
+        modeltest_update_func : Optional[Callable], default None
+            Optional function to update each CM's test set; should accept a
+            single :class:`ModelBase` instance and return a mapping of test
+            overrides.
+        pretest_update_func : Optional[Callable[[], Dict[str, Any]]], default None
+            Optional function returning a pretest update mapping used to
+            override target/feature/spec pretests. The callable takes no
+            arguments and mirrors :meth:`TestSet.from_functions` expectations
+            for pretest updates.
         outlier_idx : Optional[List[Any]], default None
             List of index labels corresponding to outliers to exclude.
         add_in : bool, default True
@@ -2105,7 +2113,8 @@ class Segment:
             category_limit=category_limit,
             regime_limit=regime_limit,
             rank_weights=rank_weights,
-            test_update_func=test_update_func,
+            modeltest_update_func=modeltest_update_func,
+            pretest_update_func=pretest_update_func,
             outlier_idx=outlier_idx,
             exp_sign_map=exp_sign_map,
             search_id=active_search_id,

@@ -76,10 +76,13 @@ class TestSet:
             Function that generates the base mapping of tests given the model.
         test_update_func : callable, optional
             Optional function that returns updates to apply on top of the base
-            mapping. Values must be ModelTestBase instances (to add or replace
-            tests) or dictionaries of attribute overrides for existing tests.
-            Override dictionaries targeting aliases outside the base mapping
-            are ignored to allow lenient payloads.
+            mapping. The callable may accept any subset of ``model``,
+            ``subject``, ``dm``, ``sample``, or ``outlier_idx`` (or no
+            arguments) and must return a dictionary whose values are
+            ModelTestBase instances (to add or replace tests) or dictionaries of
+            attribute overrides for existing tests. Override dictionaries
+            targeting aliases outside the base mapping are ignored to allow
+            lenient payloads.
         subject : Any, optional
             Optional subject identifier (e.g., feature name) supplied to
             ``test_update_func`` when requested by its signature.
@@ -185,11 +188,13 @@ class TestSet:
         ------
         TypeError
             If the callable requests parameters outside the supported set of
-            ``model``, ``subject``, ``dm``, ``sample``, or ``outlier_idx``.
+            ``model``/``mdl``, ``subject``, ``dm``, ``sample``, or
+            ``outlier_idx``.
         """
 
         available_args = {
             "model": model,
+            "mdl": model,
             "subject": subject,
             "dm": dm,
             "sample": sample,
