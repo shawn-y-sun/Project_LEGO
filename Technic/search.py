@@ -397,6 +397,36 @@ class ModelSearch:
         # ``ppnr_ols_pretestset`` while populating runtime dependencies.
         return deepcopy(default_bundle)
 
+    def _propagate_target_context(self, target_result: Optional[bool]) -> None:
+        """Cache and broadcast the target pre-test outcome to dependents.
+
+        Parameters
+        ----------
+        target_result : bool, optional
+            Outcome of the target-level pre-test. ``True`` preserves the
+            default expectation that downstream features should remain
+            stationary, while ``False`` inverts the expectation for
+            feature-level checks. ``None`` clears any previously cached
+            outcome.
+
+        Notes
+        -----
+        The payload always includes both ``"target_result"`` and
+        ``"target_test_result"`` so context routing rules can select the key
+        appropriate for each configured pre-test.
+        """
+
+        self.target_pretest_result = None if target_result is None else bool(target_result)
+
+        if self.model_pretestset is None:
+            return
+
+        context_payload = {
+            "target_result": self.target_pretest_result,
+            "target_test_result": self.target_pretest_result,
+        }
+        self.model_pretestset.propagate_context(context_payload)
+
     def _prepare_feature_pretest(self) -> Optional[FeatureTest]:
         """Return the active feature pre-test with the correct data context.
 
@@ -414,6 +444,9 @@ class ModelSearch:
         if self.model_pretestset is None:
             return None
 
+        if self.target_pretest_result is not None:
+            self._propagate_target_context(self.target_pretest_result)
+
         feature_test = self.model_pretestset.feature_test
         if feature_test is None:
             return None
@@ -422,12 +455,6 @@ class ModelSearch:
         # module-level singletons stay in sync with runtime data.
         if feature_test.dm is not self.dm:
             feature_test.dm = self.dm
-
-        if (
-            getattr(feature_test, "target_test_result", None) is None
-            and self.target_pretest_result is not None
-        ):
-            feature_test.target_test_result = self.target_pretest_result
 
         return feature_test
 
@@ -1439,7 +1466,8 @@ class ModelSearch:
         regime_limit: Optional[int] = None,
         exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1.0, 1.0, 1.0),
-        test_update_func: Optional[Callable[[ModelBase], dict]] = None,
+        modeltest_update_func: Optional[Callable[[ModelBase], dict]] = None,
+        pretest_update_func: Optional[Callable[[], Dict[str, Any]]] = None,
         outlier_idx: Optional[List[Any]] = None,
         search_id: Optional[str] = None,
         base_dir: Optional[Union[str, Path]] = None,
@@ -1491,8 +1519,16 @@ class ModelSearch:
             Passed to build_spec_combos() and ultimately to DataManager.build_tsfm_specs().
         rank_weights : tuple, default (1.0, 1.0, 1.0)
             Weights for (Fit Measures, IS Error, OOS Error) when ranking models.
-        test_update_func : callable, optional
-            Optional function to update each CM's test set.
+        modeltest_update_func : callable, optional
+            Optional legacy updater for each CM's test set. The callable must
+            accept a single :class:`ModelBase` instance and return a mapping of
+            test alias to either a :class:`ModelTestBase` replacement or a
+            dictionary of overrides.
+        pretest_update_func : callable, optional
+            Optional updater for target/feature/spec pretests. The callable
+            takes no arguments and returns a mapping compatible with
+            :meth:`TestSet.from_functions`, enabling context-free pretest
+            overrides separate from model test updates.
         outlier_idx : list, optional
             List of index labels corresponding to outliers to exclude.
         search_id : str, optional
@@ -1520,6 +1556,10 @@ class ModelSearch:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             forced = forced_in or []
+
+            # Reset cached target outcome to avoid bleeding across runs when
+            # ``run_search`` is invoked multiple times on the same instance.
+            self.target_pretest_result = None
 
             legacy_max_periods = legacy_kwargs.pop("max_periods", None)
             if legacy_kwargs:
@@ -1558,7 +1598,8 @@ class ModelSearch:
                   f"Exp sign map    : {exp_sign_map}\n"
                   f"Top N           : {top_n}\n"
                   f"Rank weights    : {rank_weights}\n"
-                  f"Test update func: {test_update_func}\n"
+                  f"Model test update func: {modeltest_update_func}\n"
+                  f"Pretest update func   : {pretest_update_func}\n"
                   f"Outlier idx     : {outlier_idx}\n")
             print("==================================\n")
 
@@ -1581,12 +1622,25 @@ class ModelSearch:
                 "regime_limit": regime_limit,
                 "exp_sign_map": exp_sign_map,
                 "rank_weights": rank_weights,
-                "test_update_func": test_update_func,
+                "modeltest_update_func": modeltest_update_func,
+                "pretest_update_func": pretest_update_func,
                 "outlier_idx": outlier_idx,
             }
 
             # Execute optional target-level pretests before heavy computations.
             self.model_pretestset = self._resolve_model_pretestset()
+            # Ensure any caller-provided pretest updates are forwarded to all
+            # configured pretests so their TestSet construction mirrors the
+            # overrides intended for the pretest stage (distinct from model
+            # evaluations).
+            if self.model_pretestset is not None and pretest_update_func is not None:
+                for pretest in (
+                    self.model_pretestset.target_test,
+                    self.model_pretestset.feature_test,
+                    self.model_pretestset.spec_test,
+                ):
+                    if pretest is not None:
+                        pretest.test_update_func = pretest_update_func
             target_test_result: Optional[Any] = None
             if (
                 self.model_pretestset is not None
@@ -1599,7 +1653,11 @@ class ModelSearch:
                     target_test.target = self.target
 
                 try:
-                    target_test_result = target_test.test_filter
+                    # Build once so the filter decision and the tabular results
+                    # originate from the same evaluation run.
+                    target_testset = target_test.testset
+                    target_passed, _ = target_testset.filter_pass()
+                    target_test_result = target_passed
                 except Exception as exc:
                     print(
                         "Target pre-test raised "
@@ -1622,15 +1680,18 @@ class ModelSearch:
                     print("--- Target Pre-Test Result ---")
                     if description:
                         print(description)
-                    print(target_test_result)
-                    print("")
+                    # Leverage the aggregated view so we always display
+                    # the full set of tabular results produced during the
+                    # evaluation pass.
+                    for name, result in target_testset.all_test_results.items():
+                        print(f"{name} Test Result:\n{result}\n")
+                    print(f"Target filter passed: {target_test_result}\n")
 
-                if self.model_pretestset.feature_test is not None:
-                    self.model_pretestset.feature_test.target_test_result = (
-                        target_test_result
-                    )
-            self.target_pretest_result = target_test_result
-        
+                if self.model_pretestset is not None:
+                    self._propagate_target_context(target_test_result)
+            else:
+                self.target_pretest_result = None
+
             # Warn about interpolated MEV variables within the candidate pool
             def _flatten(items: Any) -> List[Union[str, TSFM]]:
                 flat: List[Union[str, TSFM]] = []
@@ -1773,7 +1834,7 @@ class ModelSearch:
             # 3) Filter specs
             passed, failed, errors = self.filter_specs(
                 sample=sample,
-                test_update_func=test_update_func,
+                test_update_func=modeltest_update_func,
                 outlier_idx=outlier_idx,
                 start_index=resume_from,
                 total_count=self.total_combos,
