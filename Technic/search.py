@@ -1601,8 +1601,11 @@ class ModelSearch:
                     print("--- Target Pre-Test Result ---")
                     if description:
                         print(description)
-                    for test in target_testset.tests:
-                        print(f"{test.name} Test Result:\n{test.test_result}\n")
+                    # Leverage the aggregated view so we always display
+                    # the full set of tabular results produced during the
+                    # evaluation pass.
+                    for name, result in target_testset.all_test_results.items():
+                        print(f"{name} Test Result:\n{result}\n")
                     print(f"Target filter passed: {target_test_result}\n")
 
                 if self.model_pretestset is not None:
