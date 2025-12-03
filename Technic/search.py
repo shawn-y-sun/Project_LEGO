@@ -1574,7 +1574,11 @@ class ModelSearch:
                     target_test.target = self.target
 
                 try:
-                    target_test_result = target_test.test_filter
+                    # Build once so the filter decision and the tabular results
+                    # originate from the same evaluation run.
+                    target_testset = target_test.testset
+                    target_passed, _ = target_testset.filter_pass()
+                    target_test_result = target_passed
                 except Exception as exc:
                     print(
                         "Target pre-test raised "
@@ -1597,8 +1601,9 @@ class ModelSearch:
                     print("--- Target Pre-Test Result ---")
                     if description:
                         print(description)
-                    print(target_test_result)
-                    print("")
+                    for test in target_testset.tests:
+                        print(f"{test.name} Test Result:\n{test.test_result}\n")
+                    print(f"Target filter passed: {target_test_result}\n")
 
                 if self.model_pretestset is not None:
                     self._propagate_target_context(target_test_result)
