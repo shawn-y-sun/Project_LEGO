@@ -1463,7 +1463,9 @@ class ModelSearch:
         rank_weights : tuple, default (1.0, 1.0, 1.0)
             Weights for (Fit Measures, IS Error, OOS Error) when ranking models.
         test_update_func : callable, optional
-            Optional function to update each CM's test set.
+            Optional function to update each CM's test set. When provided, the
+            same updater is also forwarded to any configured pretests so
+            target- and feature-level TestSets reflect the same overrides.
         outlier_idx : list, optional
             List of index labels corresponding to outliers to exclude.
         search_id : str, optional
@@ -1562,6 +1564,17 @@ class ModelSearch:
 
             # Execute optional target-level pretests before heavy computations.
             self.model_pretestset = self._resolve_model_pretestset()
+            # Ensure any caller-provided test updates are forwarded to all
+            # configured pretests so their TestSet construction mirrors the
+            # updates applied during model evaluation.
+            if self.model_pretestset is not None and test_update_func is not None:
+                for pretest in (
+                    self.model_pretestset.target_test,
+                    self.model_pretestset.feature_test,
+                    self.model_pretestset.spec_test,
+                ):
+                    if pretest is not None:
+                        pretest.test_update_func = test_update_func
             target_test_result: Optional[Any] = None
             if (
                 self.model_pretestset is not None
