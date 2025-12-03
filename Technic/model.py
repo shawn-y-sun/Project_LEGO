@@ -1343,28 +1343,34 @@ class ModelBase(ABC):
         test_update_func: Optional[Callable[['ModelBase'], Dict[str, Any]]] = None
     ) -> TestSet:
         """
-        Rebuild TestSet from provided functions and cache it.
+        Build and cache a TestSet using initializer and update functions.
+
+        Parameters
+        ----------
+        testset_func : callable, optional
+            Function that returns the base mapping of test aliases to
+            ``ModelTestBase`` instances. Defaults to ``self.testset_func``.
+        test_update_func : callable, optional
+            Optional function that returns updates to apply to the base test
+            mapping. Defaults to ``self.test_update_func``.
+
+        Returns
+        -------
+        TestSet
+            The constructed TestSet instance for this model.
+
+        Raises
+        ------
+        ValueError
+            If no initializer function is provided.
+        KeyError
+            If updates target unknown tests.
+        TypeError
+            If updates are not ModelTestBase instances or dictionaries.
         """
         func_init = testset_func or self.testset_func
-        if func_init is None:
-            raise ValueError("No testset_func provided.")
-        tests = func_init(self)
         func_update = test_update_func or self.test_update_func
-        if func_update:
-            updates = func_update(self)
-            for alias, val in updates.items():
-                if isinstance(val, ModelTestBase):
-                    tests[alias] = val
-                elif isinstance(val, dict):
-                    if alias in tests:
-                        for k, v in val.items(): setattr(tests[alias], k, v)
-                    else:
-                        raise KeyError(f"Unknown test '{alias}' in update_map")
-                else:
-                    raise TypeError("test_update_map values must be ModelTestBase or kwargs dict")
-        # Apply aliases and assemble TestSet
-        for alias, obj in tests.items(): obj.alias = alias
-        self.testset = self.testset_cls(tests)
+        self.testset = self.testset_cls.from_functions(self, func_init, func_update)
         return self.testset
 
 

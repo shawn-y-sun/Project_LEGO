@@ -340,18 +340,15 @@ class Segment:
         if pretestset is None:
             return None
 
+        if target_pretest_result is not None:
+            pretestset.propagate_target_result(target_pretest_result)
+
         feature_test = pretestset.feature_test
         if feature_test is None:
             return None
 
         if feature_test.dm is not self.dm:
             feature_test.dm = self.dm
-
-        if (
-            getattr(feature_test, "target_test_result", None) is None
-            and target_pretest_result is not None
-        ):
-            feature_test.target_test_result = target_pretest_result
 
         return feature_test
 

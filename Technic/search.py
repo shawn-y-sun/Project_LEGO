@@ -397,6 +397,36 @@ class ModelSearch:
         # ``ppnr_ols_pretestset`` while populating runtime dependencies.
         return deepcopy(default_bundle)
 
+    def _propagate_target_context(self, target_result: Optional[bool]) -> None:
+        """Cache and broadcast the target pre-test outcome to dependents.
+
+        Parameters
+        ----------
+        target_result : bool, optional
+            Outcome of the target-level pre-test. ``True`` preserves the
+            default expectation that downstream features should remain
+            stationary, while ``False`` inverts the expectation for
+            feature-level checks. ``None`` clears any previously cached
+            outcome.
+
+        Notes
+        -----
+        The payload always includes both ``"target_result"`` and
+        ``"target_test_result"`` so context routing rules can select the key
+        appropriate for each configured pre-test.
+        """
+
+        self.target_pretest_result = None if target_result is None else bool(target_result)
+
+        if self.model_pretestset is None:
+            return
+
+        context_payload = {
+            "target_result": self.target_pretest_result,
+            "target_test_result": self.target_pretest_result,
+        }
+        self.model_pretestset.propagate_context(context_payload)
+
     def _prepare_feature_pretest(self) -> Optional[FeatureTest]:
         """Return the active feature pre-test with the correct data context.
 
@@ -414,6 +444,9 @@ class ModelSearch:
         if self.model_pretestset is None:
             return None
 
+        if self.target_pretest_result is not None:
+            self._propagate_target_context(self.target_pretest_result)
+
         feature_test = self.model_pretestset.feature_test
         if feature_test is None:
             return None
@@ -422,12 +455,6 @@ class ModelSearch:
         # module-level singletons stay in sync with runtime data.
         if feature_test.dm is not self.dm:
             feature_test.dm = self.dm
-
-        if (
-            getattr(feature_test, "target_test_result", None) is None
-            and self.target_pretest_result is not None
-        ):
-            feature_test.target_test_result = self.target_pretest_result
 
         return feature_test
 
@@ -1465,6 +1492,10 @@ class ModelSearch:
             warnings.simplefilter("ignore")
             forced = forced_in or []
 
+            # Reset cached target outcome to avoid bleeding across runs when
+            # ``run_search`` is invoked multiple times on the same instance.
+            self.target_pretest_result = None
+
             legacy_max_periods = legacy_kwargs.pop("max_periods", None)
             if legacy_kwargs:
                 unexpected = ", ".join(sorted(legacy_kwargs.keys()))
@@ -1569,12 +1600,11 @@ class ModelSearch:
                     print(target_test_result)
                     print("")
 
-                if self.model_pretestset.feature_test is not None:
-                    self.model_pretestset.feature_test.target_test_result = (
-                        target_test_result
-                    )
-            self.target_pretest_result = target_test_result
-        
+                if self.model_pretestset is not None:
+                    self._propagate_target_context(target_test_result)
+            else:
+                self.target_pretest_result = None
+
             # Warn about interpolated MEV variables within the candidate pool
             def _flatten(items: Any) -> List[Union[str, TSFM]]:
                 flat: List[Union[str, TSFM]] = []

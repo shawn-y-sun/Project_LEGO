@@ -19,7 +19,7 @@
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
-from typing import Dict, Any, TYPE_CHECKING, List, Tuple
+from typing import Dict, Any, TYPE_CHECKING, List, Tuple, Optional, Callable
 from .test import *
 from .modeltype import Growth
 
@@ -49,6 +49,76 @@ class TestSet:
         for alias, test_obj in tests.items():
             test_obj.alias = alias
             self.tests.append(test_obj)
+
+    @classmethod
+    def from_functions(
+        cls,
+        model: 'ModelBase',
+        testset_func: Callable[['ModelBase'], Dict[str, ModelTestBase]],
+        test_update_func: Optional[Callable[['ModelBase'], Dict[str, Any]]] = None
+    ) -> 'TestSet':
+        """
+        Build a TestSet from initializer and update functions.
+
+        Parameters
+        ----------
+        model : ModelBase
+            Model instance providing data and metadata required to construct
+            tests.
+        testset_func : callable
+            Function that generates the base mapping of tests given the model.
+        test_update_func : callable, optional
+            Optional function that returns updates to apply on top of the base
+            mapping. Values must be ModelTestBase instances (to add or replace
+            tests) or dictionaries of attribute overrides for existing tests.
+            Override dictionaries targeting aliases outside the base mapping
+            are ignored to allow lenient payloads.
+
+        Returns
+        -------
+        TestSet
+            An instantiated TestSet that reflects both the base and updated
+            test definitions.
+
+        Raises
+        ------
+        ValueError
+            If ``testset_func`` is not provided.
+        TypeError
+            If ``test_update_func`` returns values that are not ModelTestBase
+            instances or dictionaries of overrides.
+
+        Examples
+        --------
+        >>> # Construct a test set with optional updates
+        >>> testset = TestSet.from_functions(model, base_func, update_func)
+        """
+        if testset_func is None:
+            raise ValueError("testset_func is required to build a TestSet.")
+
+        # Build the base test mapping.
+        tests = testset_func(model)
+
+        # Apply optional updates from the provided update function.
+        if test_update_func:
+            updates = test_update_func(model)
+            for alias, val in updates.items():
+                if isinstance(val, ModelTestBase):
+                    tests[alias] = val
+                elif isinstance(val, dict):
+                    if alias not in tests:
+                        # Skip override dictionaries for aliases not in the
+                        # base mapping to allow lenient update payloads.
+                        continue
+                    for attr, attr_val in val.items():
+                        setattr(tests[alias], attr, attr_val)
+                else:
+                    raise TypeError(
+                        "test_update_map values must be ModelTestBase or kwargs dict"
+                    )
+
+        # Aliases are enforced in the constructor, so instantiate via cls.
+        return cls(tests)
 
     @property
     def all_test_results(self) -> Dict[str, Any]:
