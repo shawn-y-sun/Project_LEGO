@@ -2,7 +2,7 @@
 # module: testset.py
 # Purpose: Test set builder functions for different model types.
 # Key Types/Classes: TestSet
-# Key Functions: ppnr_ols_testset_func, fixed_ols_testset_func
+# Key Functions: ppnr_ols_testset_func, ppnr_ols_stationary_testset_func, fixed_ols_testset_func
 # Dependencies: pandas, numpy, statsmodels, typing, .test module classes
 #
 # TESTSET FUNCTION REQUIREMENTS:
@@ -555,4 +555,173 @@ def fixed_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
             actual=mdl.y_out,
             predicted=mdl.y_pred_out
         )
+    return tests
+
+
+
+
+def ppnr_ols_stationary_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
+    """
+    TestSet variant that always evaluates X stationarity assuming Y is stationary.
+
+    This function mirrors :func:`ppnr_ols_testset_func` for measures and
+    diagnostic coverage but simplifies the stationarity branch:
+
+    * Treats the Y-stationarity check as satisfied (assumption-based).
+    * Always adds the MultiFullStationarityTest for X variables when configured.
+    * Never includes the Y–X cointegration test.
+
+    Parameters
+    ----------
+    mdl : ModelBase
+        Model instance providing data and metadata required to construct tests.
+
+    Returns
+    -------
+    dict
+        Mapping of test aliases to configured ModelTestBase instances.
+
+    Examples
+    --------
+    >>> testset = ppnr_ols_stationary_testset_func(model)
+    >>> 'X Stationarity' in testset
+    True
+    """
+
+    tests: Dict[str, ModelTestBase] = {}
+
+    # --- Fit & Error Measures (inactive for filtering) ---
+    tests['Fit Measures'] = FitMeasure(
+        actual=mdl.y,
+        predicted=mdl.y_fitted_in,
+        n_features=len(mdl.params) - 1
+    )
+
+    tests['IS Error Measures'] = ErrorMeasure(
+        actual=mdl.y,
+        predicted=mdl.y_fitted_in
+    )
+
+    if not mdl.X_out.empty:
+        tests['OOS Error Measures'] = ErrorMeasure(
+            actual=mdl.y_out,
+            predicted=mdl.y_pred_out
+        )
+
+    # --- Filtering Tests ---
+    tests['In-Sample R-sq'] = R2Test(
+        r2=mdl.rsquared,
+        filter_mode='moderate'
+    )
+
+    coef_test_vars = mdl.spec_map.get('CoefTest', [])
+    if coef_test_vars:
+        available_vars = [var for var in coef_test_vars if var in mdl.pvalues.index]
+        if available_vars:
+            tests['Coefficient Significance'] = CoefTest(
+                pvalues=mdl.pvalues.loc[available_vars],
+                filter_mode='moderate'
+            )
+
+    for grp in mdl.spec_map.get('GroupTest', []):
+        if isinstance(grp, (list, tuple)):
+            names = list(grp)
+            available_names = [name for name in names if name in mdl.pvalues.index]
+            if not available_names:
+                continue
+
+            parts = [name.split(':', 1) if ':' in name else [None, name] for name in available_names]
+            prefixes = [p[0] for p in parts]
+            suffixes = [p[1] for p in parts]
+            if None not in prefixes and len(set(prefixes)) == 1:
+                prefix = prefixes[0] + ':'
+                label_body = "'".join(suffixes)
+                group_label = f"{prefix}{label_body}"
+            else:
+                group_label = "'".join(available_names)
+            vars_for = available_names
+        else:
+            group_label = str(grp)
+            vars_for = [grp] if grp in mdl.pvalues.index else []
+
+        if vars_for:
+            alias = f"Group Driver F-Test {group_label}"
+            tests[alias] = GroupTest(
+                model_result=mdl.fitted,
+                vars=vars_for,
+                filter_mode='moderate'
+            )
+
+    tests['Multicollinearity'] = VIFTest(
+        exog=sm.add_constant(mdl.X),
+        filter_mode='moderate'
+    )
+
+    tests['Residual Stationarity'] = StationarityTest(
+        series=mdl.resid,
+        filter_mode='moderate'
+    )
+    tests['Residual Normality'] = NormalityTest(
+        series=mdl.resid,
+        filter_mode='moderate',
+        filter_on=False
+    )
+    tests['Residual Autocorrelation'] = AutocorrTest(
+        results=mdl.fitted,
+        filter_mode='moderate',
+        filter_on=False
+    )
+    tests['Residual Heteroscedasticity'] = HetTest(
+        resids=mdl.resid,
+        exog=sm.add_constant(mdl.X),
+        filter_mode='moderate',
+        filter_on=False
+    )
+
+    # --- Target Stationarity & Cointegration ---
+    # NOTE: Y-stationarity is assumed true; cointegration is intentionally skipped.
+    y_stat = TargetStationarityTest(
+        target=mdl.target,
+        dm=mdl.dm,
+        outlier_idx=getattr(mdl, 'outlier_idx', None),
+        filter_mode='moderate',
+        filter_on=False
+    )
+    # Keep the target-stationarity test present but inactive for filtering to
+    # reflect the assumption-driven workflow without forcing a pass flag.
+    tests['Y Stationarity'] = y_stat
+
+    stationarity_vars = mdl.spec_map.get('StationarityTest', [])
+    if stationarity_vars:
+        available_vars = [var for var in stationarity_vars if var in mdl.X.columns]
+        if available_vars:
+            tests['X Stationarity'] = MultiFullStationarityTest(
+                specs=mdl.specs,
+                dm=mdl.dm,
+                filter_mode='moderate',
+                filter_on=False
+            )
+
+    # --- Sign Check Test ---
+    sign_check_features = mdl.spec_map.get('SignCheck', [])
+    if sign_check_features:
+        tests['Sign Check'] = SignCheck(
+            feature_list=sign_check_features,
+            coefficients=mdl.params,
+            filter_mode='moderate'
+        )
+
+    # --- Base Growth Test (for Growth model types) ---
+    if getattr(mdl, 'model_type', None) is Growth:
+        try:
+            freq = mdl.dm.freq if hasattr(mdl, 'dm') and hasattr(mdl.dm, 'freq') else 'M'
+            tests['Base Growth'] = BaseGrowthTest(
+                coeffs=mdl.params,
+                freq=freq,
+                filter_on=False
+            )
+        except Exception:
+            # If anything goes wrong (e.g., params not ready), skip adding this test
+            pass
+
     return tests
