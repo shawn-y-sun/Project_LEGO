@@ -777,7 +777,7 @@ class ScenManager:
                 all_dates = all_dates.sort_values()
                 
                 # Create DataFrame with DatetimeIndex
-                df = pd.DataFrame(index=all_dates)
+                df = pd.DataFrame(index=pd.to_datetime(all_dates).normalize())
                 
                 # Add Period indicator
                 df['Period'] = df.index.map(lambda x: assign_period(x, p0_quarter_end))
@@ -815,7 +815,8 @@ class ScenManager:
                 
                 # Create MultiIndex DataFrame
                 entities, dates = zip(*sorted(all_pairs))
-                idx = pd.MultiIndex.from_tuples(list(zip(entities, dates)),
+                normalized_dates = pd.to_datetime(dates).normalize()
+                idx = pd.MultiIndex.from_tuples(list(zip(entities, normalized_dates)),
                                               names=[entity_col, date_col])
                 df = pd.DataFrame(index=idx)
                 
@@ -847,7 +848,8 @@ class ScenManager:
                     pred_aligned = pred_oos.reindex(pd.to_datetime(df.index.get_level_values(date_col)).normalize())
                     df['Pred_OOS'] = pred_aligned.values
             
-            # Store the result
+            # Normalize index to guarantee datetime dtype in the public property
+            df.index = pd.to_datetime(df.index).normalize()
             results[scen_set] = df
             
         return results
@@ -933,7 +935,7 @@ class ScenManager:
                 all_dates = all_dates.sort_values()
 
                 # Create DataFrame with DatetimeIndex
-                df = pd.DataFrame(index=all_dates)
+                df = pd.DataFrame(index=pd.to_datetime(all_dates).normalize())
 
                 # Add Period indicator
                 df['Period'] = df.index.map(lambda x: assign_period(x, p0_quarter_end))
@@ -993,7 +995,8 @@ class ScenManager:
 
                 # Create MultiIndex DataFrame
                 entities, dates = zip(*sorted(all_pairs))
-                idx = pd.MultiIndex.from_tuples(list(zip(entities, dates)),
+                normalized_dates = pd.to_datetime(dates).normalize()
+                idx = pd.MultiIndex.from_tuples(list(zip(entities, normalized_dates)),
                                               names=[entity_col, date_col])
                 df = pd.DataFrame(index=idx)
 
@@ -1020,7 +1023,15 @@ class ScenManager:
                     )
                     df[scen_name] = scen_series
             
-            # Store the result
+            # Normalize date level to enforce datetime dtype for the property output
+            if isinstance(df.index, pd.MultiIndex):
+                date_level = pd.to_datetime(df.index.get_level_values(date_col)).normalize()
+                df.index = pd.MultiIndex.from_arrays(
+                    [df.index.get_level_values(entity_col), date_level],
+                    names=[entity_col, date_col]
+                )
+            else:
+                df.index = pd.to_datetime(df.index).normalize()
             results[scen_set] = df
             
         return results
@@ -1164,8 +1175,8 @@ class ScenManager:
                 )
             all_quarters = all_quarters.sort_values()
             
-            # Create quarterly DataFrame
-            df = pd.DataFrame(index=all_quarters)
+            # Create quarterly DataFrame with guaranteed DatetimeIndex
+            df = pd.DataFrame(index=pd.to_datetime(all_quarters).normalize())
             
             # Add core series
             df['Fitted_IS'] = np.nan
@@ -1187,9 +1198,11 @@ class ScenManager:
             df['Period'] = [assign_period_label(date, p0_quarter_end) for date in df.index]
             # Add Actual quarterly if available
             if y_base_full is not None and not y_base_full.empty:
-                actual_q = aggregate_to_quarterly(y_base_full, self.qtr_method).reindex(all_quarters)
+                actual_q = aggregate_to_quarterly(y_base_full, self.qtr_method).reindex(df.index)
                 df['Actual'] = pd.to_numeric(actual_q, errors='coerce')
-            
+
+            # Normalize index to guarantee datetime dtype for downstream consumers
+            df.index = pd.to_datetime(df.index).normalize()
             results[scen_set] = df
             
         return results
