@@ -1072,11 +1072,12 @@ class ModelBase(ABC):
     def in_perf_measures(self) -> pd.Series:
         """
         In-sample performance measures from testset results.
-        
-        Combines 'Fit Measures' and 'IS Error Measures' into a single Series.
-        Handles underlying test_result objects that return either Series or
-        DataFrame (in which case the 'Value' column is used if present).
-        
+
+        Combines 'Fit Measures' and 'IS Error Measures' into a single Series
+        without executing the full suite of tests in the ``TestSet``. Handles
+        underlying test_result objects that return either Series or DataFrame
+        (in which case the 'Value' column is used if present).
+
         Returns
         -------
         pd.Series
@@ -1084,10 +1085,7 @@ class ModelBase(ABC):
         """
         if self.testset is None:
             return pd.Series(dtype=float)
-        
-        # Get test results from testset
-        all_results = self.testset.all_test_results
-        
+
         # Combine Fit Measures and IS Error Measures
         combined_series = pd.Series(dtype=float)
         
@@ -1106,16 +1104,18 @@ class ModelBase(ABC):
                     return obj[numeric_cols[0]].astype(float)
             return pd.Series(dtype=float)
         
-        # Add Fit Measures if available
-        if 'Fit Measures' in all_results:
-            fit_result = all_results['Fit Measures']
+        # Only trigger the specific measure tests needed for reporting. Avoid
+        # accessing ``all_test_results`` because that executes every test,
+        # including expensive diagnostics that are irrelevant for performance
+        # summaries.
+        fit_result = self._get_test_result_by_name('Fit Measures')
+        if fit_result is not None:
             combined_series = pd.concat([combined_series, _to_series(fit_result)])
-        
-        # Add IS Error Measures if available
-        if 'IS Error Measures' in all_results:
-            error_result = all_results['IS Error Measures']
+
+        error_result = self._get_test_result_by_name('IS Error Measures')
+        if error_result is not None:
             combined_series = pd.concat([combined_series, _to_series(error_result)])
-        
+
         return combined_series
 
     @property
@@ -1133,23 +1133,45 @@ class ModelBase(ABC):
         """
         if self.testset is None:
             return pd.Series(dtype=float)
-        
-        # Get test results from testset
-        all_results = self.testset.all_test_results
-        
-        # Return OOS Error Measures if available
-        if 'OOS Error Measures' in all_results:
-            oos_result = all_results['OOS Error Measures']
-            if isinstance(oos_result, pd.Series):
-                return oos_result.astype(float)
-            if isinstance(oos_result, pd.DataFrame):
-                if 'Value' in oos_result.columns:
-                    return oos_result['Value'].astype(float)
-                numeric_cols = oos_result.select_dtypes(include=[np.number]).columns
-                if len(numeric_cols) == 1:
-                    return oos_result[numeric_cols[0]].astype(float)
-        
+
+        # Only evaluate the out-of-sample error measures to avoid triggering
+        # unrelated tests that may be costly.
+        oos_result = self._get_test_result_by_name('OOS Error Measures')
+        if isinstance(oos_result, pd.Series):
+            return oos_result.astype(float)
+        if isinstance(oos_result, pd.DataFrame):
+            if 'Value' in oos_result.columns:
+                return oos_result['Value'].astype(float)
+            numeric_cols = oos_result.select_dtypes(include=[np.number]).columns
+            if len(numeric_cols) == 1:
+                return oos_result[numeric_cols[0]].astype(float)
+
         return pd.Series(dtype=float)
+
+    def _get_test_result_by_name(self, test_name: str) -> Optional[Any]:
+        """
+        Retrieve a specific test_result by its display name.
+
+        Parameters
+        ----------
+        test_name : str
+            Alias or display name of the desired test within ``self.testset``.
+
+        Returns
+        -------
+        Any or None
+            The corresponding ``test_result`` object if the test exists;
+            otherwise ``None``.
+        """
+        if self.testset is None:
+            return None
+
+        # Search only for the requested test to avoid executing others.
+        for test in self.testset.tests:
+            if test.name == test_name:
+                return test.test_result
+
+        return None
 
     def _create_scenario_manager(self) -> None:
         """
