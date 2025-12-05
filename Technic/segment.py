@@ -2010,7 +2010,8 @@ class Segment:
         modeltest_update_func : Optional[Callable], default None
             Optional function to update each CM's test set; should accept a
             single :class:`ModelBase` instance and return a mapping of test
-            overrides.
+            overrides. The legacy keyword ``test_update_func`` is supported as
+            an alias.
         pretest_update_func : Optional[Callable[[], Dict[str, Any]]], default None
             Optional function returning a pretest update mapping used to
             override target/feature/spec pretests. The callable takes no
@@ -2086,6 +2087,12 @@ class Segment:
             )
         searcher = self.searcher
         searcher.segment = self
+
+        # Support legacy argument name ``test_update_func`` by aliasing it to
+        # ``modeltest_update_func`` when the modern parameter is not supplied.
+        legacy_modeltest_update_func = legacy_kwargs.pop("test_update_func", None)
+        if modeltest_update_func is None and legacy_modeltest_update_func is not None:
+            modeltest_update_func = legacy_modeltest_update_func
 
         legacy_overwrite = legacy_kwargs.pop("override", None)
         legacy_max_periods = legacy_kwargs.pop("max_periods", None)
@@ -2231,7 +2238,7 @@ class Segment:
         top_n: int = 10,
         sample: str = 'in',
         **legacy_kwargs: Any
-    ) -> List[CM]:
+    ) -> None:
         """
         Re-compute rankings for candidate models using new weights.
 
@@ -2254,12 +2261,6 @@ class Segment:
             Sample to use when retrieving diagnostics for ranking. Choose
             ``'in'`` for in-sample diagnostics or ``'full'`` for full-sample.
 
-        Returns
-        -------
-        List[CM]
-            The top ``top_n`` candidate models ordered by the refreshed
-            composite score.
-
         Raises
         ------
         RuntimeError
@@ -2268,12 +2269,12 @@ class Segment:
         Examples
         --------
         >>> # After running search_cms(...)
-        >>> refreshed = segment.rerank_cms(
+        >>> segment.rerank_cms(
         ...     rank_weights=(0.4, 0.4, 0.2),
         ...     all_passed=True,
         ...     top_n=5
         ... )
-        >>> refreshed[0].model_id
+        >>> segment.top_cms[0].model_id
         'cm1'
         """
         legacy_overwrite = legacy_kwargs.pop("override", None)
@@ -2385,7 +2386,7 @@ class Segment:
                 )
                 print(formatted)
 
-        return top_models
+        return None
 
     def _normalize_cm_collection(
         self, collection: Union[Dict[str, CM], List[CM]]
