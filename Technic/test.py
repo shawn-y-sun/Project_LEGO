@@ -886,7 +886,7 @@ class StationarityTest(ModelTestBase):
         Returns a legacy-style stationarity test table similar to SAS ARIMA's
         Augmented Dickey-Fuller test output.
         """
-        types = {'Zero Mean': 'nc', 'Single Mean': 'c', 'Trend': 'ct'}
+        types = {'Zero Mean': 'n', 'Single Mean': 'c', 'Trend': 'ct'}
         data = []
         series = self.series.dropna() if self.series is not None else None
         if series is None:
