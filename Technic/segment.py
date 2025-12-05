@@ -2711,6 +2711,7 @@ class Segment:
         which: str = "both",
         base_dir: Union[str, Path, None] = None,
         search_id: Optional[str] = None,
+        rerank_weights: Tuple[float, float, float] = (1, 1, 1),
     ) -> None:
         """
         Load persisted candidate models and bind them to the current DataManager.
@@ -2727,6 +2728,11 @@ class Segment:
             ``cms/<search_id>``. When omitted, the most recent search tracked
             for this segment is used if present, otherwise legacy locations are
             scanned.
+        rerank_weights : Tuple[float, float, float], default (1, 1, 1)
+            Optional weights forwarded to :meth:`rerank_cms` after models are
+            loaded. When a tuple of three numeric values is provided, the
+            method automatically re-ranks the loaded candidate models using the
+            supplied weights with ``overwrite=True``.
 
         Returns
         -------
@@ -2741,6 +2747,10 @@ class Segment:
         recent runs while still tolerating legacy top-level folders when no
         search metadata is available.
 
+        When ``rerank_weights`` is supplied and models are available, the
+        loaded models are automatically re-ranked using
+        :meth:`Segment.rerank_cms` with ``overwrite=True``.
+
         Empty CM directories (or missing ``index.json`` files) are tolerated and
         will result in zero loaded models for that group.
 
@@ -2749,11 +2759,22 @@ class Segment:
         ValueError
             If ``which`` is not one of ``'selected'``, ``'passed'``, or
             ``'both'`` or if the segment lacks a bound DataManager.
+            Raised when ``rerank_weights`` is not a tuple of length three.
+        TypeError
+            If any ``rerank_weights`` entry is not numeric.
         """
         if which not in {"selected", "passed", "both"}:
             raise ValueError("Parameter 'which' must be 'selected', 'passed', or 'both'.")
         if self.dm is None:
             raise ValueError("Segment must have an attached DataManager before loading CMs.")
+
+        if rerank_weights is not None:
+            if not isinstance(rerank_weights, tuple) or len(rerank_weights) != 3:
+                raise ValueError(
+                    "Parameter 'rerank_weights' must be a tuple of three numeric values."
+                )
+            if not all(isinstance(weight, (int, float)) for weight in rerank_weights):
+                raise TypeError("Each entry in 'rerank_weights' must be numeric.")
 
         # Always resolve directories relative to a capitalized "Segment" root
         # so loading mirrors the persistence convention used in ``save_cms``.
@@ -2808,6 +2829,17 @@ class Segment:
                 else dirs["passed_dir"]
             )
             _load_group(passed_dir, self.passed_cms)
+
+        # Re-rank loaded candidate models when weights are provided to keep
+        # rankings aligned with the latest preferences. Use passed CMs when
+        # available; otherwise, fall back to the currently loaded selection.
+        has_loaded_models = bool(self.cms or self.passed_cms)
+        if rerank_weights is not None and has_loaded_models:
+            self.rerank_cms(
+                rank_weights=rerank_weights,
+                overwrite=True,
+                all_passed=bool(self.passed_cms),
+            )
 
         summary = {
             "passed": len(self.passed_cms),
