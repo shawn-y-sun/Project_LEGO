@@ -2010,7 +2010,8 @@ class Segment:
         modeltest_update_func : Optional[Callable], default None
             Optional function to update each CM's test set; should accept a
             single :class:`ModelBase` instance and return a mapping of test
-            overrides.
+            overrides. The legacy keyword ``test_update_func`` is supported as
+            an alias.
         pretest_update_func : Optional[Callable[[], Dict[str, Any]]], default None
             Optional function returning a pretest update mapping used to
             override target/feature/spec pretests. The callable takes no
@@ -2086,6 +2087,12 @@ class Segment:
             )
         searcher = self.searcher
         searcher.segment = self
+
+        # Support legacy argument name ``test_update_func`` by aliasing it to
+        # ``modeltest_update_func`` when the modern parameter is not supplied.
+        legacy_modeltest_update_func = legacy_kwargs.pop("test_update_func", None)
+        if modeltest_update_func is None and legacy_modeltest_update_func is not None:
+            modeltest_update_func = legacy_modeltest_update_func
 
         legacy_overwrite = legacy_kwargs.pop("override", None)
         legacy_max_periods = legacy_kwargs.pop("max_periods", None)
@@ -2230,8 +2237,9 @@ class Segment:
         overwrite: bool = False,
         top_n: int = 10,
         sample: str = 'in',
+        cm_filter_func: Optional[Callable[[CM], bool]] = None,
         **legacy_kwargs: Any
-    ) -> List[CM]:
+    ) -> None:
         """
         Re-compute rankings for candidate models using new weights.
 
@@ -2253,33 +2261,38 @@ class Segment:
         sample : {'in', 'full'}, default 'in'
             Sample to use when retrieving diagnostics for ranking. Choose
             ``'in'`` for in-sample diagnostics or ``'full'`` for full-sample.
-
-        Returns
-        -------
-        List[CM]
-            The top ``top_n`` candidate models ordered by the refreshed
-            composite score.
+        cm_filter_func : Callable[[CM], bool], optional
+            Optional predicate applied to candidate models prior to re-ranking.
+            Only models for which the callable returns ``True`` are included in
+            the re-ranking set. This is useful for excluding subsets of models
+            (for example, by tag or metadata) without mutating the stored
+            collections.
 
         Raises
         ------
         RuntimeError
             If no search has been performed or if there are no models to rank.
+        TypeError
+            If ``cm_filter_func`` is provided but is not callable.
 
         Examples
         --------
         >>> # After running search_cms(...)
-        >>> refreshed = segment.rerank_cms(
+        >>> segment.rerank_cms(
         ...     rank_weights=(0.4, 0.4, 0.2),
         ...     all_passed=True,
         ...     top_n=5
         ... )
-        >>> refreshed[0].model_id
+        >>> segment.top_cms[0].model_id
         'cm1'
         """
         legacy_overwrite = legacy_kwargs.pop("override", None)
         if legacy_kwargs:
             unexpected = ", ".join(sorted(legacy_kwargs.keys()))
             raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+
+        if cm_filter_func is not None and not callable(cm_filter_func):
+            raise TypeError("Parameter 'cm_filter_func' must be callable when provided.")
 
         effective_overwrite = overwrite if legacy_overwrite is None else bool(legacy_overwrite)
 
@@ -2317,6 +2330,14 @@ class Segment:
                     "Segment has no candidate models to rerank."
                 )
             candidate_cms = list(self.cms.values())
+
+        if cm_filter_func is not None:
+            # Apply caller-supplied predicate to narrow the ranking population.
+            candidate_cms = [cm for cm in candidate_cms if cm_filter_func(cm)]
+            if not candidate_cms:
+                raise RuntimeError(
+                    "No candidate models remain after applying 'cm_filter_func'."
+                )
 
         # Track existing models to identify newly promoted entries when
         # re-ranking across all passed combinations.
@@ -2385,7 +2406,7 @@ class Segment:
                 )
                 print(formatted)
 
-        return top_models
+        return None
 
     def _normalize_cm_collection(
         self, collection: Union[Dict[str, CM], List[CM]]
@@ -2710,6 +2731,8 @@ class Segment:
         which: str = "both",
         base_dir: Union[str, Path, None] = None,
         search_id: Optional[str] = None,
+        rerank_weights: Tuple[float, float, float] = (1, 1, 1),
+        cm_filter_func: Optional[Callable[[CM], bool]] = None,
     ) -> None:
         """
         Load persisted candidate models and bind them to the current DataManager.
@@ -2726,6 +2749,15 @@ class Segment:
             ``cms/<search_id>``. When omitted, the most recent search tracked
             for this segment is used if present, otherwise legacy locations are
             scanned.
+        rerank_weights : Tuple[float, float, float], default (1, 1, 1)
+            Optional weights forwarded to :meth:`rerank_cms` after models are
+            loaded. When a tuple of three numeric values is provided, the
+            method automatically re-ranks the loaded candidate models using the
+            supplied weights with ``overwrite=True``.
+        cm_filter_func : Callable[[CM], bool], optional
+            Optional predicate forwarded to :meth:`rerank_cms` to limit which
+            candidate models participate in automatic reranking. When provided,
+            only models for which the callable returns ``True`` are reranked.
 
         Returns
         -------
@@ -2740,6 +2772,10 @@ class Segment:
         recent runs while still tolerating legacy top-level folders when no
         search metadata is available.
 
+        When ``rerank_weights`` is supplied and models are available, the
+        loaded models are automatically re-ranked using
+        :meth:`Segment.rerank_cms` with ``overwrite=True``.
+
         Empty CM directories (or missing ``index.json`` files) are tolerated and
         will result in zero loaded models for that group.
 
@@ -2748,11 +2784,25 @@ class Segment:
         ValueError
             If ``which`` is not one of ``'selected'``, ``'passed'``, or
             ``'both'`` or if the segment lacks a bound DataManager.
+            Raised when ``rerank_weights`` is not a tuple of length three.
+        TypeError
+            If any ``rerank_weights`` entry is not numeric or when
+            ``cm_filter_func`` is provided but is not callable.
         """
         if which not in {"selected", "passed", "both"}:
             raise ValueError("Parameter 'which' must be 'selected', 'passed', or 'both'.")
         if self.dm is None:
             raise ValueError("Segment must have an attached DataManager before loading CMs.")
+
+        if rerank_weights is not None:
+            if not isinstance(rerank_weights, tuple) or len(rerank_weights) != 3:
+                raise ValueError(
+                    "Parameter 'rerank_weights' must be a tuple of three numeric values."
+                )
+            if not all(isinstance(weight, (int, float)) for weight in rerank_weights):
+                raise TypeError("Each entry in 'rerank_weights' must be numeric.")
+        if cm_filter_func is not None and not callable(cm_filter_func):
+            raise TypeError("Parameter 'cm_filter_func' must be callable when provided.")
 
         # Always resolve directories relative to a capitalized "Segment" root
         # so loading mirrors the persistence convention used in ``save_cms``.
@@ -2807,6 +2857,18 @@ class Segment:
                 else dirs["passed_dir"]
             )
             _load_group(passed_dir, self.passed_cms)
+
+        # Re-rank loaded candidate models when weights are provided to keep
+        # rankings aligned with the latest preferences. Use passed CMs when
+        # available; otherwise, fall back to the currently loaded selection.
+        has_loaded_models = bool(self.cms or self.passed_cms)
+        if rerank_weights is not None and has_loaded_models:
+            self.rerank_cms(
+                rank_weights=rerank_weights,
+                overwrite=True,
+                all_passed=bool(self.passed_cms),
+                cm_filter_func=cm_filter_func,
+            )
 
         summary = {
             "passed": len(self.passed_cms),
