@@ -1194,6 +1194,102 @@ class ScenManager:
             
         return results
 
+    @property
+    def scen_base_measures(self) -> Dict[str, Dict[str, Dict[str, pd.Series]]]:
+        """
+        Compute layered quarterly measures for base-variable scenarios.
+
+        Returns
+        -------
+        Dict[str, Dict[str, Dict[str, pd.Series]]]
+            Nested dictionary organised as ``{horizon: {metric: {scen_set: Series}}}``.
+            Horizons include ``'9Q'`` and ``'12Q'``. Each series is indexed by
+            scenario name (e.g., ``Base``, ``Sev``, ``Adv``).
+
+        Examples
+        --------
+        >>> measures = scen_mgr.scen_base_measures
+        >>> measures['9Q']['Sum']['EWST2025']['Base']  # Sum of P1-P9
+        >>> measures['12Q']['Change']['EWST2025']['Sev']  # P12 - P0 difference
+        """
+        base_qtr_results = self.forecast_y_base_qtr_df
+        if not base_qtr_results:
+            return {}
+
+        horizons = {'9Q': 9, '12Q': 12}
+        metrics = ['Sum', 'Change', '%Change', 'CAGR']
+        measures: Dict[str, Dict[str, Dict[str, pd.Series]]] = {
+            horizon: {metric: {} for metric in metrics} for horizon in horizons
+        }
+
+        for scen_set, df in base_qtr_results.items():
+            if df is None or df.empty or 'Period' not in df.columns:
+                continue
+
+            scenario_columns = [
+                col for col in df.columns if col not in {'Period', 'Fitted_IS', 'Pred_OOS', 'Actual'}
+            ]
+            if not scenario_columns:
+                continue
+
+            period_labels = df['Period'].astype(str)
+
+            # Pre-compute P0 values per scenario for reuse.
+            p0_mask = period_labels == 'P0'
+            p0_values = {
+                col: pd.to_numeric(df.loc[p0_mask, col], errors='coerce').dropna().iloc[-1]
+                if not pd.to_numeric(df.loc[p0_mask, col], errors='coerce').dropna().empty else np.nan
+                for col in scenario_columns
+            }
+
+            for horizon_label, total_quarters in horizons.items():
+                horizon_periods = {f'P{i}' for i in range(1, total_quarters + 1)}
+                sum_dict: Dict[str, float] = {}
+                change_dict: Dict[str, float] = {}
+                pct_change_dict: Dict[str, float] = {}
+                cagr_dict: Dict[str, float] = {}
+
+                # Evaluate each scenario column for the current horizon.
+                for scen_col in scenario_columns:
+                    numeric_series = pd.to_numeric(df[scen_col], errors='coerce')
+
+                    horizon_mask = period_labels.isin(horizon_periods)
+                    horizon_values = numeric_series[horizon_mask]
+
+                    # Use min_count to keep NaN when no valid values exist.
+                    sum_val = horizon_values.sum(min_count=1)
+
+                    end_mask = period_labels == f'P{total_quarters}'
+                    end_vals = numeric_series[end_mask].dropna()
+                    end_val = end_vals.iloc[-1] if not end_vals.empty else np.nan
+
+                    base_val = p0_values.get(scen_col, np.nan)
+                    change_val = end_val - base_val if not np.isnan(end_val) and not np.isnan(base_val) else np.nan
+
+                    if np.isnan(change_val) or base_val == 0:
+                        pct_val = np.nan
+                    else:
+                        pct_val = (change_val / base_val) * 100
+
+                    # Avoid invalid CAGR values when base or end are non-positive.
+                    if np.isnan(base_val) or np.isnan(end_val) or base_val <= 0 or end_val <= 0:
+                        cagr_val = np.nan
+                    else:
+                        years = total_quarters / 4
+                        cagr_val = (end_val / base_val) ** (1 / years) - 1
+
+                    sum_dict[scen_col] = sum_val
+                    change_dict[scen_col] = change_val
+                    pct_change_dict[scen_col] = pct_val
+                    cagr_dict[scen_col] = cagr_val
+
+                measures[horizon_label]['Sum'][scen_set] = pd.Series(sum_dict)
+                measures[horizon_label]['Change'][scen_set] = pd.Series(change_dict)
+                measures[horizon_label]['%Change'][scen_set] = pd.Series(pct_change_dict)
+                measures[horizon_label]['CAGR'][scen_set] = pd.Series(cagr_dict)
+
+        return measures
+
     def plot_forecasts(
         self,
         scen_set: str,
