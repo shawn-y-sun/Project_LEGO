@@ -2237,6 +2237,7 @@ class Segment:
         overwrite: bool = False,
         top_n: int = 10,
         sample: str = 'in',
+        cm_filter_func: Optional[Callable[[CM], bool]] = None,
         **legacy_kwargs: Any
     ) -> None:
         """
@@ -2260,11 +2261,19 @@ class Segment:
         sample : {'in', 'full'}, default 'in'
             Sample to use when retrieving diagnostics for ranking. Choose
             ``'in'`` for in-sample diagnostics or ``'full'`` for full-sample.
+        cm_filter_func : Callable[[CM], bool], optional
+            Optional predicate applied to candidate models prior to re-ranking.
+            Only models for which the callable returns ``True`` are included in
+            the re-ranking set. This is useful for excluding subsets of models
+            (for example, by tag or metadata) without mutating the stored
+            collections.
 
         Raises
         ------
         RuntimeError
             If no search has been performed or if there are no models to rank.
+        TypeError
+            If ``cm_filter_func`` is provided but is not callable.
 
         Examples
         --------
@@ -2281,6 +2290,9 @@ class Segment:
         if legacy_kwargs:
             unexpected = ", ".join(sorted(legacy_kwargs.keys()))
             raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+
+        if cm_filter_func is not None and not callable(cm_filter_func):
+            raise TypeError("Parameter 'cm_filter_func' must be callable when provided.")
 
         effective_overwrite = overwrite if legacy_overwrite is None else bool(legacy_overwrite)
 
@@ -2318,6 +2330,14 @@ class Segment:
                     "Segment has no candidate models to rerank."
                 )
             candidate_cms = list(self.cms.values())
+
+        if cm_filter_func is not None:
+            # Apply caller-supplied predicate to narrow the ranking population.
+            candidate_cms = [cm for cm in candidate_cms if cm_filter_func(cm)]
+            if not candidate_cms:
+                raise RuntimeError(
+                    "No candidate models remain after applying 'cm_filter_func'."
+                )
 
         # Track existing models to identify newly promoted entries when
         # re-ranking across all passed combinations.
@@ -2712,6 +2732,7 @@ class Segment:
         base_dir: Union[str, Path, None] = None,
         search_id: Optional[str] = None,
         rerank_weights: Tuple[float, float, float] = (1, 1, 1),
+        cm_filter_func: Optional[Callable[[CM], bool]] = None,
     ) -> None:
         """
         Load persisted candidate models and bind them to the current DataManager.
@@ -2733,6 +2754,10 @@ class Segment:
             loaded. When a tuple of three numeric values is provided, the
             method automatically re-ranks the loaded candidate models using the
             supplied weights with ``overwrite=True``.
+        cm_filter_func : Callable[[CM], bool], optional
+            Optional predicate forwarded to :meth:`rerank_cms` to limit which
+            candidate models participate in automatic reranking. When provided,
+            only models for which the callable returns ``True`` are reranked.
 
         Returns
         -------
@@ -2761,7 +2786,8 @@ class Segment:
             ``'both'`` or if the segment lacks a bound DataManager.
             Raised when ``rerank_weights`` is not a tuple of length three.
         TypeError
-            If any ``rerank_weights`` entry is not numeric.
+            If any ``rerank_weights`` entry is not numeric or when
+            ``cm_filter_func`` is provided but is not callable.
         """
         if which not in {"selected", "passed", "both"}:
             raise ValueError("Parameter 'which' must be 'selected', 'passed', or 'both'.")
@@ -2775,6 +2801,8 @@ class Segment:
                 )
             if not all(isinstance(weight, (int, float)) for weight in rerank_weights):
                 raise TypeError("Each entry in 'rerank_weights' must be numeric.")
+        if cm_filter_func is not None and not callable(cm_filter_func):
+            raise TypeError("Parameter 'cm_filter_func' must be callable when provided.")
 
         # Always resolve directories relative to a capitalized "Segment" root
         # so loading mirrors the persistence convention used in ``save_cms``.
@@ -2839,6 +2867,7 @@ class Segment:
                 rank_weights=rerank_weights,
                 overwrite=True,
                 all_passed=bool(self.passed_cms),
+                cm_filter_func=cm_filter_func,
             )
 
         summary = {
