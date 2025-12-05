@@ -44,6 +44,11 @@ class ModelTestBase(ABC):
         Custom and human-readable name for the test instance (defaults to class name).
     filter_mode : str, default 'moderate'
         How to evaluate passed results: 'strict' or 'moderate'.
+    filter_on : bool, default True
+        Whether this test participates in filter evaluation aggregation.
+    force_filter_pass : Optional[bool], default None
+        Override for the computed :pyattr:`test_filter` result. When provided,
+        the boolean value is returned directly, bypassing internal logic.
     """
     category: str = 'base'
     _allowed_modes = {'strict', 'moderate'}  # Allowed evaluation modes
@@ -53,12 +58,36 @@ class ModelTestBase(ABC):
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
         filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
         if filter_mode not in self._allowed_modes:
             raise ValueError(f"filter_mode must be one of {self._allowed_modes}")
+        if force_filter_pass is not None and not isinstance(force_filter_pass, bool):
+            raise TypeError("force_filter_pass must be a boolean or None")
         self.alias = alias or ''
         self.filter_mode = filter_mode
         self.filter_on = filter_on
+        self.force_filter_pass = force_filter_pass
+
+    def _apply_force_filter_pass(self, result: bool) -> bool:
+        """
+        Apply the ``force_filter_pass`` override when present.
+
+        Parameters
+        ----------
+        result : bool
+            Computed filter status.
+
+        Returns
+        -------
+        bool
+            Either the original ``result`` or the forced override when
+            :pyattr:`force_filter_pass` is explicitly set.
+        """
+
+        if self.force_filter_pass is None:
+            return bool(result)
+        return bool(self.force_filter_pass)
 
     @property
     def name(self) -> str:
@@ -118,9 +147,15 @@ class FitMeasure(ModelTestBase):
         n_features: int,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = False
+        filter_on: bool = False,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.actual = actual
         self.predicted = predicted
         self.n = len(actual)
@@ -165,7 +200,7 @@ class FitMeasure(ModelTestBase):
         """
         Always pass—this test is for reporting measures, not for filtering.
         """
-        return True
+        return self._apply_force_filter_pass(True)
 
 
 # ----------------------------------------------------------------------------
@@ -194,9 +229,15 @@ class ErrorMeasure(ModelTestBase):
         predicted: pd.Series,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = False
+        filter_on: bool = False,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.errors = actual - predicted
         # this is only for reporting: do not include in filter_pass
 
@@ -237,7 +278,7 @@ class ErrorMeasure(ModelTestBase):
         """
         Always pass—this test is for reporting measures, not for filtering.
         """
-        return True
+        return self._apply_force_filter_pass(True)
 
 # ----------------------------------------------------------------------------
 # R2Test class
@@ -266,9 +307,15 @@ class R2Test(ModelTestBase):
         thresholds: Optional[Dict[str, float]] = {'strict': 0.6, 'moderate': 0.3},
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.r2 = r2
         self.thresholds = thresholds
         # self.filter_mode_descs = {
@@ -314,7 +361,7 @@ class R2Test(ModelTestBase):
     @property
     def test_filter(self) -> bool:
         thr = self.thresholds[self.filter_mode]
-        return self.r2 >= thr
+        return self._apply_force_filter_pass(self.r2 >= thr)
 
 # ----------------------------------------------------------------------------
 # AutocorrTest class
@@ -373,9 +420,15 @@ class AutocorrTest(ModelTestBase):
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
         test_dict: Optional[Dict[str, Callable]] = None,
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         # store residuals array
         self.results = results
         # assign test functions (default or user-provided)
@@ -435,9 +488,11 @@ class AutocorrTest(ModelTestBase):
         passed_count = int(results.sum())
         total = len(results)
         if self.filter_mode == 'strict':
-            return passed_count == total
+            outcome = passed_count == total
         else:
-            return passed_count >= (total / 2)
+            outcome = passed_count >= (total / 2)
+
+        return self._apply_force_filter_pass(outcome)
 
 # ----------------------------------------------------------------------------
 # HetTest class
@@ -495,9 +550,15 @@ class HetTest(ModelTestBase):
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
         test_dict: Optional[Dict[str, Callable]] = None,
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.resids = np.asarray(resids)
         self.exog = np.asarray(exog)
         self.test_funcs = test_dict if test_dict is not None else het_test_dict
@@ -539,7 +600,8 @@ class HetTest(ModelTestBase):
     def test_filter(self) -> bool:
         passed_count = int(self.test_result['Passed'].sum())
         total = len(self.test_funcs)
-        return passed_count == total if self.filter_mode == 'strict' else passed_count >= (total / 2)
+        outcome = passed_count == total if self.filter_mode == 'strict' else passed_count >= (total / 2)
+        return self._apply_force_filter_pass(outcome)
 
 # ----------------------------------------------------------------------------
 # NormalityTest class
@@ -573,9 +635,15 @@ class NormalityTest(ModelTestBase):
         alpha: Union[float, Dict[str, float]] = 0.05,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.series = series
         self.alpha = alpha
         self.test_dict = normality_test_dict
@@ -619,8 +687,11 @@ class NormalityTest(ModelTestBase):
     def test_filter(self) -> bool:
         passed = self.test_result['Passed']
         if self.filter_mode == 'strict':
-            return passed.all()
-        return passed.sum() >= len(passed) / 2
+            outcome = passed.all()
+        else:
+            outcome = passed.sum() >= len(passed) / 2
+
+        return self._apply_force_filter_pass(outcome)
     
 
 # ----------------------------------------------------------------------------
@@ -722,9 +793,15 @@ class StationarityTest(ModelTestBase):
         filter_mode: str = 'moderate',
         test_dict: Optional[Dict[str, Callable]] = None,
         test_threshold: Optional[Dict[str, Tuple[float, str]]] = None,
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.series = pd.Series(series)
         self.test_dict = test_dict if test_dict is not None else stationarity_test_dict
         self.thresholds = test_threshold if test_threshold is not None else stationarity_test_threshold
@@ -796,8 +873,11 @@ class StationarityTest(ModelTestBase):
         passed_count = int(results.sum())
         total = len(results)
         if self.filter_mode == 'strict':
-            return passed_count == total
-        return passed_count >= (total / 2)
+            outcome = passed_count == total
+        else:
+            outcome = passed_count >= (total / 2)
+
+        return self._apply_force_filter_pass(outcome)
     
 
     @property
@@ -910,9 +990,15 @@ class FullStationarityTest(ModelTestBase):
         test_dict: Optional[Dict[str, Callable]] = None,
         test_threshold: Optional[Dict[str, Tuple[float, str]]] = None,
         filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
         test_class: Type[StationarityTest] = StationarityTest,
     ) -> None:
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.variable = variable
         self.dm = dm
         self.sample = sample.lower()
@@ -972,7 +1058,7 @@ class FullStationarityTest(ModelTestBase):
 
         if self._test_filter_cache is None:
             _ = self.test_result
-        return bool(self._test_filter_cache)
+        return self._apply_force_filter_pass(bool(self._test_filter_cache))
 
     def _build_feature_series(self, variable_spec: Union[str, TSFM, RgmVar, CondVar]) -> pd.Series:
         """
@@ -1268,9 +1354,15 @@ class TargetStationarityTest(ModelTestBase):
         test_dict: Optional[Dict[str, Callable]] = None,
         test_threshold: Optional[Dict[str, Tuple[float, str]]] = None,
         filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
         test_class: Type[StationarityTest] = StationarityTest,
     ) -> None:
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.target = target
         self.dm = dm
         self.sample = sample.lower()
@@ -1361,7 +1453,7 @@ class TargetStationarityTest(ModelTestBase):
 
         if self._test_filter_cache is None:
             _ = self.test_result
-        return bool(self._test_filter_cache)
+        return self._apply_force_filter_pass(bool(self._test_filter_cache))
 
     @property
     def caveat(self) -> str:
@@ -1544,8 +1636,14 @@ class CoefTest(ModelTestBase):
         filter_mode: str = 'moderate',
         filter_on: bool = True,
         weak_limit: Optional[int] = None,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.pvalues = pvalues
         # Set α based on mode
         self.alpha = 0.05 if filter_mode == 'strict' else 0.10
@@ -1605,12 +1703,12 @@ class CoefTest(ModelTestBase):
         # moderate filter (user-requested safeguard).
         high_pvalue_count = int((self.pvalues > 0.5).sum())
         if self.weak_limit == 1 and high_pvalue_count > 1:
-            return False
+            return self._apply_force_filter_pass(False)
 
         # Default rule: all coefficients below the alpha threshold.
         base_pass = self.test_result['Passed'].all()
         if self.filter_mode != 'moderate' or self.weak_limit is None:
-            return base_pass
+            return self._apply_force_filter_pass(base_pass)
 
         # Under moderate filtering, allow up to `weak_limit` coefficients to be
         # in the (0.05, 0.10) band while still requiring everyone to remain
@@ -1618,11 +1716,11 @@ class CoefTest(ModelTestBase):
         weak_band = (self.pvalues > 0.05) & (self.pvalues < 0.10)
         weak_count = int(weak_band.sum())
         if weak_count > self.weak_limit:
-            return False
+            return self._apply_force_filter_pass(False)
 
         # Ensure no coefficient exceeds the relaxed alpha even when weak slots
         # are available.
-        return base_pass
+        return self._apply_force_filter_pass(base_pass)
 
 
 # ----------------------------------------------------------------------------
@@ -1656,9 +1754,15 @@ class GroupTest(ModelTestBase):
         alpha: float = 0.05,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.model_result = model_result
         self.vars = vars
         self.alpha = alpha
@@ -1707,7 +1811,7 @@ class GroupTest(ModelTestBase):
         """
         Return True if the F-test p-value meets threshold for filter_mode.
         """
-        return bool(self.test_result['Passed'].iloc[0])
+        return self._apply_force_filter_pass(bool(self.test_result['Passed'].iloc[0]))
 
 
 # ----------------------------------------------------------------------------
@@ -1752,9 +1856,15 @@ class SignCheck(ModelTestBase):
         coefficients: pd.Series,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.feature_list = feature_list
         self.coefficients = coefficients
         self.filter_mode_descs = {
@@ -1845,8 +1955,8 @@ class SignCheck(ModelTestBase):
         with matching signs.
         """
         if self.test_result.empty:
-            return True  # No expectations to check
-        return self.test_result['Passed'].all()
+            return self._apply_force_filter_pass(True)  # No expectations to check
+        return self._apply_force_filter_pass(self.test_result['Passed'].all())
 
 
 # ----------------------------------------------------------------------------
@@ -1902,9 +2012,15 @@ class BaseGrowthTest(ModelTestBase):
         freq: str,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = False
+        filter_on: bool = False,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         if not isinstance(coeffs, pd.Series):
             raise TypeError("coeffs must be a pandas Series")
         self.coeffs = coeffs
@@ -1965,7 +2081,7 @@ class BaseGrowthTest(ModelTestBase):
     def test_filter(self) -> bool:
         value = self._compute_base_growth()
         thr = self._thresholds[self.filter_mode]
-        return (-thr <= value <= thr)
+        return self._apply_force_filter_pass(-thr <= value <= thr)
 
 
 # ----------------------------------------------------------------------------
@@ -1993,9 +2109,15 @@ class VIFTest(ModelTestBase):
         exog: Union[np.ndarray, pd.DataFrame, list],
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.exog = pd.DataFrame(exog)
         self.filter_mode_descs = {
         'strict': 'Threshold = 5',
@@ -2044,7 +2166,7 @@ class VIFTest(ModelTestBase):
         Passes if all VIFs are below the threshold implied by filter_mode.
         """
         threshold = 5.0 if self.filter_mode == 'strict' else 10.0
-        return (self.test_result['VIF'] <= threshold).all()
+        return self._apply_force_filter_pass((self.test_result['VIF'] <= threshold).all())
     
 # ----------------------------------------------------------------------------
 # Co-integration Test
@@ -2094,9 +2216,15 @@ class CointTest(ModelTestBase):
         test_threshold: Optional[Dict[str, Tuple[float, str]]] = None,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.X_vars = X_vars
         self.resids = resids
         self.test_dict = test_dict if test_dict is not None else stationarity_test_dict
@@ -2273,10 +2401,10 @@ class CointTest(ModelTestBase):
         """
         results = self.test_result
         if results.empty:
-            return False
-            
+            return self._apply_force_filter_pass(False)
+
         # All variables must pass their expectations (logic already handled in test_result)
-        return results['Passed'].all()
+        return self._apply_force_filter_pass(results['Passed'].all())
 
 class MultiFullStationarityTest(ModelTestBase):
     """
@@ -2349,10 +2477,16 @@ class MultiFullStationarityTest(ModelTestBase):
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
         filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
         full_test_class: Type[FullStationarityTest] = FullStationarityTest,
         stationarity_test_class: Type[StationarityTest] = StationarityTest,
     ) -> None:
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         if not specs:
             raise ValueError("specs must contain at least one feature specification.")
         self.specs = specs
@@ -2457,9 +2591,11 @@ class MultiFullStationarityTest(ModelTestBase):
         """Return True if all staged stationarity tests pass for every spec."""
 
         if not self._individual_tests:
-            return True
+            return self._apply_force_filter_pass(True)
 
-        return all(test.test_filter for test in self._individual_tests.values())
+        return self._apply_force_filter_pass(
+            all(test.test_filter for test in self._individual_tests.values())
+        )
 
     @staticmethod
     def _flatten_specs(items: Any) -> List[Any]:
@@ -2533,9 +2669,15 @@ class MultiStationarityTest(ModelTestBase):
         test_threshold: Optional[Dict[str, Tuple[float, str]]] = None,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.dataframe = dataframe
         self.test_dict = test_dict if test_dict is not None else stationarity_test_dict
         self.thresholds = test_threshold if test_threshold is not None else stationarity_test_threshold
@@ -2623,7 +2765,9 @@ class MultiStationarityTest(ModelTestBase):
         so we just need to check if all variables passed.
         """
         if not self._individual_tests:
-            return True  # No tests to run
-            
+            return self._apply_force_filter_pass(True)  # No tests to run
+
         # All variables must pass their individual stationarity tests
-        return all(test.test_filter for test in self._individual_tests.values())
+        return self._apply_force_filter_pass(
+            all(test.test_filter for test in self._individual_tests.values())
+        )

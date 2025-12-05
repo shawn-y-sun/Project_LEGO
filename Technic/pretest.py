@@ -232,6 +232,10 @@ class BasePreTest(ABC):
         return a dictionary whose values are :class:`ModelTestBase` instances
         (added or replaced) or dictionaries of attribute overrides targeting
         existing aliases.
+    force_filter_pass : Optional[bool], optional
+        Override for the computed :pyattr:`test_filter` result. When provided,
+        the boolean value is returned directly, bypassing assembled test set
+        evaluation.
 
     Raises
     ------
@@ -256,10 +260,14 @@ class BasePreTest(ABC):
             Callable[[object, DataManager, str, Optional[Sequence[Any]]], Dict[str, ModelTestBase]]
         ] = None,
         test_update_func: Optional[Callable[..., Dict[str, Any]]] = None,
+        force_filter_pass: Optional[bool] = None,
     ) -> None:
         normalized_sample = str(sample).lower()
         if normalized_sample not in {"in", "full"}:
             raise ValueError("sample must be either 'in' or 'full'")
+
+        if force_filter_pass is not None and not isinstance(force_filter_pass, bool):
+            raise TypeError("force_filter_pass must be a boolean or None")
 
         self.subject = subject
         self.dm = dm
@@ -267,6 +275,7 @@ class BasePreTest(ABC):
         self.outlier_idx = list(outlier_idx) if outlier_idx else []
         self.testset_func = testset_func
         self.test_update_func = test_update_func
+        self.force_filter_pass = force_filter_pass
         self.external_context: Dict[str, Any] = {}
 
     @property
@@ -314,7 +323,14 @@ class BasePreTest(ABC):
         """Return the filter outcome from the assembled test set."""
 
         passed, _ = self.testset.filter_pass()
-        return passed
+        return self._apply_force_filter_pass(passed)
+
+    def _apply_force_filter_pass(self, result: bool) -> bool:
+        """Apply the forced filter pass override when supplied."""
+
+        if self.force_filter_pass is None:
+            return bool(result)
+        return bool(self.force_filter_pass)
 
     def apply_context(self, context: Mapping[str, Any]) -> None:
         """Store externally provided context for dependency-aware tests.
@@ -368,6 +384,7 @@ class TargetTest(BasePreTest):
             Callable[[object, DataManager, str, Optional[Sequence[Any]]], Dict[str, ModelTestBase]]
         ] = None,
         test_update_func: Optional[Callable[..., Dict[str, Any]]] = None,
+        force_filter_pass: Optional[bool] = None,
     ) -> None:
         super().__init__(
             subject=subject,
@@ -376,6 +393,7 @@ class TargetTest(BasePreTest):
             outlier_idx=outlier_idx,
             testset_func=testset_func,
             test_update_func=test_update_func,
+            force_filter_pass=force_filter_pass,
         )
 
     @property
@@ -430,6 +448,7 @@ class FeatureTest(BasePreTest):
         ] = None,
         test_update_func: Optional[Callable[..., Dict[str, Any]]] = None,
         target_test_result: Optional[bool] = None,
+        force_filter_pass: Optional[bool] = None,
     ) -> None:
         super().__init__(
             subject=subject,
@@ -438,6 +457,7 @@ class FeatureTest(BasePreTest):
             outlier_idx=outlier_idx,
             testset_func=testset_func,
             test_update_func=test_update_func,
+            force_filter_pass=force_filter_pass,
         )
         self.target_test_result: Optional[bool] = (
             None if target_test_result is None else bool(target_test_result)
@@ -518,11 +538,11 @@ class FeatureTest(BasePreTest):
         passed, _ = self.testset.filter_pass()
         expected_stationary = self.expected_stationary
         if expected_stationary is None:
-            return passed
+            return self._apply_force_filter_pass(passed)
 
         # When the target is non-stationary, invert the outcome so non-stationary
         # features satisfy the dependency requirement.
-        return passed if expected_stationary else not passed
+        return self._apply_force_filter_pass(passed if expected_stationary else not passed)
 
 
 class SpecTest(BasePreTest):
@@ -555,6 +575,7 @@ class SpecTest(BasePreTest):
             Callable[[object, DataManager, str, Optional[Sequence[Any]]], Dict[str, ModelTestBase]]
         ] = None,
         test_update_func: Optional[Callable[..., Dict[str, Any]]] = None,
+        force_filter_pass: Optional[bool] = None,
     ) -> None:
         super().__init__(
             subject=subject,
@@ -563,6 +584,7 @@ class SpecTest(BasePreTest):
             outlier_idx=outlier_idx,
             testset_func=testset_func,
             test_update_func=test_update_func,
+            force_filter_pass=force_filter_pass,
         )
 
     @property
