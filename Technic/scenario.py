@@ -1219,6 +1219,12 @@ class ScenManager:
             Horizons include ``'9Q'`` and ``'12Q'``. Each series is indexed by
             scenario name (e.g., ``Base``, ``Sev``, ``Adv``).
 
+        Notes
+        -----
+        When a scenario column does not provide a P0 value, metrics that rely on a
+        baseline (``Change``, ``%Change``, and ``CAGR``) use the Actual value at P0
+        as the benchmark to avoid returning ``NaN``.
+
         Examples
         --------
         >>> measures = scen_mgr.scen_base_measures
@@ -1247,13 +1253,21 @@ class ScenManager:
 
             period_labels = df['Period'].astype(str)
 
-            # Pre-compute P0 values per scenario for reuse.
+            # Pre-compute P0 values per scenario for reuse. When scenario columns
+            # lack a P0 point, fall back to the Actual value at P0 so delta metrics
+            # (Change, %Change, CAGR) remain meaningful.
             p0_mask = period_labels == 'P0'
-            p0_values = {
-                col: pd.to_numeric(df.loc[p0_mask, col], errors='coerce').dropna().iloc[-1]
-                if not pd.to_numeric(df.loc[p0_mask, col], errors='coerce').dropna().empty else np.nan
-                for col in scenario_columns
-            }
+            actual_p0_val = (
+                pd.to_numeric(df.loc[p0_mask, 'Actual'], errors='coerce').dropna().iloc[-1]
+                if 'Actual' in df.columns and not pd.to_numeric(df.loc[p0_mask, 'Actual'], errors='coerce').dropna().empty
+                else np.nan
+            )
+            p0_values = {}
+            for col in scenario_columns:
+                scen_p0_series = pd.to_numeric(df.loc[p0_mask, col], errors='coerce').dropna()
+                scen_p0_val = scen_p0_series.iloc[-1] if not scen_p0_series.empty else np.nan
+                base_val = scen_p0_val if not np.isnan(scen_p0_val) else actual_p0_val
+                p0_values[col] = base_val
 
             for horizon_label, total_quarters in horizons.items():
                 horizon_periods = {f'P{i}' for i in range(1, total_quarters + 1)}
