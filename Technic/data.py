@@ -1802,6 +1802,23 @@ class DataManager:
         return self._internal_loader.out_sample_idx
 
     @property
+    def full_sample_idx(self) -> pd.Index:
+        """
+        Get the full sample index combining in-sample and out-of-sample observations.
+
+        Returns
+        -------
+        pd.Index
+            Index covering both in-sample and out-of-sample periods.
+
+        Examples
+        --------
+        >>> combined_idx = dm.full_sample_idx
+        >>> assert combined_idx.equals(dm.in_sample_idx.union(dm.out_sample_idx))
+        """
+        return self._internal_loader.in_sample_idx.union(self._internal_loader.out_sample_idx)
+
+    @property
     def scen_in_sample_idx(self) -> Optional[pd.Index]:
         """
         Get the scenario in-sample index from the internal loader.

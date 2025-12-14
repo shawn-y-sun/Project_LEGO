@@ -1,23 +1,28 @@
 # =============================================================================
 # module: cm.py
-# Purpose: Candidate Model wrapper managing in-sample, out-of-sample,
-#          and full-sample fitting, handling outliers, and exposing reports
-# Dependencies: pandas, numpy, typing, .model.ModelBase, .feature.Feature,
+# Purpose: Candidate Model wrapper managing in-sample, out-of-sample, and full-sample fitting.
+# Key Types/Classes: CM
+# Key Functions: build, bind_data_manager
+# Dependencies: pandas, numpy, matplotlib.pyplot, typing, .model.ModelBase, .feature.Feature,
 #               .feature.DumVar, .scenario.ScenManager
 # =============================================================================
 
 import warnings
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
+import copy
 import pandas as pd
 import numpy as np
 from pandas.api.types import is_numeric_dtype, is_datetime64_any_dtype
-from typing import Type, List, Dict, Any, Optional, Union, Tuple
+from typing import Type, List, Dict, Any, Optional, Union, Tuple, TYPE_CHECKING
 import matplotlib.pyplot as plt
 
 from .model import ModelBase
 from .feature import DumVar, Feature
 from .scenario import ScenManager
+
+if TYPE_CHECKING:
+    from .data import DataManager
 
 
 class CM:
@@ -108,6 +113,29 @@ class CM:
         # Cached specs and outlier indices
         self.specs: List[Any] = []
         self.outlier_idx: List[str] = []
+
+    def bind_data_manager(self, dm: "DataManager") -> None:
+        """
+        Attach a DataManager instance to the candidate model and its fitted models.
+
+        Parameters
+        ----------
+        dm : DataManager
+            The DataManager instance to bind to this candidate model.
+
+        Raises
+        ------
+        ValueError
+            If ``dm`` is ``None``.
+        """
+        if dm is None:
+            raise ValueError("Cannot bind a null DataManager to CM.")
+
+        # Store the data manager on the CM and propagate it to fitted models.
+        self.dm = dm
+        for model in (self.model_in, self.model_full):
+            if model is not None and hasattr(model, "dm"):
+                model.dm = dm
 
     def build(
         self,
@@ -209,6 +237,42 @@ class CM:
         if self.model_full is not None:
             return self.model_full.scen_manager
         return None
+
+    def __getstate__(self) -> Dict[str, Any]:
+        """
+        Prepare a picklable CM state without DataManager references.
+
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary representing the CM state with DataManager references
+            removed from the CM and any fitted models.
+        """
+        state = self.__dict__.copy()
+        state["dm"] = None
+
+        # Strip DataManager references from fitted models without mutating
+        # the live instances in memory.
+        for attr in ("model_in", "model_full"):
+            model = state.get(attr)
+            if model is not None and hasattr(model, "dm"):
+                model_copy = copy.copy(model)
+                model_copy.dm = None
+                state[attr] = model_copy
+
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        """
+        Restore CM state after unpickling.
+
+        Parameters
+        ----------
+        state : Dict[str, Any]
+            State dictionary produced by :meth:`__getstate__`.
+        """
+        self.__dict__.update(state)
+        self.dm = None
 
     def __repr__(self) -> str:
         """

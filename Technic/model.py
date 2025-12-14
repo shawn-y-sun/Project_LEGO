@@ -1072,11 +1072,12 @@ class ModelBase(ABC):
     def in_perf_measures(self) -> pd.Series:
         """
         In-sample performance measures from testset results.
-        
-        Combines 'Fit Measures' and 'IS Error Measures' into a single Series.
-        Handles underlying test_result objects that return either Series or
-        DataFrame (in which case the 'Value' column is used if present).
-        
+
+        Combines 'Fit Measures' and 'IS Error Measures' into a single Series
+        without executing the full suite of tests in the ``TestSet``. Handles
+        underlying test_result objects that return either Series or DataFrame
+        (in which case the 'Value' column is used if present).
+
         Returns
         -------
         pd.Series
@@ -1084,10 +1085,7 @@ class ModelBase(ABC):
         """
         if self.testset is None:
             return pd.Series(dtype=float)
-        
-        # Get test results from testset
-        all_results = self.testset.all_test_results
-        
+
         # Combine Fit Measures and IS Error Measures
         combined_series = pd.Series(dtype=float)
         
@@ -1106,16 +1104,18 @@ class ModelBase(ABC):
                     return obj[numeric_cols[0]].astype(float)
             return pd.Series(dtype=float)
         
-        # Add Fit Measures if available
-        if 'Fit Measures' in all_results:
-            fit_result = all_results['Fit Measures']
+        # Only trigger the specific measure tests needed for reporting. Avoid
+        # accessing ``all_test_results`` because that executes every test,
+        # including expensive diagnostics that are irrelevant for performance
+        # summaries.
+        fit_result = self._get_test_result_by_name('Fit Measures')
+        if fit_result is not None:
             combined_series = pd.concat([combined_series, _to_series(fit_result)])
-        
-        # Add IS Error Measures if available
-        if 'IS Error Measures' in all_results:
-            error_result = all_results['IS Error Measures']
+
+        error_result = self._get_test_result_by_name('IS Error Measures')
+        if error_result is not None:
             combined_series = pd.concat([combined_series, _to_series(error_result)])
-        
+
         return combined_series
 
     @property
@@ -1133,23 +1133,45 @@ class ModelBase(ABC):
         """
         if self.testset is None:
             return pd.Series(dtype=float)
-        
-        # Get test results from testset
-        all_results = self.testset.all_test_results
-        
-        # Return OOS Error Measures if available
-        if 'OOS Error Measures' in all_results:
-            oos_result = all_results['OOS Error Measures']
-            if isinstance(oos_result, pd.Series):
-                return oos_result.astype(float)
-            if isinstance(oos_result, pd.DataFrame):
-                if 'Value' in oos_result.columns:
-                    return oos_result['Value'].astype(float)
-                numeric_cols = oos_result.select_dtypes(include=[np.number]).columns
-                if len(numeric_cols) == 1:
-                    return oos_result[numeric_cols[0]].astype(float)
-        
+
+        # Only evaluate the out-of-sample error measures to avoid triggering
+        # unrelated tests that may be costly.
+        oos_result = self._get_test_result_by_name('OOS Error Measures')
+        if isinstance(oos_result, pd.Series):
+            return oos_result.astype(float)
+        if isinstance(oos_result, pd.DataFrame):
+            if 'Value' in oos_result.columns:
+                return oos_result['Value'].astype(float)
+            numeric_cols = oos_result.select_dtypes(include=[np.number]).columns
+            if len(numeric_cols) == 1:
+                return oos_result[numeric_cols[0]].astype(float)
+
         return pd.Series(dtype=float)
+
+    def _get_test_result_by_name(self, test_name: str) -> Optional[Any]:
+        """
+        Retrieve a specific test_result by its display name.
+
+        Parameters
+        ----------
+        test_name : str
+            Alias or display name of the desired test within ``self.testset``.
+
+        Returns
+        -------
+        Any or None
+            The corresponding ``test_result`` object if the test exists;
+            otherwise ``None``.
+        """
+        if self.testset is None:
+            return None
+
+        # Search only for the requested test to avoid executing others.
+        for test in self.testset.tests:
+            if test.name == test_name:
+                return test.test_result
+
+        return None
 
     def _create_scenario_manager(self) -> None:
         """
@@ -1343,28 +1365,34 @@ class ModelBase(ABC):
         test_update_func: Optional[Callable[['ModelBase'], Dict[str, Any]]] = None
     ) -> TestSet:
         """
-        Rebuild TestSet from provided functions and cache it.
+        Build and cache a TestSet using initializer and update functions.
+
+        Parameters
+        ----------
+        testset_func : callable, optional
+            Function that returns the base mapping of test aliases to
+            ``ModelTestBase`` instances. Defaults to ``self.testset_func``.
+        test_update_func : callable, optional
+            Optional function that returns updates to apply to the base test
+            mapping. Defaults to ``self.test_update_func``.
+
+        Returns
+        -------
+        TestSet
+            The constructed TestSet instance for this model.
+
+        Raises
+        ------
+        ValueError
+            If no initializer function is provided.
+        KeyError
+            If updates target unknown tests.
+        TypeError
+            If updates are not ModelTestBase instances or dictionaries.
         """
         func_init = testset_func or self.testset_func
-        if func_init is None:
-            raise ValueError("No testset_func provided.")
-        tests = func_init(self)
         func_update = test_update_func or self.test_update_func
-        if func_update:
-            updates = func_update(self)
-            for alias, val in updates.items():
-                if isinstance(val, ModelTestBase):
-                    tests[alias] = val
-                elif isinstance(val, dict):
-                    if alias in tests:
-                        for k, v in val.items(): setattr(tests[alias], k, v)
-                    else:
-                        raise KeyError(f"Unknown test '{alias}' in update_map")
-                else:
-                    raise TypeError("test_update_map values must be ModelTestBase or kwargs dict")
-        # Apply aliases and assemble TestSet
-        for alias, obj in tests.items(): obj.alias = alias
-        self.testset = self.testset_cls(tests)
+        self.testset = self.testset_cls.from_functions(self, func_init, func_update)
         return self.testset
 
 
