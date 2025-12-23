@@ -5,7 +5,7 @@
 # Key Types/Classes: Segment
 # Key Functions: build_cm, plot_vars, explore_vars, export, save_cms, load_cms
 # Dependencies: warnings, pandas, numpy, matplotlib.pyplot, math, inspect, copy, typing, pathlib,
-#               datetime, shutil, internal modules
+#               datetime, shutil, tqdm, internal modules
 # =============================================================================
 import warnings
 warnings.simplefilter(action="ignore", category=FutureWarning)
@@ -20,6 +20,7 @@ import shutil
 from copy import deepcopy
 from typing import Type, Dict, List, Optional, Any, Union, Callable, Tuple, Set, Sequence
 from pathlib import Path
+from tqdm import tqdm
 
 from .cm import CM
 from .model import ModelBase, OLS, FixedOLS
@@ -2332,8 +2333,12 @@ class Segment:
             candidate_cms = list(self.cms.values())
 
         if cm_filter_func is not None:
-            # Apply caller-supplied predicate to narrow the ranking population.
-            candidate_cms = [cm for cm in candidate_cms if cm_filter_func(cm)]
+            # Apply caller-supplied predicate with a progress bar to narrow the ranking population.
+            filtered_cms: List[CM] = []
+            for cm in tqdm(candidate_cms, desc="Filtering passed cms"):
+                if cm_filter_func(cm):
+                    filtered_cms.append(cm)
+            candidate_cms = filtered_cms
             if not candidate_cms:
                 raise RuntimeError(
                     "No candidate models remain after applying 'cm_filter_func'."
@@ -2820,7 +2825,12 @@ class Segment:
         if target_search_id is not None:
             self.last_search_id = target_search_id
 
-        def _load_group(target_dir: Path, container: Dict[str, CM]) -> List[Dict[str, Any]]:
+        def _load_group(
+            target_dir: Path,
+            container: Dict[str, CM],
+            progress_desc: Optional[str] = None,
+            enable_progress: bool = False,
+        ) -> List[Dict[str, Any]]:
             # Gracefully handle absent or empty CM folders by returning zero entries.
             if not target_dir.exists():
                 container.clear()
@@ -2834,7 +2844,17 @@ class Segment:
 
             # Reset container to mirror persisted state.
             container.clear()
-            for entry in index_entries:
+            # Progress visibility is opt-in so selected CM loading stays quiet while
+            # passed CM loading can report progress when requested.
+            entries_iterable = (
+                tqdm(index_entries, desc=progress_desc)
+                if enable_progress and progress_desc
+                else index_entries
+            )
+
+            # Iterate through persisted entries, binding each CM to the current
+            # DataManager while providing optional progress visibility.
+            for entry in entries_iterable:
                 model_id = entry["model_id"]
                 cm_path = target_dir / entry["filename"]
                 cm = load_cm(cm_path)
@@ -2856,7 +2876,12 @@ class Segment:
                 if target_search_id is not None
                 else dirs["passed_dir"]
             )
-            _load_group(passed_dir, self.passed_cms)
+            _load_group(
+                passed_dir,
+                self.passed_cms,
+                progress_desc="Loading passed cms",
+                enable_progress=True,
+            )
 
         # Re-rank loaded candidate models when weights are provided to keep
         # rankings aligned with the latest preferences. Use passed CMs when
