@@ -2854,22 +2854,32 @@ class Segment:
 
             # Reset container to mirror persisted state.
             container.clear()
-            # Progress visibility is opt-in so selected CM loading stays quiet while
-            # passed CM loading can report progress when requested.
-            entries_iterable = (
-                tqdm(index_entries, desc=progress_desc)
-                if enable_progress and progress_desc
-                else index_entries
-            )
-
-            # Iterate through persisted entries, binding each CM to the current
-            # DataManager while providing optional progress visibility.
-            for entry in entries_iterable:
-                model_id = entry["model_id"]
-                cm_path = target_dir / entry["filename"]
-                cm = load_cm(cm_path)
-                cm.bind_data_manager(self.dm)
-                container[model_id] = cm
+            # Drive progress explicitly to avoid duplicate static bars while loading
+            # passed candidate models (tqdm can emit an initial bar without updates
+            # in some consoles when used as an iterator).
+            if enable_progress and progress_desc:
+                total_items = len(index_entries)
+                with tqdm(
+                    total=total_items,
+                    desc=progress_desc,
+                    unit="cm",
+                    disable=total_items == 0
+                ) as progress:
+                    for entry in index_entries:
+                        model_id = entry["model_id"]
+                        cm_path = target_dir / entry["filename"]
+                        cm = load_cm(cm_path)
+                        cm.bind_data_manager(self.dm)
+                        container[model_id] = cm
+                        progress.update()
+            else:
+                # Iterate quietly when progress is disabled (e.g., selected CMs).
+                for entry in index_entries:
+                    model_id = entry["model_id"]
+                    cm_path = target_dir / entry["filename"]
+                    cm = load_cm(cm_path)
+                    cm.bind_data_manager(self.dm)
+                    container[model_id] = cm
             return index_entries
 
         if which in {"selected", "both"}:
