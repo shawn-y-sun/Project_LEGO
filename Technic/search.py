@@ -948,7 +948,21 @@ class ModelSearch:
             )
 
         expanded: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
-        for combo in combos:
+
+        # Display a progress bar when feature pre-testing is enabled so users can
+        # observe long-running walks through candidate specifications.
+        combo_iterable: Sequence[List[Any]]
+        if feature_test is not None:
+            combo_iterable = tqdm(
+                combos,
+                desc="Feature pre-test combos",
+                total=len(combos),
+                leave=False
+            )
+        else:
+            combo_iterable = combos
+
+        for combo in combo_iterable:
             variant_lists: List[List[Any]] = []
             combo_invalid = False
             for spec in combo:
