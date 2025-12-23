@@ -2333,11 +2333,21 @@ class Segment:
             candidate_cms = list(self.cms.values())
 
         if cm_filter_func is not None:
-            # Apply caller-supplied predicate with a progress bar to narrow the ranking population.
+            # Apply caller-supplied predicate with a single progress bar to narrow the ranking population.
             filtered_cms: List[CM] = []
-            for cm in tqdm(candidate_cms, desc="Filtering passed cms"):
-                if cm_filter_func(cm):
-                    filtered_cms.append(cm)
+            total_candidates = len(candidate_cms)
+
+            # Use explicit update control to avoid duplicate bars in some terminals.
+            with tqdm(
+                total=total_candidates,
+                desc="Filtering passed cms",
+                unit="cm",
+                disable=total_candidates == 0
+            ) as progress:
+                for cm in candidate_cms:
+                    if cm_filter_func(cm):
+                        filtered_cms.append(cm)
+                    progress.update()
             candidate_cms = filtered_cms
             if not candidate_cms:
                 raise RuntimeError(
