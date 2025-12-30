@@ -1228,6 +1228,16 @@ class ModelSearch:
                 except Exception as exc:  # pragma: no cover - pass through to coordinator for consistent handling
                     return idx, specs, exc
 
+            # Progress stage tracking so users see when the worker pool is
+            # initializing versus actively evaluating specs. This is kept
+            # lightweight to avoid impacting performance in either serial or
+            # parallel runs.
+            if max_workers is not None and max_workers > 1:
+                print(f"Initializing worker pool (max_workers={max_workers})...")
+                progress_stage = "processing (parallel)"
+            else:
+                progress_stage = "processing (serial)"
+
             def _iter_results():
                 tasks = (
                     (idx, specs) for idx, specs in enumerate(self.all_specs, start=start_index)
@@ -1386,7 +1396,11 @@ class ModelSearch:
                     bar = '█' * filled_width + '-' * (bar_width - filled_width)
                     processed_count_str = f"{processed}/{total}"
                     speed = processed / elapsed if elapsed > 0 else 0
-                    progress_line = f"Filtering Specs: {progress_pct:3d}%|{bar}| {processed_count_str} [{elapsed:,.0f}s, {speed:.2f}it/s, estimated_finish={eta}]"
+                    progress_line = (
+                        f"Filtering Specs ({progress_stage}): "
+                        f"{progress_pct:3d}%|{bar}| {processed_count_str} "
+                        f"[{elapsed:,.0f}s, {speed:.2f}it/s, estimated_finish={eta}]"
+                    )
                     print(f"\r{progress_line}", end='', flush=True)
             
             # Final newline after progress bar
