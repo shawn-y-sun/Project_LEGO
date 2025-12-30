@@ -7,6 +7,7 @@
 # =============================================================================
 
 from typing import List, Union, Tuple, Type, Any, Optional, Callable, Dict, Sequence, Set
+from concurrent.futures import ThreadPoolExecutor
 import itertools
 import time
 import datetime
@@ -1090,10 +1091,11 @@ class ModelSearch:
         progress_callback: Optional[Callable[[int], None]] = None,
         passed_cms_dir: Optional[Path] = None,
         initial_passed: Optional[List[CM]] = None,
+        max_workers: Optional[int] = None,
     ) -> Tuple[List[CM], List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]], List[Tuple[List[Any], str, str]]]:
         """
         Assess all built spec combos and separate passed and failed results,
-        using multithreading and a single progress bar update.
+        with optional multithreading and a single progress bar update.
 
         Parameters
         ----------
@@ -1133,6 +1135,10 @@ class ModelSearch:
             Previously passed models to seed the run with when resuming an
             interrupted search. These models are included in progress updates
             and will be re-indexed alongside newly evaluated specifications.
+        max_workers : int, optional
+            When greater than 1, evaluate specs using a thread pool with the
+            specified number of workers. Defaults to serial execution when
+            omitted or set to a value less than 2.
 
         Notes
         -----
@@ -1204,9 +1210,9 @@ class ModelSearch:
             # Print initial empty line for spacing
             print("")
 
-            for idx, specs in enumerate(self.all_specs, start=start_index):
-                # Use temporary identifiers during assessment to avoid reusing
-                # final passed_* labels before models pass all tests.
+            def _evaluate_spec(task: Tuple[int, List[Union[str, TSFM, Feature, Tuple[Any, ...]]]]
+                               ) -> Tuple[int, List[Union[str, TSFM, Feature, Tuple[Any, ...]]], Any]:
+                idx, specs = task
                 model_id = f"temp_{idx}"
                 try:
                     # Suppress all output during assessment
@@ -1218,6 +1224,27 @@ class ModelSearch:
                             test_update_func,
                             outlier_idx=outlier_idx
                         )
+                    return idx, specs, result
+                except Exception as exc:  # pragma: no cover - pass through to coordinator for consistent handling
+                    return idx, specs, exc
+
+            def _iter_results():
+                tasks = (
+                    (idx, specs) for idx, specs in enumerate(self.all_specs, start=start_index)
+                )
+                if max_workers is not None and max_workers > 1:
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        for item in executor.map(_evaluate_spec, tasks):
+                            yield item
+                else:
+                    for task in tasks:
+                        yield _evaluate_spec(task)
+
+            for idx, specs, result in _iter_results():
+                relative_i = idx - start_index
+                try:
+                    if isinstance(result, Exception):
+                        raise result
 
                     if isinstance(result, CM):
                         # Promote passed models to sequential passed_* IDs so
@@ -1282,44 +1309,43 @@ class ModelSearch:
                         # Extract specs, failed_tests, and filter_test_info from failed result
                         specs_failed, failed_tests, filter_test_info = result
                         failed_info.append((specs_failed, failed_tests))
-                    
+
                     # Update batch filter_test_info (will overwrite duplicates)
                     batch_filter_test_infos.update(filter_test_info)
 
                     # Determine batch size based on progress
-                    relative_i = idx - start_index
                     batch_size = 100 if relative_i < 10000 else 10000
-                    
+
                     # Process batch based on dynamic batch size or on first run
                     if (relative_i + 1) % batch_size == 0 or relative_i == 0:
                         # Get all test names from the current batch
                         batch_test_names = set(batch_filter_test_infos.keys())
-                        
+
                         # Find new test names not seen before
                         new_test_names = batch_test_names - seen_test_names
                         seen_test_names.update(new_test_names)
-                        
+
                         if new_test_names:
                             # Clear current line completely
                             print("\r" + " " * 120, end="\r")
-                            
+
                             # Print header and empty lines only for the first batch
                             if not test_info_header_printed:
                                 print("--- Active Tests of Filtering ---")
                                 test_info_header_printed = True
-                            
+
                             # Print test info lines seamlessly
                             for test_name in sorted(new_test_names):
                                 if test_name in batch_filter_test_infos:
                                     test_info = batch_filter_test_infos[test_name]
                                     print(f"- {test_name}: filter_mode: {test_info['filter_mode']} | desc: {test_info['desc']}")
-                            
+
                             # Print empty line after test info
                             # print("")  # Empty line after test info
-                        
+
                         # Clear batch memory for next batch
                         batch_filter_test_infos = {}
-                            
+
                 except Exception as e:
                     error_log.append((specs, type(e).__name__, str(e)))
 
@@ -1483,6 +1509,8 @@ class ModelSearch:
         modeltest_update_func: Optional[Callable[[ModelBase], dict]] = None,
         pretest_update_func: Optional[Callable[[], Dict[str, Any]]] = None,
         outlier_idx: Optional[List[Any]] = None,
+        parallel_run: bool = False,
+        max_workers: Optional[int] = None,
         search_id: Optional[str] = None,
         base_dir: Optional[Union[str, Path]] = None,
         **legacy_kwargs: Any
@@ -1545,6 +1573,13 @@ class ModelSearch:
             overrides separate from model test updates.
         outlier_idx : list, optional
             List of index labels corresponding to outliers to exclude.
+        parallel_run : bool, default False
+            When True, evaluate specs in parallel. Defaults to serial execution
+            to preserve legacy behavior.
+        max_workers : int, optional
+            Maximum workers to use when ``parallel_run`` is True. Defaults to
+            ``os.cpu_count()`` when omitted. Ignored when ``parallel_run`` is
+            False.
         search_id : str, optional
             Identifier for this search run. When omitted, a new value of the
             form ``search_<segment_id>_<YYYYMMDD_HHMMSS>`` is generated.
@@ -1612,6 +1647,8 @@ class ModelSearch:
                   f"Exp sign map    : {exp_sign_map}\n"
                   f"Top N           : {top_n}\n"
                   f"Rank weights    : {rank_weights}\n"
+                  f"Parallel run    : {parallel_run}\n"
+                  f"Max workers     : {max_workers}\n"
                   f"Model test update func: {modeltest_update_func}\n"
                   f"Pretest update func   : {pretest_update_func}\n"
                   f"Outlier idx     : {outlier_idx}\n")
@@ -1639,6 +1676,8 @@ class ModelSearch:
                 "modeltest_update_func": modeltest_update_func,
                 "pretest_update_func": pretest_update_func,
                 "outlier_idx": outlier_idx,
+                "parallel_run": parallel_run,
+                "max_workers": max_workers,
             }
 
             # Execute optional target-level pretests before heavy computations.
@@ -1846,6 +1885,9 @@ class ModelSearch:
             self._write_progress(search_paths["progress_file"], self.total_combos, 0)
 
             # 3) Filter specs
+            effective_workers: Optional[int] = None
+            if parallel_run:
+                effective_workers = max_workers or os.cpu_count()
             passed, failed, errors = self.filter_specs(
                 sample=sample,
                 test_update_func=modeltest_update_func,
@@ -1856,6 +1898,7 @@ class ModelSearch:
                 progress_callback=_progress_callback,
                 passed_cms_dir=search_paths["passed_cms_dir"],
                 initial_passed=initial_passed,
+                max_workers=effective_workers,
             )
             # Print empty line after test info
             print("")  # Empty line after test info

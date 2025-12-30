@@ -1955,6 +1955,8 @@ class Segment:
         modeltest_update_func: Optional[Callable] = None,
         pretest_update_func: Optional[Callable[[], Dict[str, Any]]] = None,
         outlier_idx: Optional[List[Any]] = None,
+        parallel_run: bool = False,
+        max_workers: Optional[int] = None,
         add_in: bool = True,
         overwrite: bool = False,
         re_rank: bool = True,
@@ -2020,6 +2022,12 @@ class Segment:
             for pretest updates.
         outlier_idx : Optional[List[Any]], default None
             List of index labels corresponding to outliers to exclude.
+        parallel_run : bool, default False
+            When True, evaluate candidate models in parallel during filtering.
+        max_workers : Optional[int], default None
+            Maximum workers to use for parallel filtering when ``parallel_run``
+            is True. Defaults to ``os.cpu_count()`` when omitted. Ignored when
+            ``parallel_run`` is False.
         add_in : bool, default True
             If True, add the resulting top CMs to self.cms.
         overwrite : bool, default False
@@ -2127,6 +2135,8 @@ class Segment:
             pretest_update_func=pretest_update_func,
             outlier_idx=outlier_idx,
             exp_sign_map=exp_sign_map,
+            parallel_run=parallel_run,
+            max_workers=max_workers,
             search_id=active_search_id,
             base_dir=self.working_dir,
         )
