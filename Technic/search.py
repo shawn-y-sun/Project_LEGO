@@ -1232,23 +1232,27 @@ class ModelSearch:
             # initializing versus actively evaluating specs. This is kept
             # lightweight to avoid impacting performance in either serial or
             # parallel runs.
-            if max_workers is not None and max_workers > 1:
-                print(f"Initializing worker pool (max_workers={max_workers})...")
-                progress_stage = "processing (parallel)"
-            else:
-                progress_stage = "processing (serial)"
+            progress_stage = "preparing tasks"
+            print("Preparing spec tasks for filtering...")
 
             def _iter_results():
+                nonlocal progress_stage
                 tasks = (
                     (idx, specs) for idx, specs in enumerate(self.all_specs, start=start_index)
                 )
                 if max_workers is not None and max_workers > 1:
+                    print(f"Initializing worker pool (max_workers={max_workers})...")
+                    progress_stage = "initializing workers"
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        progress_stage = "processing (parallel)"
                         for item in executor.map(_evaluate_spec, tasks):
                             yield item
+                    progress_stage = "coordinating results"
                 else:
+                    progress_stage = "processing (serial)"
                     for task in tasks:
                         yield _evaluate_spec(task)
+                    progress_stage = "coordinating results"
 
             for idx, specs, result in _iter_results():
                 relative_i = idx - start_index
