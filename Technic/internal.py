@@ -14,6 +14,60 @@ import warnings
 import re
 
 
+def _normalize_scen_p0(scen_p0: Optional[Union[str, pd.Timestamp, pd.Period]]) -> Optional[pd.Timestamp]:
+    """Normalize ``scen_p0`` inputs to a period-end timestamp.
+
+    Handles common quarterly shorthand (e.g., ``"2023Q4"``, ``"Q4 2023"``)
+    by converting them to the final day of the referenced quarter. Monthly
+    values are coerced to their corresponding month-end dates. Returns
+    ``None`` when ``scen_p0`` is falsy.
+    """
+
+    if scen_p0 is None:
+        return None
+
+    # Allow Period inputs directly
+    if isinstance(scen_p0, pd.Period):
+        if scen_p0.freqstr and scen_p0.freqstr.upper().startswith('Q'):
+            return scen_p0.to_timestamp(how='end').normalize()
+        scen_ts = scen_p0.to_timestamp().normalize()
+        return pd.Timestamp(scen_ts.year, scen_ts.month, 1) + pd.offsets.MonthEnd(0)
+
+    # Normalize string inputs with quarterly shorthands
+    if isinstance(scen_p0, str):
+        value = scen_p0.strip()
+        if not value:
+            return None
+
+        candidates = {
+            value,
+            value.replace(' ', ''),
+            value.replace('-', ''),
+            value.replace(' ', '').replace('-', ''),
+        }
+
+        # Handle formats like "Q4 2023" or "Q4-2023"
+        match = re.match(r'^Q\s*([1-4])\s*[-/]?\s*(\d{4})$', value.strip(), re.IGNORECASE)
+        if match:
+            candidates.add(f"{match.group(2)}Q{match.group(1)}")
+
+        # Handle formats like "4Q2023" already covered by replacements above
+
+        for candidate in candidates:
+            try:
+                period = pd.Period(candidate.upper(), freq='Q')
+                return period.to_timestamp(how='end').normalize()
+            except Exception:
+                continue
+
+    scen_ts = pd.to_datetime(scen_p0, errors='coerce')
+    if pd.isna(scen_ts):
+        raise ValueError(f"Unable to parse scen_p0 value: {scen_p0}")
+
+    scen_ts = scen_ts.normalize()
+    return pd.Timestamp(scen_ts.year, scen_ts.month, 1) + pd.offsets.MonthEnd(0)
+
+
 class SplitMethod(Enum):
     """
     Enumeration of available data splitting methods.
@@ -77,14 +131,7 @@ class DataLoader(ABC):
         self._full_sample_end = pd.to_datetime(full_sample_end).normalize() if full_sample_end else None
         
         # Handle scen_p0 (scenario jumpoff date)
-        if scen_p0 is not None:
-            try:
-                scen_p0_date = self._normalize_scen_p0(scen_p0)
-            except Exception as exc:
-                raise ValueError(f"Invalid scen_p0 value '{scen_p0}': {exc}") from exc
-            self.scen_p0 = scen_p0_date
-        else:
-            self.scen_p0 = None
+        self.scen_p0 = _normalize_scen_p0(scen_p0)
             
         self._internal_data : Optional[pd.DataFrame] = None
         self._in_sample_idx: Optional[pd.Index] = None
@@ -95,59 +142,6 @@ class DataLoader(ABC):
         # Initialize cached scenario indices
         self._cached_scen_out_sample_idx: Optional[pd.Index] = None
         self._cached_scen_in_sample_idx: Optional[pd.Index] = None
-
-    @staticmethod
-    def _normalize_scen_p0(value: Union[str, pd.Timestamp, pd.Period, np.datetime64]) -> pd.Timestamp:
-        """Convert scen_p0 inputs to a month-end timestamp, supporting quarter codes.
-
-        Args
-        ----
-        value:
-            Value supplied for scen_p0. Accepts strings (including quarter codes like
-            "2023Q4"), pandas Timestamp/Period, or numpy datetime64.
-
-        Returns
-        -------
-        pd.Timestamp
-            Normalized month-end timestamp representing the scen_p0 date.
-        """
-
-        if isinstance(value, pd.Period):
-            timestamp = value.to_timestamp(how='end')
-        else:
-            if isinstance(value, (pd.Timestamp, np.datetime64)):
-                timestamp = pd.to_datetime(value)
-            else:
-                value_str = str(value).strip()
-                if not value_str:
-                    raise ValueError("scen_p0 string cannot be empty")
-
-                # Detect quarter strings such as '2023Q4', '2023-Q4', or 'Q4 2023'
-                quarter_patterns = [
-                    re.compile(r"^(?P<year>\d{4})\s*[-/]?\s*Q(?P<quarter>[1-4])$", re.IGNORECASE),
-                    re.compile(r"^Q(?P<quarter>[1-4])\s*[-/]?\s*(?P<year>\d{4})$", re.IGNORECASE),
-                ]
-
-                period_from_quarter = None
-                for pattern in quarter_patterns:
-                    match = pattern.match(value_str)
-                    if match:
-                        year = int(match.group('year'))
-                        quarter = int(match.group('quarter'))
-                        period_from_quarter = pd.Period(f"{year}Q{quarter}", freq='Q')
-                        break
-
-                if period_from_quarter is not None:
-                    timestamp = period_from_quarter.to_timestamp(how='end')
-                else:
-                    timestamp = pd.to_datetime(value_str)
-
-        if pd.isna(timestamp):
-            raise ValueError("Unable to parse scen_p0 into a valid date")
-
-        # Normalize to start of day before forcing month end
-        normalized = pd.Timestamp(timestamp).normalize()
-        return pd.Timestamp(normalized.year, normalized.month, 1) + pd.offsets.MonthEnd(0)
 
     def _load_from_file(self, path: str, **kwargs) -> pd.DataFrame:
         """

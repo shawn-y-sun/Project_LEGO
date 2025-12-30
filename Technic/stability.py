@@ -1,15 +1,20 @@
 # =============================================================================
 # module: stability.py
 # Purpose: Model stability testing including Walk Forward Test
-# Dependencies: typing, numpy, pandas, matplotlib, .model.ModelBase
+# Key Types/Classes: ModelStabilityTest, WalkForwardTest
+# Key Functions: None
+# Dependencies: typing, warnings, numpy, pandas, matplotlib, abc, .model.ModelBase,
+#               .plot._plot_segmented_series
 # =============================================================================
 
 from typing import Type, Dict, List, Union, Any, Optional
+import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from abc import ABC, abstractmethod
 from .model import ModelBase
+from .plot import _plot_segmented_series
 
 class ModelStabilityTest(ABC):
     """
@@ -230,7 +235,11 @@ class WalkForwardTest(ModelStabilityTest):
                 **self.model_kwargs
             )
             # Automatically fit the model
-            self._final_model.fit()
+            # Suppress runtime warnings that occur when regressors contain only
+            # zeros within the fitting window; parameters remain usable.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                self._final_model.fit()
         return self._final_model
     
     @property  
@@ -283,7 +292,12 @@ class WalkForwardTest(ModelStabilityTest):
                         **self.model_kwargs
                     )
                     # Automatically fit the model
-                    model.fit()
+                    # Suppress runtime warnings that occur when regressors
+                    # contain only zeros within the fitting window; parameters
+                    # remain usable.
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", RuntimeWarning)
+                        model.fit()
                     self._wf_models[model_name] = model
         
         return self._wf_models
@@ -419,21 +433,27 @@ class WalkForwardTest(ModelStabilityTest):
         # UNRATE    -0.123   -0.118   -0.125   -0.120
         # CPI        0.089    0.092    0.085    0.088
         """
-        # Get final model parameters
-        final_params = self.final_model.params
-        
-        # Filter out periodical dummies (M:1, Q:1, etc.)
-        param_names = [name for name in final_params.index 
-                      if not (':' in name and name.split(':')[1].isdigit())]
-        
-        # Create DataFrame with final model coefficients
-        param_data = {self.model_in_sample_end: [final_params.get(name, np.nan) for name in param_names]}
-        
-        # Add Walk Forward model coefficients
-        for i, (model_name, model) in enumerate(self.wf_models.items()):
-            col_name = self.poos_in_sample_end[i]
-            param_data[col_name] = [model.params.get(name, np.nan) for name in param_names]
-        
+        # Suppress runtime warnings triggered when some regressors are all zeros
+        # during fitting; statsmodels emits divide-by-zero warnings in this case,
+        # but the resulting parameters are still captured for display.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+
+            # Get final model parameters
+            final_params = self.final_model.params
+
+            # Filter out periodical dummies (M:1, Q:1, etc.)
+            param_names = [name for name in final_params.index
+                          if not (':' in name and name.split(':')[1].isdigit())]
+
+            # Create DataFrame with final model coefficients
+            param_data = {self.model_in_sample_end: [final_params.get(name, np.nan) for name in param_names]}
+
+            # Add Walk Forward model coefficients
+            for i, (model_name, model) in enumerate(self.wf_models.items()):
+                col_name = self.poos_in_sample_end[i]
+                param_data[col_name] = [model.params.get(name, np.nan) for name in param_names]
+
         return pd.DataFrame(param_data, index=param_names)
     
     @property
@@ -820,43 +840,73 @@ class WalkForwardTest(ModelStabilityTest):
         # Plot each Walk Forward model
         for i, (model_name, model) in enumerate(wf_models.items()):
             ax = axes[i]
-            
+
             # Get model data
             try:
-                # Get actual values from the full sample
-                actual_data = model.dm.internal_data[model.target]
-                
-                # Get fitted values (in-sample)
-                fitted_values = model.y_fitted_in
-                
-                # Get predicted values (out-of-sample)
-                predicted_values = model.y_pred_out
-                
+                # Get actual values from the full sample while preserving outlier gaps
+                if hasattr(model, 'y_full'):
+                    actual_data = model.y_full.sort_index()
+                else:
+                    actual_data = model.dm.internal_data[model.target].sort_index()
+
+                # Get fitted values (in-sample) and align to the full in-sample index
+                fitted_values = getattr(model, 'y_fitted_in', pd.Series(dtype=float))
+                if isinstance(fitted_values, pd.Series):
+                    in_sample_index = pd.Index(model.dm.in_sample_idx).sort_values()
+                    fitted_values = fitted_values.sort_index().reindex(in_sample_index)
+                else:
+                    fitted_values = pd.Series(dtype=float)
+
+                # Get predicted values (out-of-sample) and align to the out-of-sample index
+                predicted_values = getattr(model, 'y_pred_out', pd.Series(dtype=float))
+                if isinstance(predicted_values, pd.Series):
+                    out_sample_index = pd.Index(model.dm.out_sample_idx).sort_values()
+                    predicted_values = predicted_values.sort_index().reindex(out_sample_index)
+                else:
+                    predicted_values = pd.Series(dtype=float)
+
                 # Determine the plot range (from in-sample start to end of OOS)
                 oos_end = model.dm.out_sample_idx.max() if len(model.dm.out_sample_idx) > 0 else model.dm.in_sample_end
                 is_start = model.dm._internal_loader.in_sample_start
-                
+
                 # Filter actual data to plot range
                 plot_mask = (actual_data.index >= is_start) & (actual_data.index <= oos_end)
-                actual_plot_data = actual_data[plot_mask]
-                
+                actual_plot_data = actual_data.loc[plot_mask]
+
                 # Plot actual values (only within the relevant range)
-                ax.plot(actual_plot_data.index, actual_plot_data, 'k-', linewidth=2, 
-                       label='Actual', alpha=0.8)
-                
+                _plot_segmented_series(
+                    ax,
+                    actual_plot_data,
+                    color='k',
+                    label='Actual',
+                    linewidth=2,
+                    line_kwargs={'alpha': 0.8},
+                    marker_kwargs={'alpha': 0.8}
+                )
+
                 # Plot fitted values (in-sample period)
-                if len(fitted_values) > 0:
-                    # Get fitted dates by aligning with fitted_values index
-                    fitted_dates = fitted_values.index
-                    ax.plot(fitted_dates, fitted_values, 'b-', linewidth=2, 
-                           label='Fitted (IS)', alpha=0.8)
-                
+                if not fitted_values.empty:
+                    _plot_segmented_series(
+                        ax,
+                        fitted_values,
+                        color='b',
+                        label='Fitted (IS)',
+                        linewidth=2,
+                        line_kwargs={'alpha': 0.8},
+                        marker_kwargs={'alpha': 0.8}
+                    )
+
                 # Plot predicted values (out-of-sample period)
-                if len(predicted_values) > 0:
-                    # Get predicted dates by aligning with predicted_values index
-                    predicted_dates = predicted_values.index
-                    ax.plot(predicted_dates, predicted_values, 'b--', linewidth=2, 
-                           label='Predicted (OOS)', alpha=0.8)
+                if not predicted_values.empty:
+                    _plot_segmented_series(
+                        ax,
+                        predicted_values,
+                        color='b',
+                        label='Predicted (OOS)',
+                        linewidth=2,
+                        line_kwargs={'linestyle': '--', 'alpha': 0.8},
+                        marker_kwargs={'alpha': 0.8}
+                    )
                 
                 # Customize the plot
                 poos_end_str = self.poos_in_sample_end[i]

@@ -3,7 +3,7 @@
 # Purpose: Define base and OLS regression models with testing and reporting hooks
 # Key Types/Classes: ModelBase, OLS, FixedOLS
 # Key Functions: train, predict, y_base_fitted_in, y_base_pred_out
-# Dependencies: pandas, numpy, statsmodels, typing, .testset.TestSet, .report.OLS_ModelReport
+# Dependencies: pandas, numpy, statsmodels, typing, .testset.TestSet, .report.OLS_ModelReport, .pretest.PreTestSet
 # =============================================================================
 
 from abc import ABC, abstractmethod
@@ -16,6 +16,7 @@ from statsmodels.stats.outliers_influence import variance_inflation_factor
 from .test import *
 from .report import ModelReportBase, OLS_ModelReport
 from .testset import ppnr_ols_testset_func, TestSet
+from .pretest import PreTestSet, ppnr_ols_pretestset
 from .modeltype import RateLevel, BalanceLevel
 
 class ModelBase(ABC):
@@ -53,6 +54,11 @@ class ModelBase(ABC):
         Updates or adds tests post initial mapping.
     testset_cls : type, default TestSet
         Class for aggregating ModelTestBase instances into a TestSet.
+    pretestset : PreTestSet, optional
+        Optional collection of pre-fitting validation tests executed before
+        the main model search pipeline. When provided, callers can reuse
+        standardized target, feature, and specification checks prior to
+        invoking more expensive fitting steps.
     scen_cls : type, optional
         Class to use for scenario management. If None, defaults to ScenManager.
     report_cls : type, optional
@@ -88,6 +94,7 @@ class ModelBase(ABC):
         testset_func: Optional[Callable[['ModelBase'], Dict[str, ModelTestBase]]] = None,
         test_update_func: Optional[Callable[['ModelBase'], Dict[str, Any]]] = None,
         testset_cls: Type = TestSet,
+        pretestset: Optional[PreTestSet] = None,
         scen_cls: Optional[Type] = None,
         report_cls: Optional[Type] = None,
         stability_test_cls: Optional[Type] = None,
@@ -132,6 +139,9 @@ class ModelBase(ABC):
         self.test_update_func = test_update_func
         self.testset_cls = testset_cls
         self.testset: Optional[TestSet] = None
+        if pretestset is not None and not isinstance(pretestset, PreTestSet):
+            raise TypeError("pretestset must be an instance of PreTestSet or None")
+        self.pretestset = pretestset
         
         # Scenario management
         if scen_cls is None:
@@ -563,6 +573,9 @@ class ModelBase(ABC):
         When has_lookback_var is True, uses rolling_predict to generate predictions
         that account for conditional variable effects.
 
+        Any configured outlier periods are masked with ``NaN`` so callers do not
+        inadvertently use predictions for excluded observations.
+
         Returns empty Series if X_out is empty.
         """
         if self.X_out.empty:
@@ -580,9 +593,12 @@ class ModelBase(ABC):
                 y=self.y_full,
                 time_frame=oos_time_frame
             )
-            return y_pred
+            # Mask any configured outliers so downstream consumers do not attempt
+            # to use predictions for periods that should be ignored.
+            return self._apply_outlier_handling(y_pred, strict=False, drop=False)
 
-        return self.predict(self.X_out)
+        preds = self.predict(self.X_out)
+        return self._apply_outlier_handling(preds, strict=False, drop=False)
 
     def _normalize_outlier_index(self, target_index: pd.Index, *, strict: bool = True) -> List[Any]:
         """
@@ -627,9 +643,64 @@ class ModelBase(ABC):
         if strict:
             missing = [idx for idx in converted_idx if idx not in target_index]
             if missing:
-                raise ValueError(f"Outlier indices {missing} not in the provided index.")
+                # Allow outlier labels that refer to known indices outside of the
+                # currently inspected slice (e.g., out-of-sample periods when
+                # processing in-sample data). Only raise an error for labels that
+                # cannot be found anywhere across the model's known indices.
+                known_index = self._collect_known_indices()
+                unresolved = [idx for idx in missing if idx not in known_index]
+                if unresolved:
+                    raise ValueError(
+                        "Outlier indices {} not in the provided index or any known "
+                        "model indices.".format(unresolved)
+                    )
 
         return existing_outliers
+
+    def _collect_known_indices(self) -> pd.Index:
+        """
+        Gather the union of indices known to the model instance.
+
+        Returns
+        -------
+        pd.Index
+            Union of in-sample, out-of-sample, cached data, and target indices
+            that the model is aware of. When no indices are available an empty
+            :class:`pandas.Index` is returned.
+
+        Notes
+        -----
+        This helper supports outlier handling by ensuring that outlier labels
+        are only considered invalid if they are completely unknown to the
+        model, rather than simply absent from a specific slice of data.
+        """
+        indices: List[pd.Index] = []
+
+        if self.dm is not None:
+            # NOTE: DataManager exposes dedicated in/out sample index series.
+            if hasattr(self.dm, "in_sample_idx") and self.dm.in_sample_idx is not None:
+                indices.append(pd.Index(self.dm.in_sample_idx))
+            if hasattr(self.dm, "out_sample_idx") and self.dm.out_sample_idx is not None:
+                indices.append(pd.Index(self.dm.out_sample_idx))
+            if hasattr(self.dm, "p0") and self.dm.p0 is not None:
+                indices.append(pd.Index([self.dm.p0]))
+            if hasattr(self.dm, "internal_data") and self.dm.internal_data is not None:
+                indices.append(pd.Index(self.dm.internal_data.index))
+
+        # Include cached feature/target matrices supplied directly by the caller.
+        for cached in (self._X_cache, self._y_cache, self._X_out_cache, self._y_out_cache):
+            if cached is not None:
+                indices.append(pd.Index(cached.index))
+
+        if not indices:
+            return pd.Index([])
+
+        # Merge indices sequentially to preserve dtype information.
+        combined_index = indices[0]
+        for extra in indices[1:]:
+            combined_index = combined_index.union(extra)
+
+        return combined_index
 
     def _apply_outlier_handling(
         self,
@@ -1001,11 +1072,12 @@ class ModelBase(ABC):
     def in_perf_measures(self) -> pd.Series:
         """
         In-sample performance measures from testset results.
-        
-        Combines 'Fit Measures' and 'IS Error Measures' into a single Series.
-        Handles underlying test_result objects that return either Series or
-        DataFrame (in which case the 'Value' column is used if present).
-        
+
+        Combines 'Fit Measures' and 'IS Error Measures' into a single Series
+        without executing the full suite of tests in the ``TestSet``. Handles
+        underlying test_result objects that return either Series or DataFrame
+        (in which case the 'Value' column is used if present).
+
         Returns
         -------
         pd.Series
@@ -1013,10 +1085,7 @@ class ModelBase(ABC):
         """
         if self.testset is None:
             return pd.Series(dtype=float)
-        
-        # Get test results from testset
-        all_results = self.testset.all_test_results
-        
+
         # Combine Fit Measures and IS Error Measures
         combined_series = pd.Series(dtype=float)
         
@@ -1035,16 +1104,18 @@ class ModelBase(ABC):
                     return obj[numeric_cols[0]].astype(float)
             return pd.Series(dtype=float)
         
-        # Add Fit Measures if available
-        if 'Fit Measures' in all_results:
-            fit_result = all_results['Fit Measures']
+        # Only trigger the specific measure tests needed for reporting. Avoid
+        # accessing ``all_test_results`` because that executes every test,
+        # including expensive diagnostics that are irrelevant for performance
+        # summaries.
+        fit_result = self._get_test_result_by_name('Fit Measures')
+        if fit_result is not None:
             combined_series = pd.concat([combined_series, _to_series(fit_result)])
-        
-        # Add IS Error Measures if available
-        if 'IS Error Measures' in all_results:
-            error_result = all_results['IS Error Measures']
+
+        error_result = self._get_test_result_by_name('IS Error Measures')
+        if error_result is not None:
             combined_series = pd.concat([combined_series, _to_series(error_result)])
-        
+
         return combined_series
 
     @property
@@ -1062,23 +1133,45 @@ class ModelBase(ABC):
         """
         if self.testset is None:
             return pd.Series(dtype=float)
-        
-        # Get test results from testset
-        all_results = self.testset.all_test_results
-        
-        # Return OOS Error Measures if available
-        if 'OOS Error Measures' in all_results:
-            oos_result = all_results['OOS Error Measures']
-            if isinstance(oos_result, pd.Series):
-                return oos_result.astype(float)
-            if isinstance(oos_result, pd.DataFrame):
-                if 'Value' in oos_result.columns:
-                    return oos_result['Value'].astype(float)
-                numeric_cols = oos_result.select_dtypes(include=[np.number]).columns
-                if len(numeric_cols) == 1:
-                    return oos_result[numeric_cols[0]].astype(float)
-        
+
+        # Only evaluate the out-of-sample error measures to avoid triggering
+        # unrelated tests that may be costly.
+        oos_result = self._get_test_result_by_name('OOS Error Measures')
+        if isinstance(oos_result, pd.Series):
+            return oos_result.astype(float)
+        if isinstance(oos_result, pd.DataFrame):
+            if 'Value' in oos_result.columns:
+                return oos_result['Value'].astype(float)
+            numeric_cols = oos_result.select_dtypes(include=[np.number]).columns
+            if len(numeric_cols) == 1:
+                return oos_result[numeric_cols[0]].astype(float)
+
         return pd.Series(dtype=float)
+
+    def _get_test_result_by_name(self, test_name: str) -> Optional[Any]:
+        """
+        Retrieve a specific test_result by its display name.
+
+        Parameters
+        ----------
+        test_name : str
+            Alias or display name of the desired test within ``self.testset``.
+
+        Returns
+        -------
+        Any or None
+            The corresponding ``test_result`` object if the test exists;
+            otherwise ``None``.
+        """
+        if self.testset is None:
+            return None
+
+        # Search only for the requested test to avoid executing others.
+        for test in self.testset.tests:
+            if test.name == test_name:
+                return test.test_result
+
+        return None
 
     def _create_scenario_manager(self) -> None:
         """
@@ -1272,28 +1365,34 @@ class ModelBase(ABC):
         test_update_func: Optional[Callable[['ModelBase'], Dict[str, Any]]] = None
     ) -> TestSet:
         """
-        Rebuild TestSet from provided functions and cache it.
+        Build and cache a TestSet using initializer and update functions.
+
+        Parameters
+        ----------
+        testset_func : callable, optional
+            Function that returns the base mapping of test aliases to
+            ``ModelTestBase`` instances. Defaults to ``self.testset_func``.
+        test_update_func : callable, optional
+            Optional function that returns updates to apply to the base test
+            mapping. Defaults to ``self.test_update_func``.
+
+        Returns
+        -------
+        TestSet
+            The constructed TestSet instance for this model.
+
+        Raises
+        ------
+        ValueError
+            If no initializer function is provided.
+        KeyError
+            If updates target unknown tests.
+        TypeError
+            If updates are not ModelTestBase instances or dictionaries.
         """
         func_init = testset_func or self.testset_func
-        if func_init is None:
-            raise ValueError("No testset_func provided.")
-        tests = func_init(self)
         func_update = test_update_func or self.test_update_func
-        if func_update:
-            updates = func_update(self)
-            for alias, val in updates.items():
-                if isinstance(val, ModelTestBase):
-                    tests[alias] = val
-                elif isinstance(val, dict):
-                    if alias in tests:
-                        for k, v in val.items(): setattr(tests[alias], k, v)
-                    else:
-                        raise KeyError(f"Unknown test '{alias}' in update_map")
-                else:
-                    raise TypeError("test_update_map values must be ModelTestBase or kwargs dict")
-        # Apply aliases and assemble TestSet
-        for alias, obj in tests.items(): obj.alias = alias
-        self.testset = self.testset_cls(tests)
+        self.testset = self.testset_cls.from_functions(self, func_init, func_update)
         return self.testset
 
 
@@ -1311,6 +1410,7 @@ class OLS(ModelBase):
         testset_func: Callable[['ModelBase'], Dict[str, ModelTestBase]] = ppnr_ols_testset_func,
         test_update_func: Optional[Callable[['ModelBase'], Dict[str, Any]]] = None,
         testset_cls: Type = TestSet,
+        pretestset: Optional[PreTestSet] = ppnr_ols_pretestset,
         scen_cls: Optional[Type] = None,
         model_type: Optional[Type] = None,
         target_base: Optional[str] = None,
@@ -1337,6 +1437,7 @@ class OLS(ModelBase):
             testset_func=testset_func,
             test_update_func=test_update_func,
             testset_cls=testset_cls,
+            pretestset=pretestset,
             scen_cls=scen_cls,
             model_type=model_type,
             target_base=target_base,
@@ -1481,11 +1582,18 @@ class OLS(ModelBase):
         predictions = self.fitted.predict(Xc_new)
         return predictions
     
-    def predict_param_shock(self, X_new: pd.DataFrame, param: str, shock: int) -> pd.Series:
+    def predict_param_shock(
+        self,
+        X_new: pd.DataFrame,
+        param: str,
+        shock: int,
+        *,
+        se_override: Optional[pd.Series] = None
+    ) -> pd.Series:
         """
         Predict with parameter shock testing by applying standard error shocks to coefficients.
-        
-        This method adjusts a specific parameter's coefficient by adding a multiple of its 
+
+        This method adjusts a specific parameter's coefficient by adding a multiple of its
         standard error, then uses the adjusted coefficients to make predictions.
         
         Parameters
@@ -1497,6 +1605,9 @@ class OLS(ModelBase):
         shock : int
             Number of standard errors to apply (e.g., 1, 2, -1, -2).
             Positive values increase the coefficient, negative values decrease it.
+        se_override : pd.Series, optional
+            Optional series of standard errors to use instead of ``self.se``. When
+            provided, it must share parameter names with ``self.params``.
         
         Returns
         -------
@@ -1519,9 +1630,19 @@ class OLS(ModelBase):
         
         # Get current coefficients and create a copy
         coeffs = self.params.copy()
-        
+
+        # Determine which standard error series to use for shocks
+        se_values = None
+        if isinstance(se_override, pd.Series) and param in se_override.index:
+            se_values = se_override
+        else:
+            se_values = self.se
+
+        if se_values is None or param not in se_values.index:
+            raise ValueError(f"Standard error not available for parameter '{param}'")
+
         # Adjust the specified parameter's coefficient
-        coeffs[param] = coeffs[param] + shock * self.se[param]
+        coeffs[param] = coeffs[param] + shock * se_values[param]
         
         # Add constant to X_new
         Xc_new = sm.add_constant(X_new, has_constant='add')

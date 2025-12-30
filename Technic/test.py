@@ -1,10 +1,13 @@
 # =============================================================================
 # module: test.py
 # Purpose: Model testing framework with base and concrete test implementations
+# Key Types/Classes: ModelTestBase, StationarityTest, FullStationarityTest,
+#                    TargetStationarityTest, MultiFullStationarityTest, CoefTest
+# Key Functions: _adf_test_fn, _pp_test_fn, stationarity_test_dict
 # Dependencies: pandas, statsmodels, scipy, abc, typing
 # =============================================================================
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Union, Callable, List, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Type, Union
 import pandas as pd
 import numpy as np
 
@@ -14,7 +17,13 @@ from statsmodels.stats.diagnostic import acorr_breusch_godfrey, het_breuschpagan
 from scipy.stats import shapiro, kstest, cramervonmises
 from statsmodels.tsa.stattools import adfuller, zivot_andrews, range_unit_root_test, kpss
 from arch.unitroot import PhillipsPerron, DFGLS, engle_granger
+from arch.unitroot.unitroot import InfeasibleTestException
 from statsmodels.stats.outliers_influence import variance_inflation_factor
+from .data import DataManager
+from .transform import TSFM
+from .regime import RgmVar
+from .condition import CondVar
+from .feature import Feature, DumVar
 
 import warnings
 from statsmodels.tools.sm_exceptions import InterpolationWarning
@@ -35,6 +44,11 @@ class ModelTestBase(ABC):
         Custom and human-readable name for the test instance (defaults to class name).
     filter_mode : str, default 'moderate'
         How to evaluate passed results: 'strict' or 'moderate'.
+    filter_on : bool, default True
+        Whether this test participates in filter evaluation aggregation.
+    force_filter_pass : Optional[bool], default None
+        Override for the computed :pyattr:`test_filter` result. When provided,
+        the boolean value is returned directly, bypassing internal logic.
     """
     category: str = 'base'
     _allowed_modes = {'strict', 'moderate'}  # Allowed evaluation modes
@@ -44,12 +58,36 @@ class ModelTestBase(ABC):
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
         filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
         if filter_mode not in self._allowed_modes:
             raise ValueError(f"filter_mode must be one of {self._allowed_modes}")
+        if force_filter_pass is not None and not isinstance(force_filter_pass, bool):
+            raise TypeError("force_filter_pass must be a boolean or None")
         self.alias = alias or ''
         self.filter_mode = filter_mode
         self.filter_on = filter_on
+        self.force_filter_pass = force_filter_pass
+
+    def _apply_force_filter_pass(self, result: bool) -> bool:
+        """
+        Apply the ``force_filter_pass`` override when present.
+
+        Parameters
+        ----------
+        result : bool
+            Computed filter status.
+
+        Returns
+        -------
+        bool
+            Either the original ``result`` or the forced override when
+            :pyattr:`force_filter_pass` is explicitly set.
+        """
+
+        if self.force_filter_pass is None:
+            return bool(result)
+        return bool(self.force_filter_pass)
 
     @property
     def name(self) -> str:
@@ -109,9 +147,15 @@ class FitMeasure(ModelTestBase):
         n_features: int,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = False
+        filter_on: bool = False,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.actual = actual
         self.predicted = predicted
         self.n = len(actual)
@@ -156,7 +200,7 @@ class FitMeasure(ModelTestBase):
         """
         Always pass—this test is for reporting measures, not for filtering.
         """
-        return True
+        return self._apply_force_filter_pass(True)
 
 
 # ----------------------------------------------------------------------------
@@ -185,9 +229,15 @@ class ErrorMeasure(ModelTestBase):
         predicted: pd.Series,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = False
+        filter_on: bool = False,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.errors = actual - predicted
         # this is only for reporting: do not include in filter_pass
 
@@ -228,7 +278,7 @@ class ErrorMeasure(ModelTestBase):
         """
         Always pass—this test is for reporting measures, not for filtering.
         """
-        return True
+        return self._apply_force_filter_pass(True)
 
 # ----------------------------------------------------------------------------
 # R2Test class
@@ -257,9 +307,15 @@ class R2Test(ModelTestBase):
         thresholds: Optional[Dict[str, float]] = {'strict': 0.6, 'moderate': 0.3},
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.r2 = r2
         self.thresholds = thresholds
         # self.filter_mode_descs = {
@@ -305,7 +361,7 @@ class R2Test(ModelTestBase):
     @property
     def test_filter(self) -> bool:
         thr = self.thresholds[self.filter_mode]
-        return self.r2 >= thr
+        return self._apply_force_filter_pass(self.r2 >= thr)
 
 # ----------------------------------------------------------------------------
 # AutocorrTest class
@@ -364,9 +420,15 @@ class AutocorrTest(ModelTestBase):
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
         test_dict: Optional[Dict[str, Callable]] = None,
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         # store residuals array
         self.results = results
         # assign test functions (default or user-provided)
@@ -426,9 +488,11 @@ class AutocorrTest(ModelTestBase):
         passed_count = int(results.sum())
         total = len(results)
         if self.filter_mode == 'strict':
-            return passed_count == total
+            outcome = passed_count == total
         else:
-            return passed_count >= (total / 2)
+            outcome = passed_count >= (total / 2)
+
+        return self._apply_force_filter_pass(outcome)
 
 # ----------------------------------------------------------------------------
 # HetTest class
@@ -486,9 +550,15 @@ class HetTest(ModelTestBase):
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
         test_dict: Optional[Dict[str, Callable]] = None,
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.resids = np.asarray(resids)
         self.exog = np.asarray(exog)
         self.test_funcs = test_dict if test_dict is not None else het_test_dict
@@ -530,7 +600,8 @@ class HetTest(ModelTestBase):
     def test_filter(self) -> bool:
         passed_count = int(self.test_result['Passed'].sum())
         total = len(self.test_funcs)
-        return passed_count == total if self.filter_mode == 'strict' else passed_count >= (total / 2)
+        outcome = passed_count == total if self.filter_mode == 'strict' else passed_count >= (total / 2)
+        return self._apply_force_filter_pass(outcome)
 
 # ----------------------------------------------------------------------------
 # NormalityTest class
@@ -564,9 +635,15 @@ class NormalityTest(ModelTestBase):
         alpha: Union[float, Dict[str, float]] = 0.05,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.series = series
         self.alpha = alpha
         self.test_dict = normality_test_dict
@@ -593,9 +670,14 @@ class NormalityTest(ModelTestBase):
         │ CM   │   …      │   …     │  True  │
         └──────┴──────────┴─────────┴────────┘
         """
+        # Drop missing values to avoid test-function failures on NaNs.
+        series = pd.to_numeric(self.series, errors='coerce').dropna()
+        if series.empty:
+            return pd.DataFrame(columns=['Statistic', 'P-value', 'Passed'])
+
         rows = []
         for name, fn in self.test_dict.items():
-            stat, pvalue = fn(self.series)[0:2]
+            stat, pvalue = fn(series)[0:2]
             level = self.alpha[name] if isinstance(self.alpha, dict) else self.alpha
             passed = pvalue > level
             rows.append({'Test': name, 'Statistic': stat, 'P-value': pvalue, 'Passed': passed})
@@ -605,8 +687,11 @@ class NormalityTest(ModelTestBase):
     def test_filter(self) -> bool:
         passed = self.test_result['Passed']
         if self.filter_mode == 'strict':
-            return passed.all()
-        return passed.sum() >= len(passed) / 2
+            outcome = passed.all()
+        else:
+            outcome = passed.sum() >= len(passed) / 2
+
+        return self._apply_force_filter_pass(outcome)
     
 
 # ----------------------------------------------------------------------------
@@ -708,9 +793,15 @@ class StationarityTest(ModelTestBase):
         filter_mode: str = 'moderate',
         test_dict: Optional[Dict[str, Callable]] = None,
         test_threshold: Optional[Dict[str, Tuple[float, str]]] = None,
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.series = pd.Series(series)
         self.test_dict = test_dict if test_dict is not None else stationarity_test_dict
         self.thresholds = test_threshold if test_threshold is not None else stationarity_test_threshold
@@ -736,12 +827,32 @@ class StationarityTest(ModelTestBase):
         │ ADF  │   …      │   …     │  True  │
         │ PP   │   …      │   …     │  True  │
         └──────┴──────────┴─────────┴────────┘
+
+        Notes
+        -----
+        If a diagnostic raises ``InfeasibleTestException`` (typically from the
+        Phillips–Perron routine on very short samples), the statistic and
+        p-value are recorded as ``None`` and the check is marked as failed so
+        downstream filters can handle the edge case gracefully.
         """
+        # Normalize dtype to float to avoid mixed-int/float dtype issues inside
+        # tests such as Phillips–Perron which expect pure numeric input.
+        # Drop missing values before running stationarity diagnostics to
+        # prevent underlying tests from raising on NaN inputs.
+        series = pd.to_numeric(self.series, errors='coerce').dropna().astype(float)
+        if series.empty:
+            return pd.DataFrame(columns=['Statistic', 'P-value', 'Passed'])
+
         records = []
         for name, func in self.test_dict.items():
-            stat, pvalue = func(self.series)
-            alpha, direction = self.thresholds[name]
-            passed = pvalue < alpha if direction == '<' else pvalue > alpha
+            try:
+                stat, pvalue = func(series)
+                alpha, direction = self.thresholds[name]
+                passed = pvalue < alpha if direction == '<' else pvalue > alpha
+            except InfeasibleTestException:
+                # Short samples can make long-run covariance estimators infeasible;
+                # mark the test as failed while returning explicit null diagnostics.
+                stat, pvalue, passed = None, None, False
             records.append({
                 'Test': name,
                 'Statistic': stat,
@@ -762,8 +873,11 @@ class StationarityTest(ModelTestBase):
         passed_count = int(results.sum())
         total = len(results)
         if self.filter_mode == 'strict':
-            return passed_count == total
-        return passed_count >= (total / 2)
+            outcome = passed_count == total
+        else:
+            outcome = passed_count >= (total / 2)
+
+        return self._apply_force_filter_pass(outcome)
     
 
     @property
@@ -772,7 +886,7 @@ class StationarityTest(ModelTestBase):
         Returns a legacy-style stationarity test table similar to SAS ARIMA's
         Augmented Dickey-Fuller test output.
         """
-        types = {'Zero Mean': 'nc', 'Single Mean': 'c', 'Trend': 'ct'}
+        types = {'Zero Mean': 'n', 'Single Mean': 'c', 'Trend': 'ct'}
         data = []
         series = self.series.dropna() if self.series is not None else None
         if series is None:
@@ -813,6 +927,678 @@ class StationarityTest(ModelTestBase):
         return pd.DataFrame(data).set_index(['Type', 'Lags'])
 
 
+class FullStationarityTest(ModelTestBase):
+    """
+    Run staged stationarity checks across in-sample and full-sample data.
+
+    The test evaluates stationarity on a user-selected sample (``'in'`` or
+    ``'full'``) and optionally re-runs the check after removing specified
+    outliers. For regime-shift or conditional variables, it optionally
+    retries on the original (pre-regime or pre-condition) variable using the
+    same sample selection.
+
+    Parameters
+    ----------
+    variable : Union[str, TSFM, Dict[str, pd.Series]]
+        Variable identifier or transformation specification to build.
+        Regime-aware (:class:`~Technic.regime.RgmVar`) and conditional
+        (:class:`~Technic.condition.CondVar`) features are also supported.
+        When a dictionary is provided, keys are treated as sample labels and
+        values are pre-materialized series evaluated sequentially until a
+        stationary series is found.
+    dm : DataManager
+        Data manager used to construct features and access sample indices.
+    sample : {'in', 'full'}, default 'in'
+        Which sample slice to evaluate. ``'in'`` uses only the in-sample
+        portion, while ``'full'`` combines in- and out-of-sample periods.
+    outlier_idx : list, optional
+        Index labels to drop when re-running the stationarity test without
+        outliers. Missing labels are ignored.
+    alias : str, optional
+        Display name for this test (defaults to class name).
+    filter_mode : {'strict', 'moderate'}, default 'moderate'
+        Passed through to the underlying stationarity test.
+    test_dict : Dict[str, callable], optional
+        Mapping of test names to functions; defaults to
+        ``stationarity_test_dict``.
+    test_threshold : Dict[str, Tuple[float, str]], optional
+        Test thresholds and directions; defaults to
+        ``stationarity_test_threshold``.
+    filter_on : bool, default True
+        Whether this test is active in filtering.
+    test_class : Type[StationarityTest], optional
+        Test class to instantiate for each sample evaluation. Defaults to
+        :class:`StationarityTest`.
+
+    Examples
+    --------
+    >>> fst = FullStationarityTest('GDP', dm)
+    >>> fst.test_result
+    >>> fst.test_filter
+    """
+
+    category = 'assumption'
+
+    def __init__(
+        self,
+        variable: Union[str, TSFM, RgmVar, CondVar, Mapping[str, pd.Series]],
+        dm: DataManager,
+        sample: str = 'in',
+        outlier_idx: Optional[List[Any]] = None,
+        alias: Optional[str] = None,
+        filter_mode: str = 'moderate',
+        test_dict: Optional[Dict[str, Callable]] = None,
+        test_threshold: Optional[Dict[str, Tuple[float, str]]] = None,
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
+        test_class: Type[StationarityTest] = StationarityTest,
+    ) -> None:
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
+        self.variable = variable
+        self.dm = dm
+        self.sample = sample.lower()
+        if self.sample not in {'in', 'full'}:
+            raise ValueError("sample must be either 'in' or 'full'")
+        self.outlier_idx = list(outlier_idx) if outlier_idx else []
+        self.test_dict = test_dict if test_dict is not None else stationarity_test_dict
+        self.thresholds = test_threshold if test_threshold is not None else stationarity_test_threshold
+        self.test_class = test_class
+        self._test_result_cache: Optional[pd.DataFrame] = None
+        self._test_filter_cache: Optional[bool] = None
+
+    @property
+    def test_result(self) -> pd.DataFrame:
+        """
+        Execute staged stationarity checks and return the most recent table.
+
+        Returns
+        -------
+        pd.DataFrame
+            Stationarity diagnostics matching :class:`StationarityTest`
+            output with an added ``Sample`` column denoting the sample on
+            which the reported results were obtained. Values are one of
+            ``'In'``, ``'In (no outliers)'``, ``'Full'``, or
+            ``'Full (no outliers)'``.
+
+        Raises
+        ------
+        ValueError
+            If feature construction yields an empty series for the provided
+            variable specification.
+        """
+
+        if self._test_result_cache is not None:
+            return self._test_result_cache
+
+        if isinstance(self.variable, Mapping):
+            result_df, passed = self._evaluate_series_collection(self.variable)
+        else:
+            result_df, passed = self._evaluate_variable(self.variable)
+
+        # If still failing and the variable carries an original component,
+        # retry using the unfiltered base variable for a broader assessment.
+        if not passed and isinstance(self.variable, (RgmVar, CondVar)):
+            original_spec = self._resolve_original_variable(self.variable)
+            result_df, passed = self._evaluate_variable(original_spec)
+
+        self._test_result_cache = result_df
+        self._test_filter_cache = passed
+        return result_df
+
+    @property
+    def test_filter(self) -> bool:
+        """
+        Return True if any staged stationarity check passes.
+        """
+
+        if self._test_filter_cache is None:
+            _ = self.test_result
+        return self._apply_force_filter_pass(bool(self._test_filter_cache))
+
+    def _build_feature_series(self, variable_spec: Union[str, TSFM, RgmVar, CondVar]) -> pd.Series:
+        """
+        Construct a single feature series from the provided specification.
+
+        Parameters
+        ----------
+        variable_spec : Union[str, TSFM, RgmVar, CondVar]
+            Feature identifier forwarded to :meth:`DataManager.build_features`.
+
+        Returns
+        -------
+        pd.Series
+            The first column from the constructed feature frame.
+
+        Raises
+        ------
+        ValueError
+            If the constructed DataFrame is empty.
+        """
+
+        feature_frame = self.dm.build_features([variable_spec])
+        if feature_frame.empty:
+            raise ValueError(
+                "FullStationarityTest: constructed feature frame is empty; "
+                "unable to perform stationarity checks."
+            )
+        series = feature_frame.iloc[:, 0]
+        series.name = series.name or str(variable_spec)
+        return series
+
+    def _evaluate_variable(
+        self,
+        variable_spec: Union[str, TSFM, RgmVar, CondVar],
+    ) -> Tuple[pd.DataFrame, bool]:
+        """
+        Run stationarity tests on the configured sample with optional outlier removal.
+
+        Parameters
+        ----------
+        variable_spec : Union[str, TSFM, RgmVar, CondVar]
+            Specification passed to :meth:`DataManager.build_features`.
+
+        Returns
+        -------
+        Tuple[pandas.DataFrame, bool]
+            The latest test result table and whether any stage passed.
+        """
+
+        series = self._build_feature_series(variable_spec)
+        sample_idx = self._resolve_sample_index()
+        sample_label = 'In' if self.sample == 'in' else 'Full'
+        return self._run_sample_sequence(series, sample_idx, sample_label)
+
+    def _resolve_sample_index(self) -> pd.Index:
+        """
+        Select the appropriate sample index for the configured sample setting.
+
+        Returns
+        -------
+        pd.Index
+            Index representing the requested sample slice.
+        """
+
+        if self.sample == 'in':
+            return self.dm.in_sample_idx
+
+        out_idx = getattr(self.dm, 'out_sample_idx', None)
+        return self.dm.in_sample_idx if out_idx is None else self.dm.in_sample_idx.append(out_idx)
+
+    def _run_sample_sequence(
+        self,
+        series: pd.Series,
+        sample_idx: pd.Index,
+        base_label: str,
+    ) -> Tuple[pd.DataFrame, bool]:
+        """
+        Execute stationarity tests on the requested sample and, if needed, its outlier-removed counterpart.
+
+        Parameters
+        ----------
+        series : pd.Series
+            Full feature series prior to sample slicing.
+        sample_idx : pd.Index
+            Index labels defining the sample to evaluate.
+        base_label : str
+            Label recorded in the ``Sample`` column for the primary run.
+
+        Returns
+        -------
+        Tuple[pd.DataFrame, bool]
+            The stationarity result table for the successful sample and whether it
+            satisfied the configured filter mode.
+        """
+
+        result_df, passed = self._run_stationarity(series, sample_idx, base_label)
+        if passed or not self.outlier_idx:
+            return result_df, passed
+
+        cleaned_series = series.drop(index=pd.Index(self.outlier_idx), errors='ignore')
+        if cleaned_series.empty:
+            return result_df, False
+
+        return self._run_stationarity(cleaned_series, sample_idx, f"{base_label} (no outliers)")
+
+    def _run_stationarity(
+        self,
+        series: pd.Series,
+        sample_idx: pd.Index,
+        sample_label: str,
+    ) -> Tuple[pd.DataFrame, bool]:
+        """
+        Execute the configured stationarity test for a specific sample.
+
+        Parameters
+        ----------
+        series : pd.Series
+            Full feature series prior to sample slicing.
+        sample_idx : pd.Index
+            Index labels defining the sample to evaluate (e.g., in-sample).
+        sample_label : str
+            Label recorded in the ``Sample`` column of the result table.
+
+        Returns
+        -------
+        Tuple[pd.DataFrame, bool]
+            The stationarity result table for the given sample and whether it
+            satisfied the configured filter mode.
+        """
+
+        aligned_idx = sample_idx[sample_idx.isin(series.index)]
+        test_instance = self.test_class(
+            series=series.loc[aligned_idx],
+            alias=self.alias,
+            filter_mode=self.filter_mode,
+            test_dict=self.test_dict,
+            test_threshold=self.thresholds,
+            filter_on=self.filter_on,
+        )
+        result_df = test_instance.test_result.copy()
+
+        # Insert sample indicator before the Passed column for readability.
+        insert_at = result_df.columns.get_loc('Passed')
+        result_df.insert(insert_at, 'Sample', sample_label)
+        return result_df, test_instance.test_filter
+
+    @staticmethod
+    def _resolve_original_variable(variable_spec: Union[RgmVar, CondVar]) -> Union[str, TSFM]:
+        """
+        Extract the underlying base variable from regime or conditional specs.
+
+        Parameters
+        ----------
+        variable_spec : Union[RgmVar, CondVar]
+            Regime or conditional feature wrapper.
+
+        Returns
+        -------
+        Union[str, TSFM]
+            The unwrapped variable specification suitable for feature
+            construction.
+
+        Examples
+        --------
+        >>> FullStationarityTest._resolve_original_variable(RgmVar('GDP', var_feature=TSFM('GDP')))
+        TSFM('GDP')
+        >>> FullStationarityTest._resolve_original_variable(CondVar('CPI'))
+        'CPI'
+        """
+
+        # Prefer the original transform when present so fallback testing mirrors
+        # the non-regime specification rather than the raw base variable.
+        if isinstance(variable_spec, RgmVar) and getattr(variable_spec, "var_feature", None) is not None:
+            return variable_spec.var_feature
+        return variable_spec.var
+
+    def _evaluate_series_collection(
+        self, series_map: Mapping[str, pd.Series]
+    ) -> Tuple[pd.DataFrame, bool]:
+        """
+        Evaluate a mapping of sample labels to series until one is stationary.
+
+        Parameters
+        ----------
+        series_map : Mapping[str, pd.Series]
+            Ordered collection of sample labels to candidate series. Series are
+            tested sequentially until a stationary candidate is found.
+
+        Returns
+        -------
+        Tuple[pandas.DataFrame, bool]
+            The latest test result table with an inserted ``Sample`` column and
+            whether any candidate series satisfied the configured filter mode.
+
+        Raises
+        ------
+        ValueError
+            If ``series_map`` is empty.
+        """
+
+        if not series_map:
+            raise ValueError(
+                "FullStationarityTest: variable dictionary is empty; unable to "
+                "perform stationarity checks."
+            )
+
+        latest_result: Optional[pd.DataFrame] = None
+        passed_any = False
+
+        for sample_label, sample_series in series_map.items():
+            if sample_series is None:
+                continue
+
+            # Normalize to Series to support array-like inputs while preserving
+            # any explicit index supplied by the caller.
+            normalized_series = sample_series if isinstance(sample_series, pd.Series) else pd.Series(sample_series)
+            test_instance = self.test_class(
+                series=normalized_series,
+                alias=self.alias,
+                filter_mode=self.filter_mode,
+                test_dict=self.test_dict,
+                test_threshold=self.thresholds,
+                filter_on=self.filter_on,
+            )
+            result_df = test_instance.test_result.copy()
+            insert_at = result_df.columns.get_loc('Passed') if 'Passed' in result_df.columns else len(result_df.columns)
+            result_df.insert(insert_at, 'Sample', sample_label)
+            latest_result = result_df
+            if test_instance.test_filter:
+                passed_any = True
+                break
+
+        return latest_result if latest_result is not None else pd.DataFrame(), passed_any
+
+
+class TargetStationarityTest(ModelTestBase):
+    """
+    Assemble target-focused stationarity diagnostics with optional outlier handling.
+
+    Parameters
+    ----------
+    target : str
+        Column name of the target variable within ``dm.internal_data``.
+    dm : DataManager
+        Data manager supplying target history and sample index boundaries.
+    sample : {'in', 'full'}, default 'in'
+        Which sample scope to use when evaluating filter status. ``'in'``
+        restricts filtering to in-sample checks, while ``'full'`` uses the
+        full-sample evaluations.
+    outlier_idx : Optional[List[Any]]
+        Index labels to exclude when constructing outlier-adjusted target
+        series. Missing labels are ignored.
+    alias : str, optional
+        Display name for this test (defaults to class name).
+    filter_mode : {'strict', 'moderate'}, default 'moderate'
+        Passed through to the underlying :class:`StationarityTest` instances.
+    test_dict : Dict[str, callable], optional
+        Mapping of test names to functions; defaults to
+        ``stationarity_test_dict``.
+    test_threshold : Dict[str, Tuple[float, str]], optional
+        Test thresholds and directions; defaults to
+        ``stationarity_test_threshold``.
+    filter_on : bool, default True
+        Whether this test participates in filtering.
+    test_class : Type[StationarityTest], optional
+        Test class to instantiate for each sample evaluation. Defaults to
+        :class:`StationarityTest`.
+
+    Attributes
+    ----------
+    caveat : str
+        Warning text populated when full-sample checks pass but in-sample
+        checks fail, prompting escalation.
+
+    Examples
+    --------
+    >>> tst = TargetStationarityTest(target='NII', dm=dm)
+    >>> tst.test_result
+    >>> tst.test_filter
+    >>> tst.caveat
+    """
+
+    category = 'assumption'
+
+    def __init__(
+        self,
+        target: str,
+        dm: DataManager,
+        sample: str = 'in',
+        outlier_idx: Optional[List[Any]] = None,
+        alias: Optional[str] = None,
+        filter_mode: str = 'moderate',
+        test_dict: Optional[Dict[str, Callable]] = None,
+        test_threshold: Optional[Dict[str, Tuple[float, str]]] = None,
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
+        test_class: Type[StationarityTest] = StationarityTest,
+    ) -> None:
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
+        self.target = target
+        self.dm = dm
+        self.sample = sample.lower()
+        if self.sample not in {'in', 'full'}:
+            raise ValueError("sample must be either 'in' or 'full'")
+        self.outlier_idx = list(outlier_idx) if outlier_idx else []
+        self.test_dict = test_dict if test_dict is not None else stationarity_test_dict
+        self.thresholds = test_threshold if test_threshold is not None else stationarity_test_threshold
+        self.test_class = test_class
+        self._test_result_cache: Optional[pd.DataFrame] = None
+        self._test_filter_cache: Optional[bool] = None
+        self._pass_by_sample: Dict[str, bool] = {}
+        self._caveat: str = ''
+
+    @property
+    def test_result(self) -> pd.DataFrame:
+        """
+        Execute target stationarity checks across in-sample and full-sample variants.
+
+        Returns
+        -------
+        pd.DataFrame
+            Stationarity diagnostics for each sample variant with a ``Sample``
+            column identifying ``'In'``, ``'In (no outliers)'``, ``'Full'``,
+            and ``'Full (no outliers)'`` entries. A ``Filter Sample`` column
+            indicates whether the test filter relies on the in-sample or
+            full-sample evaluations.
+
+        Raises
+        ------
+        KeyError
+            If ``target`` is not present in :attr:`DataManager.internal_data`.
+        """
+
+        if self._test_result_cache is not None:
+            return self._test_result_cache
+
+        series_map = self._build_target_series_dictionary()
+        results: List[pd.DataFrame] = []
+        self._pass_by_sample = {}
+
+        # Evaluate base samples first; only run outlier-removed variants when the
+        # corresponding base sample fails. This honors the requested short-circuit
+        # behavior while still returning all executed diagnostics.
+        in_passed = False
+        full_passed = False
+        for sample_label, series in series_map.items():
+            if sample_label == 'In (no outliers)' and in_passed:
+                continue
+            if sample_label == 'Full (no outliers)' and full_passed:
+                continue
+
+            test_instance = self.test_class(
+                series=series,
+                alias=self.alias,
+                filter_mode=self.filter_mode,
+                test_dict=self.test_dict,
+                test_threshold=self.thresholds,
+                filter_on=self.filter_on,
+            )
+            result_df = test_instance.test_result.copy()
+            insert_at = result_df.columns.get_loc('Passed')
+            result_df.insert(insert_at, 'Sample', sample_label)
+            result_df.insert(
+                insert_at + 1,
+                'Filter Sample',
+                'In' if self.sample == 'in' else 'Full',
+            )
+            results.append(result_df)
+            passed_flag = bool(test_instance.test_filter)
+            self._pass_by_sample[sample_label] = passed_flag
+
+            if sample_label.startswith('In'):
+                in_passed = in_passed or passed_flag
+            else:
+                full_passed = full_passed or passed_flag
+
+        self._test_result_cache = pd.concat(results) if results else pd.DataFrame()
+        self._test_filter_cache = self._resolve_test_filter()
+        self._caveat = self._resolve_caveat()
+        return self._test_result_cache
+
+    @property
+    def test_filter(self) -> bool:
+        """
+        Return True if stationarity passes on the configured sample scope.
+        """
+
+        if self._test_filter_cache is None:
+            _ = self.test_result
+        return self._apply_force_filter_pass(bool(self._test_filter_cache))
+
+    @property
+    def caveat(self) -> str:
+        """
+        Warning message highlighting divergent in-sample and full-sample results.
+
+        Returns
+        -------
+        str
+            Non-empty warning text when only full-sample variants are stationary;
+            otherwise an empty string.
+        """
+
+        if self._test_filter_cache is None:
+            _ = self.test_result
+        return self._caveat
+
+    def _resolve_test_filter(self) -> bool:
+        """
+        Compute the filter status based on the configured sample scope.
+
+        Returns
+        -------
+        bool
+            ``True`` when any relevant sample slice (with or without outliers)
+            passes its stationarity check under the configured filter mode.
+        """
+
+        in_labels = ('In', 'In (no outliers)')
+        full_labels = ('Full', 'Full (no outliers)')
+        if self.sample == 'in':
+            return any(self._pass_by_sample.get(label, False) for label in in_labels)
+        return any(self._pass_by_sample.get(label, False) for label in full_labels)
+
+    def _resolve_caveat(self) -> str:
+        """
+        Generate a cautionary note when in-sample and full-sample results diverge.
+
+        Returns
+        -------
+        str
+            Warning text instructing escalation when only the full sample passes;
+            otherwise an empty string.
+        """
+
+        in_labels = ('In', 'In (no outliers)')
+        full_labels = ('Full', 'Full (no outliers)')
+        in_pass = any(self._pass_by_sample.get(label, False) for label in in_labels)
+        full_pass = any(self._pass_by_sample.get(label, False) for label in full_labels)
+        if not in_pass and full_pass:
+            return (
+                "The in-sample and the full-sample yield different results for stationarity tests. "
+                "Please escalate for a managerial decision on whether the target should be treated "
+                "as stationary. If full-sample results are required, use test_update_func to update "
+                "all stationarity tests when running model search."
+            )
+        return ''
+
+    @property
+    def filter_mode_desc(self) -> str:
+        """
+        Describe the active filter mode using the underlying test class mapping.
+
+        Returns
+        -------
+        str
+            Human-readable description of the filter criteria, or an empty
+            string when unavailable.
+        """
+
+        mode_descs = getattr(self.test_class, 'filter_mode_descs', None)
+        if isinstance(mode_descs, dict):
+            return mode_descs.get(self.filter_mode, '')
+        return ''
+
+    def _build_target_series_dictionary(self) -> Dict[str, pd.Series]:
+        """
+        Construct target sample variants for stationarity diagnostics.
+
+        Returns
+        -------
+        Dict[str, pd.Series]
+            Mapping of sample labels to target series variants: in-sample,
+            full-sample, and their outlier-removed counterparts.
+
+        Raises
+        ------
+        KeyError
+            If the target is not available within ``dm.internal_data``.
+        """
+
+        internal_data = self.dm.internal_data
+        if self.target not in internal_data.columns:
+            raise KeyError(
+                f"Target '{self.target}' not found in DataManager.internal_data columns."
+            )
+
+        target_series = internal_data[self.target]
+        in_sample_series = target_series.loc[self.dm.in_sample_idx]
+        out_sample_idx = getattr(self.dm, 'out_sample_idx', None)
+        if out_sample_idx is None or len(out_sample_idx) == 0:
+            full_sample_series = in_sample_series
+        else:
+            out_sample_series = target_series.loc[out_sample_idx]
+            full_sample_series = pd.concat([in_sample_series, out_sample_series])
+
+        if self.outlier_idx:
+            outlier_labels = pd.Index(self.outlier_idx)
+            in_no_outliers = in_sample_series.drop(index=outlier_labels, errors='ignore')
+            full_no_outliers = full_sample_series.drop(index=outlier_labels, errors='ignore')
+        else:
+            in_no_outliers = in_sample_series
+            full_no_outliers = full_sample_series
+
+        return {
+            'In': in_sample_series,
+            'In (no outliers)': in_no_outliers,
+            'Full': full_sample_series,
+            'Full (no outliers)': full_no_outliers,
+        }
+
+    @staticmethod
+    def _resolve_original_variable(variable_spec: Union[RgmVar, CondVar]) -> Union[str, TSFM]:
+        """
+        Extract the base variable from a regime or conditional specification.
+
+        Parameters
+        ----------
+        variable_spec : Union[RgmVar, CondVar]
+            Regime or conditional feature wrapper.
+
+        Returns
+        -------
+        Union[str, TSFM]
+            The unwrapped variable specification suitable for feature
+            construction.
+        """
+        # Prefer the original transform when present (e.g., a TSFM wrapped by
+        # a regime indicator) so fallback testing mirrors the non-regime
+        # specification rather than the raw base variable.
+        if isinstance(variable_spec, RgmVar) and getattr(variable_spec, "var_feature", None) is not None:
+            return variable_spec.var_feature
+        return variable_spec.var
+
+
 # ----------------------------------------------------------------------------
 # PvalueTest class
 # ----------------------------------------------------------------------------
@@ -830,6 +1616,10 @@ class CoefTest(ModelTestBase):
     filter_mode : {'strict','moderate'}, default 'moderate'
         - 'strict'   → require p-value < 0.05 for all.
         - 'moderate' → require p-value < 0.10 for all.
+    weak_limit : int, optional
+        Maximum number of coefficients allowed in the (0.05, 0.10) band when
+        ``filter_mode`` is ``'moderate'``. Use ``None`` to keep the default
+        requirement that all coefficients remain below 0.10.
     """
     category = 'performance'
 
@@ -844,12 +1634,22 @@ class CoefTest(ModelTestBase):
         pvalues: pd.Series,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = True
+        filter_on: bool = True,
+        weak_limit: Optional[int] = None,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.pvalues = pvalues
         # Set α based on mode
         self.alpha = 0.05 if filter_mode == 'strict' else 0.10
+        if weak_limit is not None and weak_limit < 0:
+            raise ValueError("weak_limit must be non-negative when provided")
+        self.weak_limit = weak_limit
     
     @property
     def filter_mode_desc(self):
@@ -881,9 +1681,46 @@ class CoefTest(ModelTestBase):
     @property
     def test_filter(self) -> bool:
         """
-        All coefficients must pass (p-value < α) to pass the test.
+        Evaluate whether coefficient significance meets the configured filter.
+
+        Returns
+        -------
+        bool
+            ``True`` when coefficients satisfy the selected significance
+            threshold and any configured ``weak_limit`` allowances; otherwise
+            ``False``.
+
+        Notes
+        -----
+        When ``filter_mode`` is ``'moderate'`` and ``weak_limit`` is set, up to
+        ``weak_limit`` coefficients may fall within the (0.05, 0.10) interval as
+        long as no coefficient exceeds the 0.10 alpha threshold. A safeguard
+        also forces failure if ``weak_limit`` equals 1 and more than one
+        p-value exceeds 0.5.
         """
-        return self.test_result['Passed'].all()
+        # If weak_limit explicitly disallows very weak signals, fail fast when
+        # multiple coefficients have extremely high p-values despite a relaxed
+        # moderate filter (user-requested safeguard).
+        high_pvalue_count = int((self.pvalues > 0.5).sum())
+        if self.weak_limit == 1 and high_pvalue_count > 1:
+            return self._apply_force_filter_pass(False)
+
+        # Default rule: all coefficients below the alpha threshold.
+        base_pass = self.test_result['Passed'].all()
+        if self.filter_mode != 'moderate' or self.weak_limit is None:
+            return self._apply_force_filter_pass(base_pass)
+
+        # Under moderate filtering, allow up to `weak_limit` coefficients to be
+        # in the (0.05, 0.10) band while still requiring everyone to remain
+        # below the 0.10 alpha cut-off.
+        weak_band = (self.pvalues > 0.05) & (self.pvalues < 0.10)
+        weak_count = int(weak_band.sum())
+        if weak_count > self.weak_limit:
+            return self._apply_force_filter_pass(False)
+
+        # Ensure no coefficient exceeds the relaxed alpha even when weak slots
+        # are available.
+        return self._apply_force_filter_pass(base_pass)
 
 
 # ----------------------------------------------------------------------------
@@ -917,9 +1754,15 @@ class GroupTest(ModelTestBase):
         alpha: float = 0.05,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.model_result = model_result
         self.vars = vars
         self.alpha = alpha
@@ -968,7 +1811,7 @@ class GroupTest(ModelTestBase):
         """
         Return True if the F-test p-value meets threshold for filter_mode.
         """
-        return bool(self.test_result['Passed'].iloc[0])
+        return self._apply_force_filter_pass(bool(self.test_result['Passed'].iloc[0]))
 
 
 # ----------------------------------------------------------------------------
@@ -977,12 +1820,12 @@ class GroupTest(ModelTestBase):
 
 class SignCheck(ModelTestBase):
     """
-    Test whether model coefficients have the expected signs based on TSFM exp_sign values.
+    Test whether model coefficients have the expected signs based on Feature exp_sign values.
 
     Parameters
     ----------
-    tsfm_list : List[TSFM]
-        List of TSFM transformation instances with exp_sign attributes.
+    feature_list : List[Feature]
+        List of Feature-like objects that expose ``exp_sign`` and ``name`` attributes.
     coefficients : pd.Series
         Series of model coefficients with variable names as index.
     alias : str, optional
@@ -1009,14 +1852,20 @@ class SignCheck(ModelTestBase):
 
     def __init__(
         self,
-        tsfm_list: List,  # List[TSFM] but avoiding import issues
+        feature_list: List[Feature],
         coefficients: pd.Series,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
-        self.tsfm_list = tsfm_list
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
+        self.feature_list = feature_list
         self.coefficients = coefficients
         self.filter_mode_descs = {
             'strict':   'All coefficients must have expected signs.',
@@ -1030,12 +1879,12 @@ class SignCheck(ModelTestBase):
     @property
     def test_result(self) -> pd.DataFrame:
         """
-        Check coefficient signs against expected signs from TSFM instances.
+        Check coefficient signs against expected signs from provided feature objects.
 
         Returns
         -------
         pd.DataFrame
-            Index: TSFM names (where exp_sign != 0)
+            Index: feature names (where exp_sign != 0)
             Columns:
               - 'Expected': '+' for positive, '-' for negative expected sign
               - 'Coefficient': actual coefficient value
@@ -1051,34 +1900,39 @@ class SignCheck(ModelTestBase):
         └──────────┴───────────┴─────────────┴────────┘
         """
         records = []
-        
-        for tsfm in self.tsfm_list:
-            # Skip TSFM instances where exp_sign is 0 (no expectation)
-            if tsfm.exp_sign == 0:
+
+        for feature in self.feature_list:
+            if not hasattr(feature, 'exp_sign'):
+                raise AttributeError(
+                    f"Feature '{feature}' does not define required 'exp_sign' attribute."
+                )
+
+            # Skip features where exp_sign is 0 (no expectation)
+            if feature.exp_sign == 0:
                 continue
-                
-            tsfm_name = tsfm.name
-            
-            # Check if coefficient exists for this TSFM
+
+            tsfm_name = feature.name
+
+            # Check if coefficient exists for this feature
             if tsfm_name not in self.coefficients.index:
                 # If coefficient not found, mark as failed
-                expected_sign = '+' if tsfm.exp_sign > 0 else '-'
+                expected_sign = '+' if feature.exp_sign > 0 else '-'
                 records.append({
                     'Expected': expected_sign,
                     'Coefficient': np.nan,
                     'Passed': False
                 })
                 continue
-            
+
             coeff_value = self.coefficients[tsfm_name]
-            expected_sign = '+' if tsfm.exp_sign > 0 else '-'
-            
+            expected_sign = '+' if feature.exp_sign > 0 else '-'
+
             # Check if signs match
-            if tsfm.exp_sign > 0:
+            if feature.exp_sign > 0:
                 # Expect positive coefficient
                 passed = coeff_value > 0
             else:
-                # Expect negative coefficient  
+                # Expect negative coefficient
                 passed = coeff_value < 0
             
             records.append({
@@ -1086,12 +1940,12 @@ class SignCheck(ModelTestBase):
                 'Coefficient': coeff_value,
                 'Passed': passed
             })
-        
-        # Create DataFrame with TSFM names as index
-        tsfm_names = [tsfm.name for tsfm in self.tsfm_list if tsfm.exp_sign != 0]
+
+        # Create DataFrame with feature names as index
+        tsfm_names = [feature.name for feature in self.feature_list if feature.exp_sign != 0]
         df = pd.DataFrame(records, index=tsfm_names)
         df.index.name = 'Variable'
-        
+
         return df
 
     @property
@@ -1101,8 +1955,8 @@ class SignCheck(ModelTestBase):
         with matching signs.
         """
         if self.test_result.empty:
-            return True  # No expectations to check
-        return self.test_result['Passed'].all()
+            return self._apply_force_filter_pass(True)  # No expectations to check
+        return self._apply_force_filter_pass(self.test_result['Passed'].all())
 
 
 # ----------------------------------------------------------------------------
@@ -1158,9 +2012,15 @@ class BaseGrowthTest(ModelTestBase):
         freq: str,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = False
+        filter_on: bool = False,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         if not isinstance(coeffs, pd.Series):
             raise TypeError("coeffs must be a pandas Series")
         self.coeffs = coeffs
@@ -1221,7 +2081,7 @@ class BaseGrowthTest(ModelTestBase):
     def test_filter(self) -> bool:
         value = self._compute_base_growth()
         thr = self._thresholds[self.filter_mode]
-        return (-thr <= value <= thr)
+        return self._apply_force_filter_pass(-thr <= value <= thr)
 
 
 # ----------------------------------------------------------------------------
@@ -1249,9 +2109,15 @@ class VIFTest(ModelTestBase):
         exog: Union[np.ndarray, pd.DataFrame, list],
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.exog = pd.DataFrame(exog)
         self.filter_mode_descs = {
         'strict': 'Threshold = 5',
@@ -1300,7 +2166,7 @@ class VIFTest(ModelTestBase):
         Passes if all VIFs are below the threshold implied by filter_mode.
         """
         threshold = 5.0 if self.filter_mode == 'strict' else 10.0
-        return (self.test_result['VIF'] <= threshold).all()
+        return self._apply_force_filter_pass((self.test_result['VIF'] <= threshold).all())
     
 # ----------------------------------------------------------------------------
 # Co-integration Test
@@ -1350,9 +2216,15 @@ class CointTest(ModelTestBase):
         test_threshold: Optional[Dict[str, Tuple[float, str]]] = None,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.X_vars = X_vars
         self.resids = resids
         self.test_dict = test_dict if test_dict is not None else stationarity_test_dict
@@ -1396,7 +2268,9 @@ class CointTest(ModelTestBase):
         
         # Test each X variable (expect non-stationary)
         for col in self.X_vars.columns:
-            series = self.X_vars[col].dropna()
+            # Ensure numeric dtype to prevent unit-root tests from failing when
+            # a column mixes ints and floats.
+            series = pd.to_numeric(self.X_vars[col], errors='coerce').dropna().astype(float)
             if len(series) < 10:  # Skip series that are too short
                 continue
                 
@@ -1457,7 +2331,8 @@ class CointTest(ModelTestBase):
             records.append(record)
         
         # Test residuals (expect stationary)
-        resid_series = self.resids.dropna()
+        # Standardize residual dtype for unit-root diagnostics.
+        resid_series = pd.to_numeric(self.resids, errors='coerce').dropna().astype(float)
         if len(resid_series) >= 10:
             record = {
                 'Type': 'Residuals',
@@ -1526,10 +2401,226 @@ class CointTest(ModelTestBase):
         """
         results = self.test_result
         if results.empty:
-            return False
-            
+            return self._apply_force_filter_pass(False)
+
         # All variables must pass their expectations (logic already handled in test_result)
-        return results['Passed'].all()
+        return self._apply_force_filter_pass(results['Passed'].all())
+
+class MultiFullStationarityTest(ModelTestBase):
+    """
+    Run staged stationarity tests across all feature specifications in a model option.
+
+    The class builds a :class:`FullStationarityTest` for each string or Feature
+    spec provided, excluding dummy specifications. It consolidates the
+    sample-aware diagnostics into a single DataFrame to highlight which sample
+    (in-sample, full-sample, or original-variable reruns) determined the
+    outcome.
+
+    Parameters
+    ----------
+    specs : List[Union[str, Feature]]
+        Feature specifications, as accepted by :class:`ModelBase`, flattened
+        automatically to individual entries. Dummy specs are ignored.
+    dm : DataManager
+        Data manager used to build features and provide sample indices.
+    sample : {'in', 'full'}, default 'in'
+        Which sample slice to evaluate for each feature. ``'in'`` limits the
+        diagnostics to the in-sample portion; ``'full'`` combines in- and
+        out-of-sample periods.
+    outlier_idx : list, optional
+        Index labels removed from the evaluated sample before re-running
+        stationarity checks when initial tests fail.
+    test_dict : Dict[str, callable], optional
+        Mapping of test names to functions; defaults to ``stationarity_test_dict``.
+    test_threshold : Dict[str, Tuple[float, str]], optional
+        Thresholds and inequality directions for each test; defaults to
+        ``stationarity_test_threshold``.
+    alias : str, optional
+        Display name for this test suite (defaults to class name).
+    filter_mode : {'strict','moderate'}, default 'moderate'
+        - 'strict': all individual stationarity diagnostics must pass per feature
+        - 'moderate': at least half of the diagnostics must pass per feature
+    filter_on : bool, default True
+        Whether this test participates in filtering decisions.
+    full_test_class : Type[FullStationarityTest], optional
+        Class used to instantiate staged stationarity checks; defaults to
+        :class:`FullStationarityTest`.
+    stationarity_test_class : Type[StationarityTest], optional
+        Underlying stationarity implementation passed through to each
+        :class:`FullStationarityTest` instance.
+
+    Raises
+    ------
+    ValueError
+        If ``specs`` is empty or ``sample`` is not one of ``'in'`` or ``'full'``.
+    TypeError
+        If a spec is neither a string nor a Feature instance (excluding
+        :class:`DumVar`).
+
+    Examples
+    --------
+    >>> multi_full = MultiFullStationarityTest(specs=['GDP', TSFM('UNRATE', diff)], dm=dm)
+    >>> multi_full.test_result
+    >>> multi_full.test_filter
+    """
+
+    category = 'assumption'
+
+    def __init__(
+        self,
+        specs: List[Union[str, Feature]],
+        dm: DataManager,
+        sample: str = 'in',
+        outlier_idx: Optional[List[Any]] = None,
+        test_dict: Optional[Dict[str, Callable]] = None,
+        test_threshold: Optional[Dict[str, Tuple[float, str]]] = None,
+        alias: Optional[str] = None,
+        filter_mode: str = 'moderate',
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
+        full_test_class: Type[FullStationarityTest] = FullStationarityTest,
+        stationarity_test_class: Type[StationarityTest] = StationarityTest,
+    ) -> None:
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
+        if not specs:
+            raise ValueError("specs must contain at least one feature specification.")
+        self.specs = specs
+        self.dm = dm
+        self.sample = sample.lower()
+        if self.sample not in {'in', 'full'}:
+            raise ValueError("sample must be either 'in' or 'full'")
+        self.outlier_idx = list(outlier_idx) if outlier_idx else []
+        self.test_dict = test_dict if test_dict is not None else stationarity_test_dict
+        self.thresholds = test_threshold if test_threshold is not None else stationarity_test_threshold
+        self.filter_mode_descs = {
+            'strict':   'All individual tests must pass for each variable.',
+            'moderate': 'At least half of individual tests must pass for each variable.'
+        }
+        self.full_test_class = full_test_class
+        self.stationarity_test_class = stationarity_test_class
+
+        self._individual_tests: Dict[str, FullStationarityTest] = {}
+        for spec in self._flatten_specs(self.specs):
+            if isinstance(spec, DumVar):
+                # Dummy variables are intentionally excluded from stationarity checks.
+                continue
+            if isinstance(spec, (str, Feature)):
+                label = self._spec_label(spec)
+                self._individual_tests[label] = self.full_test_class(
+                    variable=spec,
+                    dm=self.dm,
+                    sample=self.sample,
+                    outlier_idx=self.outlier_idx,
+                    alias=self.alias,
+                    filter_mode=self.filter_mode,
+                    test_dict=self.test_dict,
+                    test_threshold=self.thresholds,
+                    filter_on=self.filter_on,
+                    test_class=self.stationarity_test_class,
+                )
+            else:
+                raise TypeError(
+                    f"Unsupported spec type {type(spec)} for MultiFullStationarityTest."
+                )
+
+    @property
+    def filter_mode_desc(self) -> str:
+        """Human-readable description of the configured filter mode."""
+
+        return self.filter_mode_descs[self.filter_mode]
+
+    @property
+    def test_result(self) -> pd.DataFrame:
+        """
+        Run staged stationarity tests on all valid specs and consolidate results.
+
+        Returns
+        -------
+        pd.DataFrame
+            Index: Feature names
+            Columns: For each test in ``test_dict``
+                - ``{test_name}_Statistic``
+                - ``{test_name}_P-value``
+                - ``{test_name}_Passed``
+            Plus:
+                - ``Sample`` indicating which sample produced the recorded result
+                - ``Passed`` indicating the overall outcome per feature
+        """
+
+        if not self._individual_tests:
+            return pd.DataFrame()
+
+        records: List[Dict[str, Any]] = []
+        test_names = list(self.test_dict.keys())
+
+        for var_name, stat_test in self._individual_tests.items():
+            record: Dict[str, Any] = {'Variable': var_name}
+
+            individual_results = stat_test.test_result
+
+            # Guard against empty result tables so consolidations never raise
+            # IndexError and instead return a fully NA record.
+            if individual_results.empty or 'Sample' not in individual_results.columns:
+                sample_value = np.nan
+            else:
+                sample_value = individual_results['Sample'].iloc[0]
+            record['Sample'] = sample_value
+
+            for test_name in test_names:
+                if not individual_results.empty and test_name in individual_results.index:
+                    record[f'{test_name}_Statistic'] = individual_results.loc[test_name, 'Statistic']
+                    record[f'{test_name}_P-value'] = individual_results.loc[test_name, 'P-value']
+                    record[f'{test_name}_Passed'] = individual_results.loc[test_name, 'Passed']
+                else:
+                    record[f'{test_name}_Statistic'] = np.nan
+                    record[f'{test_name}_P-value'] = np.nan
+                    record[f'{test_name}_Passed'] = False
+
+            record['Passed'] = stat_test.test_filter
+            records.append(record)
+
+        return pd.DataFrame(records).set_index('Variable')
+
+    @property
+    def test_filter(self) -> bool:
+        """Return True if all staged stationarity tests pass for every spec."""
+
+        if not self._individual_tests:
+            return self._apply_force_filter_pass(True)
+
+        return self._apply_force_filter_pass(
+            all(test.test_filter for test in self._individual_tests.values())
+        )
+
+    @staticmethod
+    def _flatten_specs(items: Any) -> List[Any]:
+        """Flatten nested spec containers to a single list."""
+
+        flattened: List[Any] = []
+        for item in items:
+            if isinstance(item, (list, tuple)):
+                flattened.extend(MultiFullStationarityTest._flatten_specs(item))
+            else:
+                flattened.append(item)
+        return flattened
+
+    @staticmethod
+    def _spec_label(spec: Union[str, Feature]) -> str:
+        """Derive a user-friendly label for a feature specification."""
+
+        if isinstance(spec, str):
+            return spec
+        if getattr(spec, 'alias', None):
+            return str(spec.alias)
+        if getattr(spec, 'name', None):
+            return str(spec.name)
+        return str(spec)
+
 
 class MultiStationarityTest(ModelTestBase):
     """
@@ -1578,9 +2669,15 @@ class MultiStationarityTest(ModelTestBase):
         test_threshold: Optional[Dict[str, Tuple[float, str]]] = None,
         alias: Optional[str] = None,
         filter_mode: str = 'moderate',
-        filter_on: bool = True
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
     ):
-        super().__init__(alias=alias, filter_mode=filter_mode, filter_on=filter_on)
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
         self.dataframe = dataframe
         self.test_dict = test_dict if test_dict is not None else stationarity_test_dict
         self.thresholds = test_threshold if test_threshold is not None else stationarity_test_threshold
@@ -1668,7 +2765,9 @@ class MultiStationarityTest(ModelTestBase):
         so we just need to check if all variables passed.
         """
         if not self._individual_tests:
-            return True  # No tests to run
-            
+            return self._apply_force_filter_pass(True)  # No tests to run
+
         # All variables must pass their individual stationarity tests
-        return all(test.test_filter for test in self._individual_tests.values())
+        return self._apply_force_filter_pass(
+            all(test.test_filter for test in self._individual_tests.values())
+        )

@@ -2,7 +2,7 @@
 # module: data.py
 # Purpose: Manage and combine internal and MEV data for modeling
 # Key Types/Classes: DataManager
-# Key Functions: build_features, _interpolate_df
+# Key Functions: build_feature, build_features, _interpolate_df
 # Dependencies: pandas, numpy, scipy, typing, DataLoader, MEVLoader, TSFM, CondVar, DumVar
 # =============================================================================
 import pandas as pd
@@ -18,6 +18,7 @@ from .transform import TSFM
 from .feature import Feature
 from . import transform as transform_module
 from .condition import CondVar
+from .regime import RgmVar
 from .periods import default_periods_for_freq, resolve_periods_argument
 import inspect
 import functools
@@ -744,27 +745,16 @@ class DataManager:
                 else:
                     yield it
         flat_specs = list(_flatten(specs))
-        
+
         # Initialize lists to collect features
         internal_pieces = []
         mev_pieces = []
         feature_pieces = []
-        
+
         for spec in flat_specs:
             if isinstance(spec, Feature):
+                self._ensure_feature_frequency(spec)
                 # For TSFM instances, ensure frequency consistency
-                if isinstance(spec, TSFM):
-                    if spec.freq is None:
-                        spec.freq = self.freq
-                    elif spec.freq != self.freq:
-                        warnings.warn(
-                            f"TSFM instance for '{spec.var}' has frequency '{spec.freq}' "
-                            f"but DataManager has frequency '{self.freq}'. "
-                            f"Updating TSFM frequency to match DataManager.",
-                            UserWarning
-                        )
-                        spec.freq = self.freq
-                
                 # For Features, we need to handle the result differently based on data type
                 feature_result = spec.apply(data_int, data_mev)
                 
@@ -867,17 +857,90 @@ class DataManager:
 
         return result
 
+    def build_feature(
+        self,
+        spec: Union[str, Feature, List[Union[str, Feature]]],
+        internal_df: Optional[pd.DataFrame] = None,
+        mev_df: Optional[pd.DataFrame] = None,
+    ) -> pd.DataFrame:
+        """
+        Build one or more features using a convenience wrapper.
+
+        Parameters
+        ----------
+        spec : Union[str, Feature, List[Union[str, Feature]]]
+            Single feature specification or list of specifications. Items can
+            include :class:`TSFM`, :class:`CondVar`, :class:`RgmVar`, or any
+            other :class:`Feature` subclass. Lists of :class:`RgmVar` objects
+            are supported and will be flattened before construction.
+        internal_df : pandas.DataFrame, optional
+            Override for internal data; defaults to ``self.internal_data``.
+        mev_df : pandas.DataFrame, optional
+            Override for model MEV data; defaults to ``self.model_mev``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Constructed feature set, equivalent to calling
+            :meth:`build_features` with ``spec`` wrapped in a list when
+            necessary.
+
+        Examples
+        --------
+        >>> rgm_specs = [RgmVar("GDP", "recession"), RgmVar("CPI", "recession", on=0)]
+        >>> dm.build_feature(rgm_specs)  # doctest: +SKIP
+        """
+
+        spec_list: List[Union[str, Feature]]
+        if isinstance(spec, (list, tuple)):
+            spec_list = list(spec)
+        else:
+            spec_list = [spec]
+
+        return self.build_features(spec_list, internal_df=internal_df, mev_df=mev_df)
+
+    def _ensure_feature_frequency(self, feature: Feature) -> None:
+        """
+        Align TSFM-backed features with the DataManager frequency.
+
+        The helper adjusts frequency metadata for standalone :class:`TSFM`
+        instances as well as regime-aware :class:`RgmVar` wrappers that embed a
+        TSFM specification via ``var_feature``.
+        """
+
+        tsfm_candidates: List[TSFM] = []
+        if isinstance(feature, TSFM):
+            tsfm_candidates.append(feature)
+        elif isinstance(feature, RgmVar) and isinstance(feature.var_feature, TSFM):
+            tsfm_candidates.append(feature.var_feature)
+
+        for tsfm_spec in tsfm_candidates:
+            if tsfm_spec.freq is None:
+                tsfm_spec.freq = self.freq
+            elif tsfm_spec.freq != self.freq:
+                warnings.warn(
+                    f"TSFM instance for '{tsfm_spec.var}' has frequency '{tsfm_spec.freq}' "
+                    f"but DataManager has frequency '{self.freq}'. Updating TSFM frequency "
+                    "to match DataManager.",
+                    UserWarning,
+                )
+                tsfm_spec.freq = self.freq
+
     def build_tsfm_specs(
         self,
-        specs: List[Union[str, TSFM]],
+        specs: List[Union[str, TSFM, Feature]],
         max_lag: int = 0,
         periods: Optional[List[int]] = None,
         exp_sign_map: Optional[Dict[str, int]] = None,
+        regime: Optional[str] = None,
+        regime_on: Union[bool, int] = True,
         **legacy_kwargs: Any
-    ) -> Dict[str, List[Union[str, TSFM]]]:
+    ) -> Dict[str, List[Union[str, TSFM, Feature]]]:
         """
         Generate TSFM specification lists for each variable based on their type.
-        Returns a mapping of variable names to lists of transform specifications.
+        Returns a mapping of variable names to lists of transform specifications,
+        optionally wrapping transforms in regime-aware variables and applying
+        expected sign metadata.
 
         This method uses the MEV type mapping and transform mapping from the MEVLoader
         to automatically generate appropriate transforms for each variable.
@@ -885,9 +948,12 @@ class DataManager:
         Parameters
         ----------
         specs : list
-            List of variable names or TSFM instances to generate specs for.
+            List of variable names, TSFM instances, or Feature objects to
+            generate specs for.
             - str: Variable names will be mapped to transforms based on their type
             - TSFM: Transform instances will be used as-is
+            - Feature: Used directly after expected sign assignment when
+              applicable
         max_lag : int, default=0
             Generate transform entries for lags 0 through max_lag.
             Must be non-negative.
@@ -907,17 +973,26 @@ class DataManager:
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             - Keys: MEV variable names (str)
             - Values: Expected signs (int): 1 for positive, -1 for negative, 0 for no expectation
-            If provided, TSFM instances created from matching variable names will use 
+            If provided, TSFM instances created from matching variable names will use
             the specified exp_sign value. Variables not in the map default to exp_sign=0.
+        regime : str, optional
+            Regime indicator column name. When provided, every TSFM instance (whether
+            passed directly or generated from string specs) is wrapped in a
+            :class:`RgmVar` so transforms are only active when the regime condition is met.
+        regime_on : bool or int, default True
+            Active status used for regime-based wrapping. ``True``/``1`` activates when
+            the regime column equals 1; ``False``/``0`` activates when it equals 0.
 
         Returns
         -------
-        Dict[str, List[Union[str, TSFM]]]
+        Dict[str, List[Union[str, TSFM, Feature]]]
             Mapping of variable names to lists of specifications.
             - Keys: Variable names from input specs
             - Values: Lists containing either:
                 - str: For unmapped variables
                 - TSFM: Transform instances for mapped variables
+                - Feature: Any provided Feature instances (including RgmVar wrappers
+                  when ``regime`` is set)
 
         Examples
         --------
@@ -969,9 +1044,32 @@ class DataManager:
         - Transform order is preserved within each variable's list
         - The legacy ``max_periods`` keyword is still accepted but emits a
           :class:`DeprecationWarning`; prefer ``periods``
+        - When ``exp_sign_map`` is provided, TSFM or Feature specs exposing an
+          ``exp_sign`` attribute will be updated with the mapped expectation
+          before processing
+
+        Raises
+        ------
+        ValueError
+            If ``max_lag`` is negative, ``periods`` is empty, or ``regime_on``
+            cannot be normalized to 0 or 1.
+        TypeError
+            If ``periods`` is not a list, ``regime`` is not a string when
+            provided, or ``regime_on`` is not interpretable as a boolean or int.
         """
         if max_lag < 0:
             raise ValueError("max_lag must be >= 0")
+
+        if regime is not None and not isinstance(regime, str):
+            raise TypeError("regime must be provided as a column name string when set.")
+
+        try:
+            normalized_regime_on = int(regime_on)
+        except (TypeError, ValueError):
+            raise TypeError("regime_on must be a boolean or int interpretable as 0/1.")
+
+        if normalized_regime_on not in (0, 1):
+            raise ValueError("regime_on must be interpretable as 0/1 or boolean.")
 
         # Support deprecated max_periods keyword for backward compatibility
         legacy_max_periods = legacy_kwargs.pop("max_periods", None)
@@ -1003,12 +1101,56 @@ class DataManager:
 
         vt_map = self._mev_loader.mev_map
         tf_map = self._mev_loader.tsfm_map
-        specs_map: Dict[str, List[Union[str, TSFM]]] = {}
+        specs_map: Dict[str, List[Union[str, TSFM, Feature]]] = {}
         missing: List[str] = []
+
+        def resolve_exp_sign(var_name: str) -> int:
+            """Lookup expected sign for a variable name, defaulting to 0 when absent."""
+
+            if not exp_sign_map:
+                return 0
+            return exp_sign_map.get(var_name, 0)
+
+        def wrap_regime(tsfm_obj: TSFM) -> Union[TSFM, RgmVar]:
+            """Wrap TSFM in a regime-aware variable when regime is configured."""
+
+            if regime is None:
+                return tsfm_obj
+            return RgmVar(
+                var=tsfm_obj,
+                regime=regime,
+                on=normalized_regime_on,
+                exp_sign=resolve_exp_sign(tsfm_obj.var),
+                freq=self.freq,
+            )
+
+        def assign_feature_exp_sign(feature_obj: Feature) -> None:
+            """Assign exp_sign on feature when attribute exists and map entry is available."""
+
+            if not exp_sign_map or not hasattr(feature_obj, "exp_sign"):
+                return
+
+            feature_var = getattr(feature_obj, "var", "")
+            if feature_var in exp_sign_map:
+                feature_obj.exp_sign = exp_sign_map[feature_var]
     
         for spec in specs:
             if isinstance(spec, TSFM):
-                specs_map[spec.var] = [spec]
+                assign_feature_exp_sign(spec)
+                # NOTE: Multiple TSFMs can share the same base var (e.g., lag/grid
+                # variants). Accumulate them instead of overwriting so callers can
+                # request a specific subset without losing earlier entries.
+                specs_map.setdefault(spec.var, []).append(wrap_regime(spec))
+
+            elif isinstance(spec, Feature):
+                assign_feature_exp_sign(spec)
+                var_name = getattr(spec, "var", None)
+                if var_name is None:
+                    raise ValueError(f"Feature spec {spec!r} is missing a 'var' attribute.")
+                # NOTE: Preserve all provided feature variants per variable for
+                # downstream plotting or correlation selection without collapsing
+                # to the last seen definition.
+                specs_map.setdefault(var_name, []).append(spec)
 
             elif isinstance(spec, str):
                 var_name = spec
@@ -1020,7 +1162,7 @@ class DataManager:
                     # Get the type from the var_info dictionary
                     var_type = var_info['type']
                     fnames = tf_map.get(var_type, [])
-                    tsfms: List[Union[str, TSFM]] = []
+                    tsfms: List[Union[str, TSFM, Feature]] = []
                     for name in fnames:
                         fn = getattr(transform_module, name, None)
                         if not callable(fn):
@@ -1037,7 +1179,17 @@ class DataManager:
                                 exp_sign = 0
                                 if exp_sign_map and spec in exp_sign_map:
                                     exp_sign = exp_sign_map[spec]
-                                tsfms.append(TSFM(spec, base_fn, lag, exp_sign=exp_sign, freq=self.freq))
+                                tsfms.append(
+                                    wrap_regime(
+                                        TSFM(
+                                            spec,
+                                            base_fn,
+                                            lag,
+                                            exp_sign=exp_sign,
+                                            freq=self.freq,
+                                        )
+                                    )
+                                )
                     specs_map[var_name] = tsfms
             else:
                 raise ValueError(f"Invalid spec: {spec!r}")
@@ -1648,6 +1800,23 @@ class DataManager:
             Index of out-of-sample observations.
         """
         return self._internal_loader.out_sample_idx
+
+    @property
+    def full_sample_idx(self) -> pd.Index:
+        """
+        Get the full sample index combining in-sample and out-of-sample observations.
+
+        Returns
+        -------
+        pd.Index
+            Index covering both in-sample and out-of-sample periods.
+
+        Examples
+        --------
+        >>> combined_idx = dm.full_sample_idx
+        >>> assert combined_idx.equals(dm.in_sample_idx.union(dm.out_sample_idx))
+        """
+        return self._internal_loader.in_sample_idx.union(self._internal_loader.out_sample_idx)
 
     @property
     def scen_in_sample_idx(self) -> Optional[pd.Index]:
