@@ -1,10 +1,14 @@
 # =============================================================================
 # module: stability.py
 # Purpose: Model stability testing including Walk Forward Test
-# Dependencies: typing, numpy, pandas, matplotlib, .model.ModelBase
+# Key Types/Classes: ModelStabilityTest, WalkForwardTest
+# Key Functions: None
+# Dependencies: typing, warnings, numpy, pandas, matplotlib, abc, .model.ModelBase,
+#               .plot._plot_segmented_series
 # =============================================================================
 
 from typing import Type, Dict, List, Union, Any, Optional
+import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -231,7 +235,11 @@ class WalkForwardTest(ModelStabilityTest):
                 **self.model_kwargs
             )
             # Automatically fit the model
-            self._final_model.fit()
+            # Suppress runtime warnings that occur when regressors contain only
+            # zeros within the fitting window; parameters remain usable.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                self._final_model.fit()
         return self._final_model
     
     @property  
@@ -284,7 +292,12 @@ class WalkForwardTest(ModelStabilityTest):
                         **self.model_kwargs
                     )
                     # Automatically fit the model
-                    model.fit()
+                    # Suppress runtime warnings that occur when regressors
+                    # contain only zeros within the fitting window; parameters
+                    # remain usable.
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", RuntimeWarning)
+                        model.fit()
                     self._wf_models[model_name] = model
         
         return self._wf_models
@@ -420,21 +433,27 @@ class WalkForwardTest(ModelStabilityTest):
         # UNRATE    -0.123   -0.118   -0.125   -0.120
         # CPI        0.089    0.092    0.085    0.088
         """
-        # Get final model parameters
-        final_params = self.final_model.params
-        
-        # Filter out periodical dummies (M:1, Q:1, etc.)
-        param_names = [name for name in final_params.index 
-                      if not (':' in name and name.split(':')[1].isdigit())]
-        
-        # Create DataFrame with final model coefficients
-        param_data = {self.model_in_sample_end: [final_params.get(name, np.nan) for name in param_names]}
-        
-        # Add Walk Forward model coefficients
-        for i, (model_name, model) in enumerate(self.wf_models.items()):
-            col_name = self.poos_in_sample_end[i]
-            param_data[col_name] = [model.params.get(name, np.nan) for name in param_names]
-        
+        # Suppress runtime warnings triggered when some regressors are all zeros
+        # during fitting; statsmodels emits divide-by-zero warnings in this case,
+        # but the resulting parameters are still captured for display.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+
+            # Get final model parameters
+            final_params = self.final_model.params
+
+            # Filter out periodical dummies (M:1, Q:1, etc.)
+            param_names = [name for name in final_params.index
+                          if not (':' in name and name.split(':')[1].isdigit())]
+
+            # Create DataFrame with final model coefficients
+            param_data = {self.model_in_sample_end: [final_params.get(name, np.nan) for name in param_names]}
+
+            # Add Walk Forward model coefficients
+            for i, (model_name, model) in enumerate(self.wf_models.items()):
+                col_name = self.poos_in_sample_end[i]
+                param_data[col_name] = [model.params.get(name, np.nan) for name in param_names]
+
         return pd.DataFrame(param_data, index=param_names)
     
     @property

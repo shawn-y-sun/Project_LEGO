@@ -1,20 +1,26 @@
 # =============================================================================
+# =============================================================================
 # module: segment.py
 # Purpose: Manage candidate model construction, evaluation, and visualization workflows.
 # Key Types/Classes: Segment
-# Key Functions: build_cm, plot_vars, explore_vars, export
-# Dependencies: warnings, pandas, numpy, matplotlib.pyplot, math, inspect, copy, typing, pathlib, internal modules
+# Key Functions: build_cm, plot_vars, explore_vars, export, save_cms, load_cms
+# Dependencies: warnings, pandas, numpy, matplotlib.pyplot, math, inspect, copy, typing, pathlib,
+#               datetime, shutil, tqdm, internal modules
 # =============================================================================
 import warnings
 warnings.simplefilter(action="ignore", category=FutureWarning)
 import inspect
+import json
+from datetime import datetime
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import math
+import shutil
 from copy import deepcopy
 from typing import Type, Dict, List, Optional, Any, Union, Callable, Tuple, Set, Sequence
 from pathlib import Path
+from tqdm import tqdm
 
 from .cm import CM
 from .model import ModelBase, OLS, FixedOLS
@@ -37,6 +43,15 @@ from .feature import Feature
 from .periods import resolve_periods_argument
 from .plot import _plot_segmented_series
 from .pretest import PreTestSet, FeatureTest
+from .persistence import (
+    ensure_segment_dirs,
+    get_segment_dirs,
+    load_cm,
+    load_index,
+    save_cm,
+    save_index,
+    generate_search_id,
+)
 from .transform import TSFM
 
 
@@ -75,6 +90,8 @@ class Segment:
     ----------
     cms : Dict[str, CM]
         Dictionary of candidate models, keyed by their IDs.
+    passed_cms : Dict[str, CM]
+        Dictionary of candidate models loaded from persisted passed_cms sets.
     top_cms : List[CM]
         List of top performing models from the last search.
     searcher : Optional[ModelSearch]
@@ -133,7 +150,10 @@ class Segment:
         # Will hold the ModelSearch instance once we've run a search
         self.searcher: Optional[ModelSearch] = None
         self.cms: Dict[str, CM] = {}               # existing CMs in this segment
+        self.passed_cms: Dict[str, CM] = {}        # loaded passed CMs
         self.top_cms: List[CM] = []                # placeholder for top models
+        self.last_search_id: Optional[str] = None
+        self.working_dir: Path = Path.cwd()
 
     def build_cm(
         self,
@@ -321,18 +341,15 @@ class Segment:
         if pretestset is None:
             return None
 
+        if target_pretest_result is not None:
+            pretestset.propagate_target_result(target_pretest_result)
+
         feature_test = pretestset.feature_test
         if feature_test is None:
             return None
 
         if feature_test.dm is not self.dm:
             feature_test.dm = self.dm
-
-        if (
-            getattr(feature_test, "target_test_result", None) is None
-            and target_pretest_result is not None
-        ):
-            feature_test.target_test_result = target_pretest_result
 
         return feature_test
 
@@ -1932,14 +1949,16 @@ class Segment:
         max_lag: int = 3,
         periods: Optional[Sequence[int]] = None,
         category_limit: int = 1,
-        regime_limit: int = 1,
+        regime_limit: Optional[int] = None,
         exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1, 1, 1),
-        test_update_func: Optional[Callable] = None,
+        modeltest_update_func: Optional[Callable] = None,
+        pretest_update_func: Optional[Callable[[], Dict[str, Any]]] = None,
         outlier_idx: Optional[List[Any]] = None,
         add_in: bool = True,
-        override: bool = False,
+        overwrite: bool = False,
         re_rank: bool = True,
+        search_id: Optional[str] = None,
         **legacy_kwargs: Any
     ) -> None:
         """
@@ -1977,29 +1996,44 @@ class Segment:
             still accepted for backward compatibility.
         category_limit : int, default 1
             Maximum number of variables from each MEV category per combo.
-            Only applies to top-level strings and TSFM instances in desired_pool.
-        regime_limit : int, default 1
+            Applies to both top-level strings/TSFM instances in ``desired_pool``
+            and :class:`RgmVar` entries, evaluated per ``(regime, regime_on)``
+            signature so active/inactive variants are constrained separately.
+        regime_limit : Optional[int], default None
             Maximum number of :class:`RgmVar` instances from the same regime per
             combo. Applies across the full combination, including forced
-            specifications.
+            specifications. When ``None`` (default), no limit is applied.
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             Passed to ModelSearch.run_search().
         rank_weights : Tuple[float, float, float], default (1, 1, 1)
             Weights for (Fit Measures, IS Error, OOS Error) when ranking models.
-        test_update_func : Optional[Callable], default None
-            Optional function to update each CM's test set.
+        modeltest_update_func : Optional[Callable], default None
+            Optional function to update each CM's test set; should accept a
+            single :class:`ModelBase` instance and return a mapping of test
+            overrides. The legacy keyword ``test_update_func`` is supported as
+            an alias.
+        pretest_update_func : Optional[Callable[[], Dict[str, Any]]], default None
+            Optional function returning a pretest update mapping used to
+            override target/feature/spec pretests. The callable takes no
+            arguments and mirrors :meth:`TestSet.from_functions` expectations
+            for pretest updates.
         outlier_idx : Optional[List[Any]], default None
             List of index labels corresponding to outliers to exclude.
         add_in : bool, default True
             If True, add the resulting top CMs to self.cms.
-        override : bool, default False
+        overwrite : bool, default False
             If True, clear existing cms before adding new ones. Only applies
-            when add_in=True.
+            when add_in=True. The legacy ``override`` keyword is still honored
+            for backward compatibility.
         re_rank : bool, default True
-            If True and add_in=True and override=False, rank new top_cms
+            If True and add_in=True and overwrite=False, rank new top_cms
             along with pre-existing cms and update model_ids based on ranking.
             If False, simply append new cms with collision-resolved IDs.
+        search_id : str, optional
+            Explicit search identifier to use. When omitted, a new identifier
+            of the form ``search_<segment_id>_<YYYYMMDD_HHMMSS>`` is generated
+            and stored on ``self.last_search_id``.
 
         Returns
         -------
@@ -2014,10 +2048,10 @@ class Segment:
         ... )
         >>> top_models = segment.top_cms  # access results
         >>> 
-        >>> # Search and override existing models
+        >>> # Search and overwrite existing models
         >>> segment.search_cms(
         ...     desired_pool=["new_var1", "new_var2"],
-        ...     override=True  # clears existing models first
+        ...     overwrite=True  # clears existing models first
         ... )
         >>> 
         >>> # Search and add without re-ranking
@@ -2044,8 +2078,8 @@ class Segment:
         # 1) Reuse existing searcher if present, else create & store one
         if self.searcher is None:
             self.searcher = self.search_cls(
-                self.dm, 
-                self.target, 
+                self.dm,
+                self.target,
                 self.model_cls,
                 model_type=self.model_type,
                 target_base=self.target_base,
@@ -2053,11 +2087,21 @@ class Segment:
                 qtr_method=self.qtr_method
             )
         searcher = self.searcher
+        searcher.segment = self
 
+        # Support legacy argument name ``test_update_func`` by aliasing it to
+        # ``modeltest_update_func`` when the modern parameter is not supplied.
+        legacy_modeltest_update_func = legacy_kwargs.pop("test_update_func", None)
+        if modeltest_update_func is None and legacy_modeltest_update_func is not None:
+            modeltest_update_func = legacy_modeltest_update_func
+
+        legacy_overwrite = legacy_kwargs.pop("override", None)
         legacy_max_periods = legacy_kwargs.pop("max_periods", None)
         if legacy_kwargs:
             unexpected = ", ".join(sorted(legacy_kwargs.keys()))
             raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+
+        effective_overwrite = overwrite if legacy_overwrite is None else bool(legacy_overwrite)
 
         resolved_periods = resolve_periods_argument(
             self.dm.freq,
@@ -2066,6 +2110,8 @@ class Segment:
         )
 
         # 2) Run the search (populates searcher.top_cms; no return value)
+        active_search_id = search_id or generate_search_id(self.segment_id)
+        self.last_search_id = active_search_id
         searcher.run_search(
             desired_pool=desired_pool,
             forced_in=forced_in or [],
@@ -2077,17 +2123,23 @@ class Segment:
             category_limit=category_limit,
             regime_limit=regime_limit,
             rank_weights=rank_weights,
-            test_update_func=test_update_func,
+            modeltest_update_func=modeltest_update_func,
+            pretest_update_func=pretest_update_func,
             outlier_idx=outlier_idx,
-            exp_sign_map=exp_sign_map
+            exp_sign_map=exp_sign_map,
+            search_id=active_search_id,
+            base_dir=self.working_dir,
         )
+
+        # Honor the search_id actually used (may differ when resuming).
+        self.last_search_id = getattr(self.searcher, "search_id", active_search_id)
 
         # 3) Collect the top_n results from the searcher
         self.top_cms = self.searcher.top_cms[:top_n]
 
         # 4) Optionally add them to this segment's cms
         if add_in:
-            if override:
+            if effective_overwrite:
                 # Clear existing cms and add new ones with simple IDs
                 self.cms.clear()
                 for i, cm in enumerate(self.top_cms):
@@ -2183,10 +2235,12 @@ class Segment:
         self,
         rank_weights: Tuple[float, float, float],
         all_passed: bool = True,
-        override: bool = False,
+        overwrite: bool = False,
         top_n: int = 10,
-        sample: str = 'in'
-    ) -> List[CM]:
+        sample: str = 'in',
+        cm_filter_func: Optional[Callable[[CM], bool]] = None,
+        **legacy_kwargs: Any
+    ) -> None:
         """
         Re-compute rankings for candidate models using new weights.
 
@@ -2195,59 +2249,110 @@ class Segment:
         rank_weights : Tuple[float, float, float]
             Weights for (Fit Measures, IS Error, OOS Error) used during ranking.
         all_passed : bool, default True
-            When ``True``, include every CM stored in ``self.searcher.passed_cms``.
+            When ``True``, include every CM stored in ``self.passed_cms`` when
+            available, otherwise use ``self.searcher.passed_cms``.
             When ``False``, limit the re-ranking to models currently in
             ``self.cms``.
-        override : bool, default False
+        overwrite : bool, default False
             If ``True``, replace ``self.cms`` and ``self.searcher.top_cms`` with
-            the newly ranked ``top_n`` models.
+            the newly ranked ``top_n`` models. The legacy ``override`` keyword
+            remains supported for backward compatibility.
         top_n : int, default 10
             Number of models to display and return from the refreshed ranking.
         sample : {'in', 'full'}, default 'in'
             Sample to use when retrieving diagnostics for ranking. Choose
             ``'in'`` for in-sample diagnostics or ``'full'`` for full-sample.
-
-        Returns
-        -------
-        List[CM]
-            The top ``top_n`` candidate models ordered by the refreshed
-            composite score.
+        cm_filter_func : Callable[[CM], bool], optional
+            Optional predicate applied to candidate models prior to re-ranking.
+            Only models for which the callable returns ``True`` are included in
+            the re-ranking set. This is useful for excluding subsets of models
+            (for example, by tag or metadata) without mutating the stored
+            collections.
 
         Raises
         ------
         RuntimeError
             If no search has been performed or if there are no models to rank.
+        TypeError
+            If ``cm_filter_func`` is provided but is not callable.
 
         Examples
         --------
         >>> # After running search_cms(...)
-        >>> refreshed = segment.rerank_cms(
+        >>> segment.rerank_cms(
         ...     rank_weights=(0.4, 0.4, 0.2),
         ...     all_passed=True,
         ...     top_n=5
         ... )
-        >>> refreshed[0].model_id
+        >>> segment.top_cms[0].model_id
         'cm1'
         """
+        legacy_overwrite = legacy_kwargs.pop("override", None)
+        if legacy_kwargs:
+            unexpected = ", ".join(sorted(legacy_kwargs.keys()))
+            raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+
+        if cm_filter_func is not None and not callable(cm_filter_func):
+            raise TypeError("Parameter 'cm_filter_func' must be callable when provided.")
+
+        effective_overwrite = overwrite if legacy_overwrite is None else bool(legacy_overwrite)
+
+        # Ensure a ModelSearch instance exists so ``rank_cms`` can be reused even
+        # when candidate models were loaded directly from disk rather than
+        # produced by a prior search run.
         if self.searcher is None:
-            raise RuntimeError(
-                "Cannot rerank candidate models before running a search."
+            self.searcher = self.search_cls(
+                self.dm,
+                self.target,
+                self.model_cls,
+                model_type=self.model_type,
+                target_base=self.target_base,
+                target_exposure=self.target_exposure,
+                qtr_method=self.qtr_method
             )
+        self.searcher.segment = self
 
         # Determine which candidate models participate in the re-ranking.
         if all_passed:
-            passed_cms = getattr(self.searcher, 'passed_cms', None)
-            if not passed_cms:
-                raise RuntimeError(
-                    "ModelSearch has no passed candidate models to rerank."
-                )
-            candidate_cms: List[CM] = list(passed_cms)
+            # Prefer persisted/loaded passed CMs when available; otherwise fall
+            # back to any passed CMs retained on the searcher.
+            if self.passed_cms:
+                candidate_cms = list(self.passed_cms.values())
+            else:
+                passed_cms = getattr(self.searcher, 'passed_cms', None)
+                if not passed_cms:
+                    raise RuntimeError(
+                        "ModelSearch has no passed candidate models to rerank."
+                    )
+                candidate_cms = list(passed_cms)
         else:
             if not self.cms:
                 raise RuntimeError(
                     "Segment has no candidate models to rerank."
                 )
             candidate_cms = list(self.cms.values())
+
+        if cm_filter_func is not None:
+            # Apply caller-supplied predicate with a single progress bar to narrow the ranking population.
+            filtered_cms: List[CM] = []
+            total_candidates = len(candidate_cms)
+
+            # Use explicit update control to avoid duplicate bars in some terminals.
+            with tqdm(
+                total=total_candidates,
+                desc="Filtering passed cms",
+                unit="cm",
+                disable=total_candidates == 0
+            ) as progress:
+                for cm in candidate_cms:
+                    if cm_filter_func(cm):
+                        filtered_cms.append(cm)
+                    progress.update()
+            candidate_cms = filtered_cms
+            if not candidate_cms:
+                raise RuntimeError(
+                    "No candidate models remain after applying 'cm_filter_func'."
+                )
 
         # Track existing models to identify newly promoted entries when
         # re-ranking across all passed combinations.
@@ -2283,8 +2388,8 @@ class Segment:
             self.searcher.passed_cms = ordered_cms
         self.searcher.df_scores = df_updated
 
-        # Persist cms registry depending on override preference.
-        if override:
+        # Persist cms registry depending on overwrite preference.
+        if effective_overwrite:
             self.cms.clear()
             for cm in top_models:
                 self.cms[cm.model_id] = cm
@@ -2316,4 +2421,509 @@ class Segment:
                 )
                 print(formatted)
 
-        return top_models
+        return None
+
+    def _normalize_cm_collection(
+        self, collection: Union[Dict[str, CM], List[CM]]
+    ) -> Dict[str, CM]:
+        """Return a model_id-keyed mapping while validating CMs for persistence."""
+
+        cm_dict: Dict[str, CM] = {}
+        for cm in collection.values() if isinstance(collection, dict) else collection:
+            model_id = getattr(cm, "model_id", None)
+            if not model_id:
+                raise ValueError("Each CM must expose a non-empty model_id for persistence.")
+            if model_id in cm_dict:
+                raise ValueError(f"Duplicate model_id '{model_id}' encountered while saving CMs.")
+            cm_dict[model_id] = cm
+        return cm_dict
+
+    def _save_cm_entry(
+        self,
+        cm: CM,
+        target_dir: Path,
+        created_at: str,
+        overwrite: bool,
+    ) -> Dict[str, Any]:
+        """
+        Persist a single CM pickle and return its index entry payload.
+
+        Parameters
+        ----------
+        cm : CM
+            Candidate model to persist.
+        target_dir : Path
+            Directory in which to store the pickle and related index entry.
+        created_at : str
+            Timestamp used for the index metadata.
+        overwrite : bool
+            Forwarded to :func:`save_cm` to control clobbering behavior.
+
+        Returns
+        -------
+        Dict[str, Any]
+            Index payload describing the saved CM.
+        """
+
+        model_id = getattr(cm, "model_id", None)
+        if not model_id:
+            raise ValueError("Each CM must expose a non-empty model_id for persistence.")
+
+        filename = f"{model_id}.pkl"
+        save_cm(cm, target_dir / filename, overwrite)
+        return {
+            "model_id": model_id,
+            "filename": filename,
+            "segment_id": self.segment_id,
+            "created_at": created_at,
+        }
+
+    @staticmethod
+    def _clear_cm_directory(target_dir: Path) -> None:
+        """
+        Remove persisted CM artifacts from a CM directory.
+
+        Parameters
+        ----------
+        target_dir : Path
+            Directory whose contents should be removed prior to saving.
+
+        Notes
+        -----
+        This helper leaves the target directory in place while deleting any
+        existing files or nested folders so that subsequent save operations
+        write into a clean location when ``overwrite`` is requested.
+        """
+
+        if not target_dir.exists():
+            return
+
+        # Ensure stale pickles and indexes do not linger when overwrite=True.
+        for item in target_dir.iterdir():
+            if item.is_file():
+                item.unlink()
+            elif item.is_dir():
+                shutil.rmtree(item)
+
+    @staticmethod
+    def _latest_search_id(cms_dir: Path) -> Optional[str]:
+        """
+        Return the most recent search_id tracked within a CMS directory.
+
+        Parameters
+        ----------
+        cms_dir : Path
+            Base ``cms`` directory that may contain ``search_<segment>_*``
+            folders and an optional ``search_index.json``.
+
+        Returns
+        -------
+        Optional[str]
+            The newest search identifier based on the timestamp suffix with a
+            preference for runs that remain incomplete according to their
+            progress metadata. ``None`` is returned when no search directories
+            are available.
+        """
+
+        index_path = cms_dir / "search_index.json"
+        try:
+            index_data = json.loads(index_path.read_text(encoding="utf-8"))
+            search_ids = list(index_data.keys())
+        except (FileNotFoundError, json.JSONDecodeError):
+            # Fall back to scanning directories when index is missing.
+            search_ids = [p.name for p in cms_dir.iterdir() if p.is_dir() and p.name.startswith("search_")]
+
+        if not search_ids:
+            return None
+
+        def _timestamp_value(search_label: str) -> str:
+            # Timestamp component is always the suffix after the final underscore.
+            return search_label.rsplit("_", 1)[-1]
+
+        # Prefer the newest run that is still incomplete according to its
+        # progress metadata. This allows load_cms() to surface models produced
+        # during an active or recently interrupted search instead of defaulting
+        # to the last finished run.
+        log_dir = cms_dir.parent / "log"
+        incomplete_ids = []
+        for search_id in search_ids:
+            progress_path = log_dir / f"{search_id}.progress"
+            try:
+                progress_data = json.loads(progress_path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError):
+                continue
+
+            total = progress_data.get("total_combos")
+            completed = progress_data.get("completed_combos")
+            if isinstance(total, int) and isinstance(completed, int) and completed < total:
+                incomplete_ids.append(search_id)
+
+        target_pool = incomplete_ids if incomplete_ids else search_ids
+        return max(target_pool, key=_timestamp_value)
+
+    def save_passed_cm(
+        self,
+        cm: CM,
+        *,
+        base_dir: Union[str, Path, None] = None,
+        overwrite: bool = True,
+    ) -> Path:
+        """
+        Save a single passed candidate model to the ``passed_cms`` directory.
+
+        Parameters
+        ----------
+        cm : CM
+            Candidate model to persist. ``cm.model_id`` must be populated.
+        base_dir : Union[str, Path], optional
+            Base directory under which the capitalized ``Segment`` folder is
+            created. Defaults to the current working directory when ``None``.
+        overwrite : bool, default True
+            When ``True``, replace any existing pickle or index entry for the
+            same ``model_id``. When ``False``, raises :class:`FileExistsError`
+            if the pickle or index record already exists.
+
+        Returns
+        -------
+        Path
+            Filesystem path to the saved pickle.
+
+        Raises
+        ------
+        ValueError
+            If ``cm`` is missing a ``model_id``.
+        FileExistsError
+            If ``overwrite`` is ``False`` and a duplicate pickle or index entry
+            is detected.
+
+        Examples
+        --------
+        >>> segment.save_passed_cm(cm)
+        PosixPath('.../Segment/my_segment/cms/passed_cms/passed_1.pkl')
+        """
+
+        base_path = Path(base_dir) if base_dir is not None else Path.cwd()
+        dirs = ensure_segment_dirs(self.segment_id, base_path)
+        created_at = datetime.now().isoformat(timespec="seconds")
+
+        entry = self._save_cm_entry(cm, dirs["passed_dir"], created_at, overwrite)
+
+        try:
+            existing_entries = load_index(dirs["passed_dir"])
+        except FileNotFoundError:
+            existing_entries = []
+
+        if not overwrite and any(e["model_id"] == entry["model_id"] for e in existing_entries):
+            raise FileExistsError(
+                f"Index entry for model_id '{entry['model_id']}' already exists in passed_cms."
+            )
+
+        # Replace any pre-existing entry for this model_id before writing.
+        updated_entries = [e for e in existing_entries if e["model_id"] != entry["model_id"]]
+        updated_entries.append(entry)
+        save_index(dirs["passed_dir"], updated_entries, overwrite=True)
+        return dirs["passed_dir"] / entry["filename"]
+
+    def save_cms(
+        self,
+        save_selected: bool = True,
+        save_passed: bool = True,
+        overwrite: bool = True,
+        base_dir: Union[str, Path, None] = None,
+        search_id: Optional[str] = None,
+    ) -> Dict[str, Path]:
+        """
+        Save candidate models for this segment to disk.
+
+        Selected models come from ``self.cms`` and passed models originate from
+        ``self.searcher.passed_cms`` when available. Each model is saved under
+        ``Segment/<segment_id>/cms/<search_id>/<group>`` using its ``model_id``
+        as the filename and indexed via a minimal ``index.json`` file. Both
+        ``selected_cms`` and ``passed_cms`` folders are scoped to the same
+        ``search_id`` so that artifacts stay grouped by search run.
+
+        Parameters
+        ----------
+        save_selected : bool, default True
+            When ``True``, persist models stored in ``self.cms`` to the
+            ``selected_cms`` directory.
+        save_passed : bool, default True
+            When ``True``, persist models stored in ``self.searcher.passed_cms``
+            to the ``passed_cms`` directory.
+        overwrite : bool, default True
+            When ``True``, existing pickles and indexes in the target directories
+            are cleared before saving. When ``False``, a :class:`FileExistsError`
+            is raised if a pickle or index already exists.
+        base_dir : Union[str, Path], optional
+            Base directory under which the ``Segment`` folder is created. When
+            ``None``, the current working directory is used.
+        search_id : str, optional
+            Search identifier whose selected and passed models should be saved
+            under ``cms/<search_id>``. When omitted, the most recent search for
+            this segment is used; a :class:`RuntimeError` is raised if no search
+            metadata can be located.
+
+        Returns
+        -------
+        Dict[str, Path]
+            Mapping with keys ``selected_cms`` and ``passed_cms`` pointing to
+            directories that were updated.
+
+        Raises
+        ------
+        RuntimeError
+            If saving passed CMs is requested but no search results are
+            available or no ``search_id`` can be resolved.
+        ValueError
+            If duplicate ``model_id`` values are encountered while preparing
+            pickles.
+        FileExistsError
+            If ``overwrite`` is ``False`` and a target pickle or index file
+            already exists.
+        """
+
+        # Normalize the base directory so all persisted CMs live under a
+        # capitalized "Segment" folder. ``ensure_segment_dirs`` will create the
+        # hierarchy when it does not yet exist.
+        base_path = Path(base_dir) if base_dir is not None else Path.cwd()
+        dirs = ensure_segment_dirs(self.segment_id, base_path)
+        search_target_id = (
+            search_id
+            or self.last_search_id
+            or getattr(self.searcher, "search_id", None)
+            or self._latest_search_id(dirs["cms_dir"])
+        )
+        created_at = datetime.now().isoformat(timespec="seconds")
+        saved_paths: Dict[str, Path] = {}
+
+        if search_target_id is None:
+            raise RuntimeError(
+                "A search_id is required to save selected or passed CMs. Run a search "
+                "first or supply search_id explicitly."
+            )
+
+        search_root = dirs["cms_dir"] / search_target_id
+        passed_dir = search_root / "passed_cms"
+        selected_dir = search_root / "selected_cms"
+        passed_dir.mkdir(parents=True, exist_ok=True)
+        selected_dir.mkdir(parents=True, exist_ok=True)
+
+        if save_selected:
+            if not self.cms:
+                raise RuntimeError("No selected candidate models are available to save.")
+
+            selected_cms = self._normalize_cm_collection(self.cms)
+            if overwrite:
+                self._clear_cm_directory(selected_dir)
+            selected_entries: List[Dict[str, Any]] = []
+            for cm in selected_cms.values():
+                entry = self._save_cm_entry(cm, selected_dir, created_at, overwrite)
+                selected_entries.append(entry)
+
+            save_index(selected_dir, selected_entries, overwrite)
+            saved_paths["selected_cms"] = selected_dir
+
+        if save_passed:
+            if self.searcher is None or not getattr(self.searcher, "passed_cms", None):
+                raise RuntimeError("No passed candidate models available to save from ModelSearch.")
+
+            passed_cms = self._normalize_cm_collection(getattr(self.searcher, "passed_cms"))
+            target_dir = passed_dir
+            if overwrite:
+                self._clear_cm_directory(target_dir)
+            passed_entries: List[Dict[str, Any]] = []
+            for cm in passed_cms.values():
+                entry = self._save_cm_entry(cm, target_dir, created_at, overwrite)
+                passed_entries.append(entry)
+
+            save_index(target_dir, passed_entries, overwrite)
+            saved_paths["passed_cms"] = target_dir
+
+        return saved_paths
+
+    def load_cms(
+        self,
+        which: str = "both",
+        base_dir: Union[str, Path, None] = None,
+        search_id: Optional[str] = None,
+        rerank_weights: Tuple[float, float, float] = (1, 1, 1),
+        cm_filter_func: Optional[Callable[[CM], bool]] = None,
+    ) -> None:
+        """
+        Load persisted candidate models and bind them to the current DataManager.
+
+        Parameters
+        ----------
+        which : {'selected', 'passed', 'both'}, default 'both'
+            Controls which sets to load from disk.
+        base_dir : Union[str, Path], optional
+            Base directory containing the ``Segment`` folder. Defaults to the
+            current working directory when ``None``.
+        search_id : str, optional
+            When provided, loads passed candidate models exclusively from
+            ``cms/<search_id>``. When omitted, the most recent search tracked
+            for this segment is used if present, otherwise legacy locations are
+            scanned.
+        rerank_weights : Tuple[float, float, float], default (1, 1, 1)
+            Optional weights forwarded to :meth:`rerank_cms` after models are
+            loaded. When a tuple of three numeric values is provided, the
+            method automatically re-ranks the loaded candidate models using the
+            supplied weights with ``overwrite=True``.
+        cm_filter_func : Callable[[CM], bool], optional
+            Optional predicate forwarded to :meth:`rerank_cms` to limit which
+            candidate models participate in automatic reranking. When provided,
+            only models for which the callable returns ``True`` are reranked.
+
+        Returns
+        -------
+        None
+            This method prints a concise summary of loaded models.
+
+        Notes
+        -----
+        Prints a brief summary of how many selected and passed models were loaded.
+        Both selected and passed models are expected under
+        ``Segment/<segment_id>/cms/<search_id>/(selected_cms|passed_cms)`` for
+        recent runs while still tolerating legacy top-level folders when no
+        search metadata is available.
+
+        When ``rerank_weights`` is supplied and models are available, the
+        loaded models are automatically re-ranked using
+        :meth:`Segment.rerank_cms` with ``overwrite=True``.
+
+        Empty CM directories (or missing ``index.json`` files) are tolerated and
+        will result in zero loaded models for that group.
+
+        Raises
+        ------
+        ValueError
+            If ``which`` is not one of ``'selected'``, ``'passed'``, or
+            ``'both'`` or if the segment lacks a bound DataManager.
+            Raised when ``rerank_weights`` is not a tuple of length three.
+        TypeError
+            If any ``rerank_weights`` entry is not numeric or when
+            ``cm_filter_func`` is provided but is not callable.
+        """
+        if which not in {"selected", "passed", "both"}:
+            raise ValueError("Parameter 'which' must be 'selected', 'passed', or 'both'.")
+        if self.dm is None:
+            raise ValueError("Segment must have an attached DataManager before loading CMs.")
+
+        if rerank_weights is not None:
+            if not isinstance(rerank_weights, tuple) or len(rerank_weights) != 3:
+                raise ValueError(
+                    "Parameter 'rerank_weights' must be a tuple of three numeric values."
+                )
+            if not all(isinstance(weight, (int, float)) for weight in rerank_weights):
+                raise TypeError("Each entry in 'rerank_weights' must be numeric.")
+        if cm_filter_func is not None and not callable(cm_filter_func):
+            raise TypeError("Parameter 'cm_filter_func' must be callable when provided.")
+
+        # Always resolve directories relative to a capitalized "Segment" root
+        # so loading mirrors the persistence convention used in ``save_cms``.
+        # ``ensure_segment_dirs`` guarantees the structure exists when invoked
+        # in save paths, but loading should still look in the same location.
+        base_path = Path(base_dir) if base_dir is not None else Path.cwd()
+        dirs = get_segment_dirs(self.segment_id, base_path)
+        target_search_id = (
+            search_id
+            or getattr(self.searcher, "search_id", None)
+            or self.last_search_id
+            or self._latest_search_id(dirs["cms_dir"])
+        )
+
+        if target_search_id is not None:
+            self.last_search_id = target_search_id
+
+        def _load_group(
+            target_dir: Path,
+            container: Dict[str, CM],
+            progress_desc: Optional[str] = None,
+            enable_progress: bool = False,
+        ) -> List[Dict[str, Any]]:
+            # Gracefully handle absent or empty CM folders by returning zero entries.
+            if not target_dir.exists():
+                container.clear()
+                return []
+
+            try:
+                index_entries = load_index(target_dir)
+            except FileNotFoundError:
+                container.clear()
+                return []
+
+            # Reset container to mirror persisted state.
+            container.clear()
+            # Drive progress explicitly to avoid duplicate static bars while loading
+            # passed candidate models (tqdm can emit an initial bar without updates
+            # in some consoles when used as an iterator).
+            if enable_progress and progress_desc:
+                total_items = len(index_entries)
+                with tqdm(
+                    total=total_items,
+                    desc=progress_desc,
+                    unit="cm",
+                    disable=total_items == 0
+                ) as progress:
+                    for entry in index_entries:
+                        model_id = entry["model_id"]
+                        cm_path = target_dir / entry["filename"]
+                        cm = load_cm(cm_path)
+                        cm.bind_data_manager(self.dm)
+                        container[model_id] = cm
+                        progress.update()
+            else:
+                # Iterate quietly when progress is disabled (e.g., selected CMs).
+                for entry in index_entries:
+                    model_id = entry["model_id"]
+                    cm_path = target_dir / entry["filename"]
+                    cm = load_cm(cm_path)
+                    cm.bind_data_manager(self.dm)
+                    container[model_id] = cm
+            return index_entries
+
+        if which in {"selected", "both"}:
+            selected_dir = (
+                dirs["cms_dir"] / target_search_id / "selected_cms"
+                if target_search_id is not None
+                else dirs["selected_dir"]
+            )
+            _load_group(selected_dir, self.cms)
+
+        if which in {"passed", "both"}:
+            passed_dir = (
+                dirs["cms_dir"] / target_search_id / "passed_cms"
+                if target_search_id is not None
+                else dirs["passed_dir"]
+            )
+            _load_group(
+                passed_dir,
+                self.passed_cms,
+                progress_desc="Loading passed cms",
+                enable_progress=True,
+            )
+
+        # Re-rank loaded candidate models when weights are provided to keep
+        # rankings aligned with the latest preferences. Use passed CMs when
+        # available; otherwise, fall back to the currently loaded selection.
+        has_loaded_models = bool(self.cms or self.passed_cms)
+        if rerank_weights is not None and has_loaded_models:
+            self.rerank_cms(
+                rank_weights=rerank_weights,
+                overwrite=True,
+                all_passed=bool(self.passed_cms),
+                cm_filter_func=cm_filter_func,
+            )
+
+        summary = {
+            "passed": len(self.passed_cms),
+            "selected": len(self.cms),
+        }
+        print(
+            f"Loaded passed_cms={summary['passed']}; "
+            f"selected_cms={summary['selected']}."
+        )
+        if target_search_id:
+            print(f"Search artifacts loaded from search_id={target_search_id}.")
+        else:
+            print("Loaded CMS artifacts from legacy locations (no search_id resolved).")
