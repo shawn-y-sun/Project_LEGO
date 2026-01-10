@@ -1400,6 +1400,11 @@ class OLS(ModelBase):
     """
     Ordinary Least Squares regression model with built-in testing and reporting.
     """
+
+    # Default TestSet initializer; override at the class level to change the
+    # stationarity/diagnostics bundle for all subsequent OLS instances.
+    default_testset_func: Callable[['ModelBase'], Dict[str, ModelTestBase]] = ppnr_ols_testset_func
+
     def __init__(
         self,
         dm: Any,
@@ -1407,7 +1412,7 @@ class OLS(ModelBase):
         sample: str,
         outlier_idx: Optional[List[Any]] = None,
         target: str = None,
-        testset_func: Callable[['ModelBase'], Dict[str, ModelTestBase]] = ppnr_ols_testset_func,
+        testset_func: Optional[Callable[['ModelBase'], Dict[str, ModelTestBase]]] = None,
         test_update_func: Optional[Callable[['ModelBase'], Dict[str, Any]]] = None,
         testset_cls: Type = TestSet,
         pretestset: Optional[PreTestSet] = ppnr_ols_pretestset,
@@ -1428,13 +1433,19 @@ class OLS(ModelBase):
             from .stability import WalkForwardTest
             stability_test_cls = WalkForwardTest
             
+        # Allow callers to override the default testset initializer at the class level
+        # (e.g., OLS.default_testset_func = ppnr_ols_stationary_testset_func) without
+        # having to pass the argument on every instantiation. Falling back to the class
+        # attribute maintains the previous default while making opt-in swaps reliable.
+        resolved_testset_func = testset_func or self.default_testset_func
+
         super().__init__(
             dm=dm,
             specs=specs,
             sample=sample,
             outlier_idx=outlier_idx,
             target=target,
-            testset_func=testset_func,
+            testset_func=resolved_testset_func,
             test_update_func=test_update_func,
             testset_cls=testset_cls,
             pretestset=pretestset,
