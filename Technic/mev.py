@@ -592,8 +592,8 @@ class MEVLoader:
 
                     # Store in appropriate container based on frequency
                     if inferred_freq.startswith('Q'):
-                        # Standardize to quarter-end
-                        data.index = pd.PeriodIndex(data.index, freq='Q').to_timestamp(how='end').normalize()
+                        # Standardize to quarter-end using month-end freq to preserve fiscal quarter months
+                        data.index = pd.PeriodIndex(data.index, freq='M').to_timestamp(how='end').normalize()
                         self._scen_mev_qtr[curr_set_name][scen_name] = data
                     elif inferred_freq.startswith('M'):
                         # Standardize to month-end
@@ -726,13 +726,14 @@ class MEVLoader:
 
         # Standardize to period end dates
         if target_freq in ['M', 'Q']:
-             periods = pd.PeriodIndex(data.index, freq=target_freq)
+             # Use freq='M' even for quarterly data to preserve fiscal quarter months
+             # (i.e. snap to end of the month without moving to calendar quarter end)
+             periods = pd.PeriodIndex(data.index, freq='M')
              data.index = periods.to_timestamp(how='end').normalize()
 
         return data
 
     def _validate_mev_codes(self) -> None:
-        # ... (rest of the file is the same)
         """Validate that all MEV codes are in the MEV_MAP."""
         missing_codes = [code for code in self._mev_codes if code not in self._mev_map]
         if missing_codes:
