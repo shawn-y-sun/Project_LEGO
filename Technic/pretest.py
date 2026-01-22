@@ -1,9 +1,9 @@
 # =============================================================================
 # module: pretest.py
 # Purpose: Define pre-fitting test abstractions for model search workflows.
-# Key Types/Classes: PreTestSet, TargetTest, FeatureTest, SpecTest
-# Key Functions: ppnr_ols_target_test_func, ppnr_ols_feature_test_func
-# Dependencies: typing, pandas, .data, .test, .transform
+# Key Types/Classes: PreTestSet, BasePreTest, TargetTest, FeatureTest, SpecTest
+# Key Functions: ppnr_ols_target_pretestset_func, ppnr_ols_feature_pretestset_func
+# Dependencies: typing, .data, .test, .transform, .testset
 # =============================================================================
 """Public API
 =================
@@ -16,18 +16,20 @@ model fitting occurs.
 Examples
 --------
 >>> pretests = PreTestSet(
-...     target_test=TargetTest("sales", dm, lambda data_manager, tgt: True)
+...     target_test=TargetTest(subject="sales", dm=dm, testset_func=lambda *args: {})
 ... )
 """
 
-from typing import Any, Callable, Optional, Sequence, Union
+from __future__ import annotations
 
-import pandas as pd
+from abc import ABC
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Union
 
 from .data import DataManager
 from .feature import Feature
+from .test import FullStationarityTest, ModelTestBase, TargetStationarityTest
+from .testset import TestSet
 from .transform import TSFM
-from .test import FullStationarityTest, StationarityTest, TargetStationarityTest
 
 
 class PreTestSet:
@@ -44,12 +46,24 @@ class PreTestSet:
     spec_test : Optional["SpecTest"], optional
         Test applied to model specification combinations. Defaults to ``None``
         when no specification-level validation is needed.
+    context_map : Mapping[str, Sequence[str]], optional
+        Routing rules controlling which context keys are forwarded to which
+        pre-tests during :meth:`propagate_context`. Keys correspond to
+        ``"target_test"``, ``"feature_test"``, ``"spec_test"``, or ``"*"`` for
+        a default rule. ``None`` (default) forwards all keys to all configured
+        pre-tests.
 
     Examples
     --------
     >>> pretests = PreTestSet()
     >>> pretests.target_test is None
     True
+
+    Notes
+    -----
+    Use :meth:`propagate_target_result` to share a target pre-test outcome with
+    feature-level tests so downstream expectations stay aligned with target
+    stationarity.
     """
 
     def __init__(
@@ -57,531 +71,616 @@ class PreTestSet:
         target_test: Optional["TargetTest"] = None,
         feature_test: Optional["FeatureTest"] = None,
         spec_test: Optional["SpecTest"] = None,
+        context_map: Optional[Mapping[str, Sequence[str]]] = None,
     ) -> None:
         self.target_test = target_test
         self.feature_test = feature_test
         self.spec_test = spec_test
+        self.context_map = self._normalize_context_map(context_map)
+        self._context: Dict[str, Any] = {}
+
+    @staticmethod
+    def _normalize_context_map(
+        context_map: Optional[Mapping[str, Sequence[str]]]
+    ) -> Dict[str, Sequence[str]]:
+        """Validate and normalize context routing rules.
+
+        Parameters
+        ----------
+        context_map : mapping, optional
+            Mapping of pre-test attribute names (``"target_test"``,
+            ``"feature_test"``, ``"spec_test"``, or ``"*"`` for a default) to
+            sequences of context keys that should be forwarded when
+            :meth:`propagate_context` is called. ``None`` permits all keys to be
+            forwarded to every configured pre-test.
+
+        Returns
+        -------
+        dict
+            Normalized mapping where keys are strings and values are tuples of
+            context keys. An empty tuple indicates that no context keys are
+            forwarded for that entry.
+
+        Raises
+        ------
+        TypeError
+            If a mapping key is not a string or any mapping value is not a
+            sequence of strings.
+        """
+
+        if context_map is None:
+            return {}
+
+        normalized: Dict[str, Sequence[str]] = {}
+        for pretest_name, keys in context_map.items():
+            if not isinstance(pretest_name, str):
+                raise TypeError("context_map keys must be strings")
+
+            if keys is None:
+                normalized[pretest_name] = ()
+                continue
+
+            if isinstance(keys, (str, bytes)):
+                raise TypeError("context_map values must be sequences of strings")
+
+            if not isinstance(keys, Sequence):
+                raise TypeError("context_map values must be sequences of strings")
+
+            normalized[pretest_name] = tuple(str(key) for key in keys)
+
+        return normalized
+
+    def propagate_context(self, context: Mapping[str, Any]) -> None:
+        """Share contextual test outcomes across managed pre-tests.
+
+        Parameters
+        ----------
+        context : Mapping[str, Any]
+            Arbitrary context payload (e.g., target outcomes, domain flags)
+            that downstream pre-tests can interpret via their
+            :meth:`BasePreTest.apply_context` implementations. Context routing
+            follows :pyattr:`context_map` so only the configured keys are
+            forwarded to each pre-test.
+
+        Examples
+        --------
+        >>> bundle = PreTestSet(
+        ...     feature_test=FeatureTest(testset_func=lambda *args: {}),
+        ...     context_map={"feature_test": ("target_result",)},
+        ... )
+        >>> bundle.propagate_context({"target_result": False})
+        """
+
+        # Store the combined context so repeated calls merge new values without
+        # discarding previous entries that may be needed by multiple tests.
+        self._context.update(context)
+
+        pretests = {
+            "target_test": self.target_test,
+            "feature_test": self.feature_test,
+            "spec_test": self.spec_test,
+        }
+
+        # Honor per-pretest routing rules; fall back to the default mapping or
+        # broadcast the full context when no rules are provided. An empty tuple
+        # explicitly blocks all keys from being forwarded to a given pre-test.
+        for name, pretest in pretests.items():
+            if pretest is None:
+                continue
+
+            allowed_keys = self.context_map.get(name, self.context_map.get("*"))
+
+            if allowed_keys is None:
+                payload = self._context
+            elif len(allowed_keys) == 0:
+                payload = {}
+            else:
+                payload = {key: value for key, value in self._context.items() if key in allowed_keys}
+
+            pretest.apply_context(payload)
+
+    def propagate_target_result(self, target_result: Optional[bool]) -> None:
+        """Propagate the target pre-test outcome to the feature pre-test.
+
+        Parameters
+        ----------
+        target_result : bool, optional
+            Pass/fail flag produced by :class:`TargetTest.test_filter`. ``True``
+            indicates a stationary target and keeps feature expectations
+            aligned with the default stationary requirement. ``False`` flips the
+            expectation so non-stationary features are treated as passing.
+
+        Examples
+        --------
+        >>> bundle = PreTestSet(
+        ...     target_test=TargetTest(testset_func=lambda *args: {}),
+        ...     feature_test=FeatureTest(testset_func=lambda *args: {}),
+        ... )
+        >>> bundle.propagate_target_result(False)
+        """
+
+        if target_result is None:
+            return
+
+        # Preserve backward compatibility with existing flows while delegating
+        # to the broader context propagation mechanism so additional
+        # dependencies can opt-in without stationarity-specific wiring.
+        self.propagate_context({"target_result": target_result})
 
 
-class TargetTest:
+class BasePreTest(ABC):
+    """Abstract base for pre-model tests.
+
+    Parameters
+    ----------
+    subject : object, optional
+        Domain object evaluated by the test (e.g., target name, feature spec,
+        or spec list).
+    dm : DataManager, optional
+        Data manager providing context and sample indices.
+    sample : {"in", "full"}, default "in"
+        Sample slice to use when constructing the test set.
+    outlier_idx : Sequence[Any], optional
+        Indices to remove when the downstream tests support outlier exclusion.
+    testset_func : callable, optional
+        Function that returns a mapping of test alias to :class:`ModelTestBase`
+        given ``subject``, ``dm``, ``sample``, and ``outlier_idx``.
+    test_update_func : callable, optional
+        Function that returns updates to apply to the base test mapping. The
+        callable may accept no arguments or any subset of the constructor
+        context (``subject``, ``dm``, ``sample``, ``outlier_idx``) and should
+        return a dictionary whose values are :class:`ModelTestBase` instances
+        (added or replaced) or dictionaries of attribute overrides targeting
+        existing aliases.
+    force_filter_pass : Optional[bool], optional
+        Override for the computed :pyattr:`test_filter` result. When provided,
+        the boolean value is returned directly, bypassing assembled test set
+        evaluation.
+
+    Raises
+    ------
+    ValueError
+        If ``sample`` is not ``"in"`` or ``"full"``.
+
+    Notes
+    -----
+    Subclasses expose :pyattr:`testset` and :pyattr:`test_filter` properties
+    built from ``testset_func`` and ``test_update_func`` so callers only need to
+    populate the constructor fields before evaluation.
+    """
+
+    def __init__(
+        self,
+        *,
+        subject: Optional[object] = None,
+        dm: Optional[DataManager] = None,
+        sample: str = "in",
+        outlier_idx: Optional[Sequence[Any]] = None,
+        testset_func: Optional[
+            Callable[[object, DataManager, str, Optional[Sequence[Any]]], Dict[str, ModelTestBase]]
+        ] = None,
+        test_update_func: Optional[Callable[..., Dict[str, Any]]] = None,
+        force_filter_pass: Optional[bool] = None,
+    ) -> None:
+        normalized_sample = str(sample).lower()
+        if normalized_sample not in {"in", "full"}:
+            raise ValueError("sample must be either 'in' or 'full'")
+
+        if force_filter_pass is not None and not isinstance(force_filter_pass, bool):
+            raise TypeError("force_filter_pass must be a boolean or None")
+
+        self.subject = subject
+        self.dm = dm
+        self.sample = normalized_sample
+        self.outlier_idx = list(outlier_idx) if outlier_idx else []
+        self.testset_func = testset_func
+        self.test_update_func = test_update_func
+        self.force_filter_pass = force_filter_pass
+        self.external_context: Dict[str, Any] = {}
+
+    @property
+    def testset(self) -> TestSet:
+        """Instantiate the test set for the configured subject.
+
+        Returns
+        -------
+        TestSet
+            TestSet instance reflecting ``testset_func`` with optional updates
+            from ``test_update_func``.
+
+        Raises
+        ------
+        ValueError
+            If ``dm`` or ``testset_func`` is not provided.
+        TypeError
+            If an update entry is neither a :class:`ModelTestBase` nor an
+            override dictionary.
+        """
+
+        if self.dm is None:
+            raise ValueError("dm must be provided before building testset")
+        if self.testset_func is None:
+            raise ValueError("testset_func must be provided before building testset")
+
+        # Wrap the pretest-specific builder to match the
+        # ``TestSet.from_functions`` signature while preserving the subject,
+        # sample, and outlier context captured by this instance and updates.
+        def _base_builder(_: object) -> Dict[str, ModelTestBase]:
+            return self.testset_func(self.subject, self.dm, self.sample, self.outlier_idx)
+
+        return TestSet.from_functions(
+            self,
+            _base_builder,
+            self.test_update_func if self.test_update_func else None,
+            subject=self.subject,
+            dm=self.dm,
+            sample=self.sample,
+            outlier_idx=self.outlier_idx,
+        )
+
+    @property
+    def test_filter(self) -> bool:
+        """Return the filter outcome from the assembled test set."""
+
+        passed, _ = self.testset.filter_pass()
+        return self._apply_force_filter_pass(passed)
+
+    def _apply_force_filter_pass(self, result: bool) -> bool:
+        """Apply the forced filter pass override when supplied."""
+
+        if self.force_filter_pass is None:
+            return bool(result)
+        return bool(self.force_filter_pass)
+
+    def apply_context(self, context: Mapping[str, Any]) -> None:
+        """Store externally provided context for dependency-aware tests.
+
+        Parameters
+        ----------
+        context : Mapping[str, Any]
+            Arbitrary context payload supplied by orchestrators (e.g.,
+            :class:`PreTestSet`) to coordinate expectations across related
+            pre-tests.
+        """
+
+        # Shallow copy preserves immutability expectations for callers while
+        # giving subclasses a consistent context attribute to inspect.
+        self.external_context = dict(context)
+
+
+class TargetTest(BasePreTest):
     """Test definition for validating a modeling target prior to fitting.
 
     Parameters
     ----------
-    target : Optional[str], optional
-        Name of the target variable present in the :class:`DataManager` data.
-    dm : Optional[DataManager], optional
-        Data manager that provides access to the underlying dataset and helper
-        utilities required for the test.
-    test_func : Optional[Callable[[DataManager, str], Any]], optional
-        Callable that executes the validation logic. The callable should
-        typically return ``True`` when the target passes validation and
-        ``False`` otherwise. Some implementations may return richer diagnostic
-        objects for downstream inspection.
+    subject : str, optional
+        Target variable name within :class:`DataManager.internal_data`.
+    dm : DataManager, optional
+        Data manager that provides access to the underlying dataset.
+    sample : {"in", "full"}, default "in"
+        Sample slice used by the downstream test set.
+    outlier_idx : Sequence[Any], optional
+        Outlier indices to exclude when the underlying tests support it.
+    testset_func : callable, optional
+        Function returning a dictionary of target tests; see
+        :class:`BasePreTest` for details.
+    test_update_func : callable, optional
+        Optional update function; see :class:`BasePreTest` for details.
 
     Examples
     --------
-    >>> def has_target(data_manager, target_name):
-    ...     return target_name in data_manager.data.columns
-    >>> target_test = TargetTest("sales", dm, has_target)
+    >>> target_test = TargetTest(subject="sales", dm=dm, testset_func=lambda *args: {})
+    >>> target_test.test_filter
+    True
     """
 
     def __init__(
         self,
-        target: Optional[str] = None,
+        subject: Optional[str] = None,
         dm: Optional[DataManager] = None,
-        test_func: Optional[Callable[[DataManager, str], Any]] = None,
+        sample: str = "in",
+        outlier_idx: Optional[Sequence[Any]] = None,
+        testset_func: Optional[
+            Callable[[object, DataManager, str, Optional[Sequence[Any]]], Dict[str, ModelTestBase]]
+        ] = None,
+        test_update_func: Optional[Callable[..., Dict[str, Any]]] = None,
+        force_filter_pass: Optional[bool] = None,
     ) -> None:
-        self.target = target
-        self.dm = dm
-        self.test_func = test_func
+        super().__init__(
+            subject=subject,
+            dm=dm,
+            sample=sample,
+            outlier_idx=outlier_idx,
+            testset_func=testset_func,
+            test_update_func=test_update_func,
+            force_filter_pass=force_filter_pass,
+        )
 
     @property
-    def test_filter(self) -> Any:
-        """Return the result of the configured target test.
+    def target(self) -> Optional[str]:
+        """Backward-compatible alias for ``subject``."""
 
-        Returns
-        -------
-        Any
-            Result produced by ``test_func``. Implementations usually return a
-            boolean flag, though richer diagnostic objects may be surfaced by
-            specialized tests.
+        return self.subject if isinstance(self.subject, str) else None
 
-        Raises
-        ------
-        ValueError
-            If any of ``target``, ``dm``, or ``test_func`` have not been
-            configured.
-
-        Examples
-        --------
-        >>> target_test = TargetTest("sales", dm, lambda manager, name: True)
-        >>> target_test.test_filter
-        True
-        """
-
-        if self.test_func is None:
-            raise ValueError(
-                "TargetTest.test_func is not configured; unable to execute test."
-            )
-        if self.dm is None:
-            raise ValueError(
-                "TargetTest.dm is not configured; unable to execute test."
-            )
-        if self.target is None:
-            raise ValueError(
-                "TargetTest.target is not configured; unable to execute test."
-            )
-
-        # The property wraps the callable so callers do not need to remember
-        # the invocation signature when only the stored parameters are needed.
-        return self.test_func(self.dm, self.target)
+    @target.setter
+    def target(self, value: Optional[str]) -> None:
+        self.subject = value
 
 
-class FeatureTest:
+class FeatureTest(BasePreTest):
     """Test definition for validating candidate features before modeling.
 
     Parameters
     ----------
-    feature : Optional[Union[str, Feature, TSFM]], optional
+    subject : Optional[Union[str, Feature, TSFM]], optional
         Identifier used by :meth:`DataManager.build_feature` to create the
-        feature under evaluation, or a pre-instantiated :class:`Feature`
-        object ready for evaluation.
-    dm : Optional[DataManager], optional
+        feature under evaluation, or a pre-instantiated :class:`Feature` object.
+    dm : DataManager, optional
         Data manager that provides access to feature construction utilities.
-    test_func : Optional[
-        Callable[[Union[str, Feature, TSFM], DataManager, Optional[Any]], bool]
-    ], optional
-        Callable invoked with the feature identifier (or object), the data
-        manager, and the result of the target test (if available). The
-        callable should return ``True`` when the feature passes validation and
-        ``False`` otherwise.
+    sample : {"in", "full"}, default "in"
+        Sample slice used by the downstream test set.
+    outlier_idx : Sequence[Any], optional
+        Outlier indices to exclude when supported by the underlying tests.
+    testset_func : callable, optional
+        Function returning a dictionary of feature tests; see
+        :class:`BasePreTest` for details.
+    test_update_func : callable, optional
+        Optional update function; see :class:`BasePreTest` for details.
+    target_test_result : bool, optional
+        Outcome from the target-level pretest. When provided, ``False`` flips
+        the expectation so non-stationary features satisfy the filter to mirror
+        a non-stationary target.
 
-    Examples
-    --------
-    >>> def feature_exists(feature_candidate, data_manager, target_result):
-    ...     return True
-    >>> feature_test = FeatureTest("price", dm, feature_exists)
-    >>> feature_object_test = FeatureTest(
-    ...     SomeFeatureSubclass("price"), dm, feature_exists
-    ... )
-    >>> feature_tsfm_test = FeatureTest(SomeTSFM("price"), dm, feature_exists)
+    Attributes
+    ----------
+    target_test_result : Optional[bool]
+        Cached outcome from the target-level test for downstream consumers.
     """
 
     def __init__(
         self,
-        feature: Optional[Union[str, Feature, TSFM]] = None,
+        subject: Optional[Union[str, Feature, TSFM]] = None,
         dm: Optional[DataManager] = None,
-        test_func: Optional[
-            Callable[[Union[str, Feature, TSFM], DataManager, Optional[Any]], bool]
+        sample: str = "in",
+        outlier_idx: Optional[Sequence[Any]] = None,
+        testset_func: Optional[
+            Callable[[object, DataManager, str, Optional[Sequence[Any]]], Dict[str, ModelTestBase]]
         ] = None,
+        test_update_func: Optional[Callable[..., Dict[str, Any]]] = None,
+        target_test_result: Optional[bool] = None,
+        force_filter_pass: Optional[bool] = None,
     ) -> None:
-        self.feature = feature
-        self.dm = dm
-        self.test_func = test_func
-        self.target_test_result: Optional[Any] = None
+        super().__init__(
+            subject=subject,
+            dm=dm,
+            sample=sample,
+            outlier_idx=outlier_idx,
+            testset_func=testset_func,
+            test_update_func=test_update_func,
+            force_filter_pass=force_filter_pass,
+        )
+        self.target_test_result: Optional[bool] = (
+            None if target_test_result is None else bool(target_test_result)
+        )
+
+    @property
+    def feature(self) -> Optional[Union[str, Feature, TSFM]]:
+        """Backward-compatible alias for ``subject``."""
+
+        return self.subject if isinstance(self.subject, (str, Feature, TSFM)) else None
+
+    @feature.setter
+    def feature(self, value: Optional[Union[str, Feature, TSFM]]) -> None:
+        self.subject = value
+
+    def apply_target_test_result(self, target_result: Optional[bool]) -> None:
+        """Store the target pre-test outcome for expectation alignment.
+
+        Parameters
+        ----------
+        target_result : bool, optional
+            Pass/fail flag returned by :class:`TargetTest.test_filter`. ``True``
+            preserves the standard feature requirement of stationarity, while
+            ``False`` flips expectations so non-stationary features satisfy the
+            filter.
+
+        Examples
+        --------
+        >>> feat_test = FeatureTest(testset_func=lambda *args: {})
+        >>> feat_test.apply_target_test_result(False)
+        """
+
+        if target_result is None:
+            self.target_test_result = None
+            return
+
+        # Maintain backwards compatibility for direct calls while funneling
+        # through the shared context mechanism.
+        self.apply_context({"target_result": target_result})
+
+    def apply_context(self, context: Mapping[str, Any]) -> None:
+        """Ingest shared context and update target-driven expectations.
+
+        Parameters
+        ----------
+        context : Mapping[str, Any]
+            Context payload produced by :class:`PreTestSet` or external
+            orchestrators. The feature test consumes ``"target_result"`` (or
+            ``"target_test_result"``) when available to align expectations with
+            target stationarity outcomes. Additional keys are retained on
+            :pyattr:`external_context` for downstream customization in other
+            model types.
+        """
+
+        super().apply_context(context)
+        context_value = context.get("target_result", context.get("target_test_result"))
+        self.target_test_result = None if context_value is None else bool(context_value)
+
+    @property
+    def expected_stationary(self) -> Optional[bool]:
+        """Return the target-informed expectation for feature stationarity."""
+
+        return None if self.target_test_result is None else bool(self.target_test_result)
 
     @property
     def test_filter(self) -> bool:
-        """Return the outcome of the feature validation callable.
+        """
+        Evaluate feature tests respecting target-driven stationarity expectations.
 
         Returns
         -------
         bool
-            ``True`` when the feature is considered valid given the stored
-            target test result and ``False`` otherwise.
-
-        Raises
-        ------
-        ValueError
-            If any of ``feature``, ``dm``, or ``test_func`` have not been
-            configured.
-
-        Examples
-        --------
-        >>> feature_test = FeatureTest("price", dm, lambda feat, manager, _: True)
-        >>> feature_test.test_filter
-        True
+            ``True`` when feature outcomes align with the desired stationarity
+            state inferred from the target pre-test; defaults to the raw test
+            results when no target guidance is present.
         """
 
-        if self.test_func is None:
-            raise ValueError(
-                "FeatureTest.test_func is not configured; unable to execute test."
-            )
-        if self.dm is None:
-            raise ValueError(
-                "FeatureTest.dm is not configured; unable to execute test."
-            )
-        if self.feature is None:
-            raise ValueError(
-                "FeatureTest.feature is not configured; unable to execute test."
-            )
+        passed, _ = self.testset.filter_pass()
+        expected_stationary = self.expected_stationary
+        if expected_stationary is None:
+            return self._apply_force_filter_pass(passed)
 
-        # Include the cached target test result (possibly ``None``) to respect
-        # the callable's full signature without burdening callers.
-        return self.test_func(self.feature, self.dm, self.target_test_result)
+        # When the target is non-stationary, invert the outcome so non-stationary
+        # features satisfy the dependency requirement.
+        return self._apply_force_filter_pass(passed if expected_stationary else not passed)
 
 
-class SpecTest:
+class SpecTest(BasePreTest):
     """Test definition for validating model specification combinations.
 
     Parameters
     ----------
-    specs : Optional[Sequence[object]], optional
+    subject : Optional[Sequence[object]], optional
         Model specification objects compatible with :meth:`CM.build`.
-    dm : Optional[DataManager], optional
+    dm : DataManager, optional
         Data manager that provides context for assessing the specifications.
-    test_func : Optional[Callable[[Sequence[object], DataManager], bool]], optional
-        Callable that evaluates the specifications. The callable should return
-        ``True`` when the specification passes validation and ``False``
-        otherwise.
-
-    Examples
-    --------
-    >>> def specs_non_empty(spec_list, data_manager):
-    ...     return bool(spec_list)
-    >>> spec_test = SpecTest(["price"], dm, specs_non_empty)
+    sample : {"in", "full"}, default "in"
+        Sample slice used by the downstream test set.
+    outlier_idx : Sequence[Any], optional
+        Outlier indices to exclude when supported by the underlying tests.
+    testset_func : callable, optional
+        Function returning a dictionary of specification tests; see
+        :class:`BasePreTest` for details.
+    test_update_func : callable, optional
+        Optional update function; see :class:`BasePreTest` for details.
     """
 
     def __init__(
         self,
-        specs: Optional[Sequence[object]] = None,
+        subject: Optional[Sequence[object]] = None,
         dm: Optional[DataManager] = None,
-        test_func: Optional[Callable[[Sequence[object], DataManager], bool]] = None,
+        sample: str = "in",
+        outlier_idx: Optional[Sequence[Any]] = None,
+        testset_func: Optional[
+            Callable[[object, DataManager, str, Optional[Sequence[Any]]], Dict[str, ModelTestBase]]
+        ] = None,
+        test_update_func: Optional[Callable[..., Dict[str, Any]]] = None,
+        force_filter_pass: Optional[bool] = None,
     ) -> None:
-        self.specs = specs
-        self.dm = dm
-        self.test_func = test_func
+        super().__init__(
+            subject=subject,
+            dm=dm,
+            sample=sample,
+            outlier_idx=outlier_idx,
+            testset_func=testset_func,
+            test_update_func=test_update_func,
+            force_filter_pass=force_filter_pass,
+        )
 
     @property
-    def test_filter(self) -> bool:
-        """Return whether the specification validation passes.
+    def specs(self) -> Optional[Sequence[object]]:
+        """Backward-compatible alias for ``subject``."""
 
-        Returns
-        -------
-        bool
-            ``True`` when the specification passes validation and ``False``
-            otherwise.
+        return self.subject if isinstance(self.subject, Sequence) else None
 
-        Raises
-        ------
-        ValueError
-            If any of ``specs``, ``dm``, or ``test_func`` have not been
-            configured.
-
-        Examples
-        --------
-        >>> spec_test = SpecTest(["price"], dm, lambda spec_list, manager: True)
-        >>> spec_test.test_filter
-        True
-        """
-
-        if self.test_func is None:
-            raise ValueError(
-                "SpecTest.test_func is not configured; unable to execute test."
-            )
-        if self.dm is None:
-            raise ValueError(
-                "SpecTest.dm is not configured; unable to execute test."
-            )
-        if self.specs is None:
-            raise ValueError(
-                "SpecTest.specs is not configured; unable to execute test."
-            )
-
-        # Encapsulate the callable invocation to keep the property usage simple.
-        return self.test_func(self.specs, self.dm)
+    @specs.setter
+    def specs(self, value: Optional[Sequence[object]]) -> None:
+        self.subject = value
 
 
-
-def ppnr_ols_target_test_func(
+def ppnr_ols_target_pretestset_func(
+    subject: object,
     dm: DataManager,
-    target: str,
-    sample: str = "in",
-) -> pd.DataFrame:
-    """Run stationarity diagnostics for a PPNR OLS target series.
+    sample: str,
+    outlier_idx: Optional[Sequence[Any]],
+) -> Dict[str, ModelTestBase]:
+    """Build target-level PPNR OLS tests.
 
     Parameters
     ----------
+    subject : object
+        Target identifier expected to be a column name in
+        :attr:`DataManager.internal_data`.
     dm : DataManager
-        Data manager containing the internal data and sample indices.
-    target : str
-        Column name of the target variable within ``dm.internal_data``.
-    sample : {"in", "full"}, default "in"
-        Retained for compatibility; both in-sample and full-sample target
-        series are always evaluated.
+        Data manager providing access to target history and sample indices.
+    sample : {"in", "full"}
+        Sample scope used by :class:`TargetStationarityTest`.
+    outlier_idx : Sequence[Any], optional
+        Index labels removed for outlier-adjusted diagnostics.
 
     Returns
     -------
-    pd.DataFrame
-        Stationarity diagnostics returned by :class:`TargetStationarityTest`.
-        The ``filter_mode_desc`` entry is mirrored into ``DataFrame.attrs`` so
-        callers can present the descriptive text before printing the table.
-
-    Raises
-    ------
-    ValueError
-        If ``sample`` is not one of the supported options.
-
-    Examples
-    --------
-    >>> diagnostics = ppnr_ols_target_test_func(dm, "NII", sample="full")
-    >>> diagnostics.loc["ADF", "Passed"]
-    True
+    dict
+        Mapping with a single ``"Target Stationarity"`` entry.
     """
 
-    normalized_sample = str(sample).lower()
-    if normalized_sample not in {"in", "full"}:
-        raise ValueError(
-            "sample must be either 'in' or 'full'; "
-            f"received {sample!r}."
-        )
+    if subject is None:
+        raise ValueError("subject must be provided for target pretests")
 
-    # Ensure the target contains numeric observations before running diagnostics to
-    # avoid treating an empty/non-numeric series as stationary.
-    _coerce_numeric_series(dm.internal_data[target], f"Target '{target}'")
-
-    target_test = TargetStationarityTest(
-        target=target,
+    target_name = str(subject)
+    test = TargetStationarityTest(
+        target=target_name,
         dm=dm,
-        filter_mode='moderate',
-        filter_on=False,
+        sample=sample,
+        outlier_idx=list(outlier_idx) if outlier_idx else None,
+        filter_mode="moderate",
+        filter_on=True,
     )
-    result = target_test.test_result
-    # Preserve the descriptive text so upstream callers can surface it prior to
-    # displaying the full diagnostic table.
-    result.attrs["filter_mode_desc"] = getattr(
-        target_test,
-        "filter_mode_desc",
-        "",
-    )
-    return result
-
-def _summarize_stationarity_result(result: pd.DataFrame) -> Optional[bool]:
-    """Return a boolean summary of StationarityTest results."""
-
-    if result.empty or "Passed" not in result.columns:
-        return None
-
-    passed_series = result["Passed"].fillna(False).astype(bool)
-    total_tests = len(passed_series)
-    if total_tests == 0:
-        return None
-
-    return bool(passed_series.sum() >= (total_tests / 2))
+    return {"Target Stationarity": test}
 
 
-def _coerce_target_result(target_result: Optional[Any]) -> Optional[bool]:
-    """Convert a stored target test result into a boolean when possible."""
-
-    if target_result is None:
-        return None
-    if isinstance(target_result, bool):
-        return target_result
-    if isinstance(target_result, pd.DataFrame):
-        return _summarize_stationarity_result(target_result)
-    if hasattr(target_result, "test_filter"):
-        try:
-            return bool(target_result.test_filter)
-        except Exception:
-            return None
-    if isinstance(target_result, pd.Series):
-        try:
-            return bool(target_result.all())
-        except ValueError:
-            return None
-    try:
-        return bool(target_result)
-    except Exception:
-        return None
-
-
-def _coerce_numeric_series(series: pd.Series, context_label: str) -> pd.Series:
-    """Coerce series values to numeric for stationarity diagnostics.
-
-    Parameters
-    ----------
-    series : pd.Series
-        Observations to evaluate for stationarity.
-    context_label : str
-        Human-readable label describing the series for error reporting.
-
-    Returns
-    -------
-    pd.Series
-        Numeric observations with missing values removed.
-
-    Raises
-    ------
-    ValueError
-        If no numeric observations remain after coercion.
-    """
-
-    coerced = pd.to_numeric(series, errors="coerce")
-    non_null = coerced.dropna()
-    if non_null.empty:
-        raise ValueError(
-            f"{context_label} does not contain numeric observations after coercion."
-        )
-    return non_null
-
-
-def ppnr_ols_feature_test_func(
-    feature: Union[str, Feature, TSFM, pd.Series, pd.DataFrame],
+def ppnr_ols_feature_pretestset_func(
+    subject: object,
     dm: DataManager,
-    target_test_result: Optional[Any],
-    sample: str = "in",
-) -> bool:
-    """Evaluate PPNR OLS feature stationarity relative to the target outcome.
+    sample: str,
+    outlier_idx: Optional[Sequence[Any]],
+) -> Dict[str, ModelTestBase]:
+    """Build feature-level PPNR OLS tests.
 
     Parameters
     ----------
-    feature : Union[str, Feature, TSFM, pd.Series, pd.DataFrame]
-        Identifier or feature object evaluated via
-        :class:`~Technic.test.FullStationarityTest` when a string,
-        :class:`Feature`, or :class:`TSFM` is provided. Pre-materialized
-        :class:`pandas.Series` or :class:`pandas.DataFrame` inputs are assessed
-        directly with :class:`~Technic.test.StationarityTest`.
+    subject : object
+        Feature identifier passed through to :class:`FullStationarityTest`.
     dm : DataManager
-        Data manager that provides feature construction utilities and sample
-        indices.
-    target_test_result : Any, optional
-        Cached outcome from the target-level test. ``True`` indicates a
-        stationary target, ``False`` denotes a non-stationary target, and
-        ``None`` defers the decision to the feature diagnostics.
-    sample : {"in", "full"}, default "in"
-        Portion of the feature history to evaluate for raw series inputs.
-        ``"in"`` restricts to the in-sample span, while ``"full"`` includes both
-        in-sample and out-of-sample observations when available.
+        Data manager supplying feature construction utilities and sample spans.
+    sample : {"in", "full"}
+        Sample scope used by :class:`FullStationarityTest`.
+    outlier_idx : Sequence[Any], optional
+        Index labels removed for outlier-adjusted diagnostics.
 
     Returns
     -------
-    bool
-        ``True`` when the feature satisfies the stationarity preference implied
-        by the target test outcome. Columns that cannot be coerced to numeric
-        are ignored when computing the outcome.
-
-    Raises
-    ------
-    ValueError
-        If ``sample`` is not ``"in"`` or ``"full"`` for raw series inputs.
-
-    Examples
-    --------
-    >>> ppnr_ols_feature_test_func("GDP", dm, True)
-    True
+    dict
+        Mapping with a single ``"Feature Stationarity"`` entry.
     """
 
-    if isinstance(feature, (str, Feature, TSFM)):
-        # Delegate staged stationarity checks to FullStationarityTest, which
-        # internally handles in-sample, full-sample, and original-variable
-        # retries for regime or conditional wrappers.
-        feature_pass = FullStationarityTest(variable=feature, dm=dm).test_filter
-    else:
-        normalized_sample = str(sample).lower()
-        if normalized_sample not in {"in", "full"}:
-            raise ValueError(
-                "sample must be either 'in' or 'full'; "
-                f"received {sample!r}."
-            )
+    if subject is None:
+        raise ValueError("subject must be provided for feature pretests")
 
-        if isinstance(feature, (pd.Series, pd.DataFrame)):
-            # Accept pre-materialized feature histories so callers can bypass
-            # DataManager feature construction when transformations already
-            # exist in-memory (e.g., Segment.explore_vars). Copies guard against
-            # accidental mutation of caller-owned objects.
-            feature_frame = (
-                feature.to_frame()
-                if isinstance(feature, pd.Series)
-                else feature.copy()
-            )
-            # Ensure Series-provided columns retain a helpful label for logging.
-            if isinstance(feature, pd.Series) and feature_frame.columns.size == 1:
-                feature_frame.columns = [feature.name or "feature"]
-        else:
-            feature_frame = dm.build_features([feature])
-            if isinstance(feature_frame, pd.Series):
-                feature_frame = feature_frame.to_frame()
-
-        if feature_frame.empty:
-            # No data implies nothing to invalidate; treat as passing.
-            feature_pass = True
-        else:
-            in_sample_idx = dm.in_sample_idx
-            scoped_segments = []
-
-            # Build the evaluation window according to the requested sample scope.
-            if in_sample_idx is not None:
-                in_sample_idx = feature_frame.index.intersection(in_sample_idx)
-                if len(in_sample_idx) > 0:
-                    scoped_segments.append(feature_frame.loc[in_sample_idx])
-
-            if normalized_sample == "full":
-                out_sample_idx = dm.out_sample_idx
-                if out_sample_idx is not None:
-                    out_sample_idx = feature_frame.index.intersection(out_sample_idx)
-                    if len(out_sample_idx) > 0:
-                        scoped_segments.append(feature_frame.loc[out_sample_idx])
-
-            if scoped_segments:
-                scoped_frame = pd.concat(scoped_segments, axis=0).sort_index()
-            else:
-                scoped_frame = feature_frame.sort_index()
-
-            numeric_frame = scoped_frame.apply(pd.to_numeric, errors="coerce")
-
-            candidate_columns = [
-                col for col in numeric_frame.columns if ":" not in str(col)
-            ]
-
-            if isinstance(feature, Feature):
-                desired_columns = [
-                    name for name in feature.output_names if ":" not in str(name)
-                ]
-                if desired_columns:
-                    candidate_columns = [
-                        col for col in candidate_columns if col in desired_columns
-                    ]
-
-            usable_columns = []
-            for column in candidate_columns:
-                series = numeric_frame[column].dropna()
-                if series.empty:
-                    continue
-                usable_columns.append((column, series))
-
-            if not usable_columns:
-                # Nothing qualifies for stationarity testing, so accept by default.
-                feature_pass = True
-            else:
-                # Each feature invocation yields a single logical output set, so
-                # iterate directly over the filtered columns in their materialized
-                # order.
-                column_outcomes = []
-                for column, series in usable_columns:
-                    try:
-                        cleaned_series = _coerce_numeric_series(
-                            series, f"Feature column '{column}'"
-                        )
-                    except ValueError:
-                        # Skip columns that still lack numeric data after coercion.
-                        continue
-
-                    stationarity_test = StationarityTest(series=cleaned_series)
-                    result_df = stationarity_test.test_result
-                    column_pass = _summarize_stationarity_result(result_df)
-                    column_outcomes.append(False if column_pass is None else column_pass)
-
-                feature_pass = all(column_outcomes) if column_outcomes else True
-
-    target_pass = _coerce_target_result(target_test_result)
-    if target_pass is False:
-        return not feature_pass
-    return feature_pass
+    test = FullStationarityTest(
+        variable=subject,
+        dm=dm,
+        sample=sample,
+        outlier_idx=list(outlier_idx) if outlier_idx else None,
+        filter_mode="moderate",
+        filter_on=True,
+    )
+    return {"Feature Stationarity": test}
 
 
 # NOTE: Provide a reusable pre-test bundle for PPNR OLS model searches.
 ppnr_ols_pretestset: PreTestSet = PreTestSet(
-    target_test=TargetTest(test_func=ppnr_ols_target_test_func),
-    feature_test=FeatureTest(test_func=ppnr_ols_feature_test_func),
+    target_test=TargetTest(testset_func=ppnr_ols_target_pretestset_func),
+    feature_test=FeatureTest(testset_func=ppnr_ols_feature_pretestset_func),
+    context_map={"feature_test": ("target_result", "target_test_result")},
 )
