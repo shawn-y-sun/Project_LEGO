@@ -27,7 +27,12 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Union
 
 from .data import DataManager
 from .feature import Feature
-from .test import FullStationarityTest, ModelTestBase, TargetStationarityTest
+from .test import (
+    FeatureValidityTest,
+    FullStationarityTest,
+    ModelTestBase,
+    TargetStationarityTest,
+)
 from .testset import TestSet
 from .transform import TSFM
 
@@ -427,14 +432,14 @@ class FeatureTest(BasePreTest):
     test_update_func : callable, optional
         Optional update function; see :class:`BasePreTest` for details.
     target_test_result : bool, optional
-        Outcome from the target-level pretest. When provided, ``False`` flips
-        the expectation so non-stationary features satisfy the filter to mirror
-        a non-stationary target.
+        Deprecated; prefer context injection. When provided, the value is cached
+        in the external context as ``"target_test_result"``.
 
     Attributes
     ----------
-    target_test_result : Optional[bool]
-        Cached outcome from the target-level test for downstream consumers.
+    expected_outcome : bool
+        The boolean result (pass/fail) expected from the assembled test set,
+        derived from the external context (defaulting to ``True``).
     """
 
     def __init__(
@@ -459,9 +464,8 @@ class FeatureTest(BasePreTest):
             test_update_func=test_update_func,
             force_filter_pass=force_filter_pass,
         )
-        self.target_test_result: Optional[bool] = (
-            None if target_test_result is None else bool(target_test_result)
-        )
+        if target_test_result is not None:
+            self.apply_context({"target_test_result": bool(target_test_result)})
 
     @property
     def feature(self) -> Optional[Union[str, Feature, TSFM]]:
@@ -473,76 +477,43 @@ class FeatureTest(BasePreTest):
     def feature(self, value: Optional[Union[str, Feature, TSFM]]) -> None:
         self.subject = value
 
-    def apply_target_test_result(self, target_result: Optional[bool]) -> None:
-        """Store the target pre-test outcome for expectation alignment.
-
-        Parameters
-        ----------
-        target_result : bool, optional
-            Pass/fail flag returned by :class:`TargetTest.test_filter`. ``True``
-            preserves the standard feature requirement of stationarity, while
-            ``False`` flips expectations so non-stationary features satisfy the
-            filter.
-
-        Examples
-        --------
-        >>> feat_test = FeatureTest(testset_func=lambda *args: {})
-        >>> feat_test.apply_target_test_result(False)
-        """
-
-        if target_result is None:
-            self.target_test_result = None
-            return
-
-        # Maintain backwards compatibility for direct calls while funneling
-        # through the shared context mechanism.
-        self.apply_context({"target_result": target_result})
-
-    def apply_context(self, context: Mapping[str, Any]) -> None:
-        """Ingest shared context and update target-driven expectations.
-
-        Parameters
-        ----------
-        context : Mapping[str, Any]
-            Context payload produced by :class:`PreTestSet` or external
-            orchestrators. The feature test consumes ``"target_result"`` (or
-            ``"target_test_result"``) when available to align expectations with
-            target stationarity outcomes. Additional keys are retained on
-            :pyattr:`external_context` for downstream customization in other
-            model types.
-        """
-
-        super().apply_context(context)
-        context_value = context.get("target_result", context.get("target_test_result"))
-        self.target_test_result = None if context_value is None else bool(context_value)
-
     @property
-    def expected_stationary(self) -> Optional[bool]:
-        """Return the target-informed expectation for feature stationarity."""
+    def expected_outcome(self) -> bool:
+        """
+        Return the boolean result expected from the feature test set.
 
-        return None if self.target_test_result is None else bool(self.target_test_result)
+        Derived from the ``"target_test_result"`` (or ``"target_result"``) key
+        in the external context. Defaults to ``True`` (expect pass) when no
+        context is available.
+        """
+
+        # Check for target-driven overrides in the context.
+        context_value = self.external_context.get(
+            "target_test_result",
+            self.external_context.get("target_result"),
+        )
+        if context_value is not None:
+            return bool(context_value)
+
+        # Default to requiring the test to pass.
+        return True
 
     @property
     def test_filter(self) -> bool:
         """
-        Evaluate feature tests respecting target-driven stationarity expectations.
+        Evaluate feature tests against the context-derived expectation.
 
         Returns
         -------
         bool
-            ``True`` when feature outcomes align with the desired stationarity
-            state inferred from the target pre-test; defaults to the raw test
-            results when no target guidance is present.
+            ``True`` when the test set outcome matches :pyattr:`expected_outcome`
+            (e.g., passing when passing is expected, or failing when failure
+            is expected).
         """
 
         passed, _ = self.testset.filter_pass()
-        expected_stationary = self.expected_stationary
-        if expected_stationary is None:
-            return self._apply_force_filter_pass(passed)
-
-        # When the target is non-stationary, invert the outcome so non-stationary
-        # features satisfy the dependency requirement.
-        return self._apply_force_filter_pass(passed if expected_stationary else not passed)
+        expected = self.expected_outcome
+        return self._apply_force_filter_pass(passed == expected)
 
 
 class SpecTest(BasePreTest):
@@ -667,7 +638,7 @@ def ppnr_ols_feature_pretestset_func(
     if subject is None:
         raise ValueError("subject must be provided for feature pretests")
 
-    test = FullStationarityTest(
+    test_stat = FullStationarityTest(
         variable=subject,
         dm=dm,
         sample=sample,
@@ -675,7 +646,19 @@ def ppnr_ols_feature_pretestset_func(
         filter_mode="moderate",
         filter_on=True,
     )
-    return {"Feature Stationarity": test}
+
+    test_val = FeatureValidityTest(
+        variable=subject,
+        dm=dm,
+        sample=sample,
+        outlier_idx=list(outlier_idx) if outlier_idx else None,
+        filter_mode="moderate",
+        filter_on=True,
+    )
+    return {
+        "Feature Validity": test_val,
+        "Feature Stationarity": test_stat,
+    }
 
 
 # NOTE: Provide a reusable pre-test bundle for PPNR OLS model searches.

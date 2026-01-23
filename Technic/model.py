@@ -1177,7 +1177,7 @@ class ModelBase(ABC):
         """
         Create ScenManager instance using scen_cls.
         """
-        if self.scen_cls is not None:
+        if self.scen_cls is not None and self.dm is not None and self.dm.scen_mevs:
             self.scen_manager = self.scen_cls(
                 model=self,
                 qtr_method=self.qtr_method
