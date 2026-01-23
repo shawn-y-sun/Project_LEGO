@@ -27,7 +27,12 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Union
 
 from .data import DataManager
 from .feature import Feature
-from .test import FullStationarityTest, ModelTestBase, TargetStationarityTest
+from .test import (
+    FeatureValidityTest,
+    FullStationarityTest,
+    ModelTestBase,
+    TargetStationarityTest,
+)
 from .testset import TestSet
 from .transform import TSFM
 
@@ -667,7 +672,7 @@ def ppnr_ols_feature_pretestset_func(
     if subject is None:
         raise ValueError("subject must be provided for feature pretests")
 
-    test = FullStationarityTest(
+    test_stat = FullStationarityTest(
         variable=subject,
         dm=dm,
         sample=sample,
@@ -675,7 +680,19 @@ def ppnr_ols_feature_pretestset_func(
         filter_mode="moderate",
         filter_on=True,
     )
-    return {"Feature Stationarity": test}
+
+    test_val = FeatureValidityTest(
+        variable=subject,
+        dm=dm,
+        sample=sample,
+        outlier_idx=list(outlier_idx) if outlier_idx else None,
+        filter_mode="moderate",
+        filter_on=True,
+    )
+    return {
+        "Feature Stationarity": test_stat,
+        "Feature Validity": test_val,
+    }
 
 
 # NOTE: Provide a reusable pre-test bundle for PPNR OLS model searches.
