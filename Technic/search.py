@@ -601,8 +601,10 @@ class ModelSearch:
         # can be evaluated directly before enumeration.
         feature_test = self._prepare_feature_pretest()
         pretest_cache: Dict[str, bool] = {}
-        excluded_variant_labels: List[str] = []
+        # Changed from simple list to dict mapping test name to list of excluded features
+        exclusions_by_test: Dict[str, List[str]] = defaultdict(list)
         excluded_variant_seen: Set[str] = set()
+
         excluded_group_labels: List[str] = []
         excluded_group_seen: Set[str] = set()
 
@@ -670,8 +672,50 @@ class ModelSearch:
                 passes = pretest_cache[cache_key]
             else:
                 feature_test.feature = candidate
+                failed_reasons = []
                 try:
-                    result = feature_test.test_filter
+                    # Access underlying TestSet to identify specific failures
+                    ts = feature_test.testset
+                    passed, failed_tests = ts.filter_pass()
+
+                    # Replicate FeatureTest.test_filter logic locally to understand outcome
+                    expected_stationary = feature_test.expected_stationary
+                    final_pass = passed
+
+                    # When target is non-stationary, invert the outcome so non-stationary features satisfy
+                    if expected_stationary is not None:
+                        final_pass = passed if expected_stationary else not passed
+
+                    final_pass = feature_test._apply_force_filter_pass(final_pass)
+
+                    passes = final_pass
+
+                    if not passes:
+                        # Determine why it failed
+                        if expected_stationary is not None and not expected_stationary:
+                            # We expected NON-stationary (passed=False), but got stationary (passed=True)
+                            # Or if we forced pass/fail
+                            if passed:
+                                failed_reasons.append("Target Alignment (Too Stationary)")
+                            else:
+                                # passed=False (tests failed), which is what we wanted!
+                                # Wait, if expected_stationary=False, then (not passed) -> True.
+                                # So final_pass would be True.
+                                # If we are here (not passes), then final_pass is False.
+                                # If expected_stationary=False, final_pass = not passed.
+                                # If final_pass is False, then passed must be True.
+                                # So tests passed (stationary), but we wanted non-stationary.
+                                failed_reasons.append("Target Alignment (Too Stationary)")
+                        else:
+                            # Standard case: expected_stationary=True or None
+                            # We expected passed=True. If not passes, then passed=False.
+                            # So failed_tests contains the actual failures.
+                            if failed_tests:
+                                failed_reasons.extend(failed_tests)
+                            elif not passed:
+                                # Fallback if passed is False but failed_tests is empty (shouldn't happen with standard logic)
+                                failed_reasons.append("Unspecified Test Failure")
+
                 except Exception as exc:  # pragma: no cover - defensive logging
                     print(
                         "Feature pre-test raised "
@@ -679,15 +723,15 @@ class ModelSearch:
                     )
                     passes = True
                 else:
-                    try:
-                        passes = bool(result)
-                    except Exception:  # pragma: no cover - unexpected truthiness
-                        passes = True
+                    # If failed, record reasons
+                    if not passes:
+                        for reason in failed_reasons:
+                            exclusions_by_test[reason].append(cache_key)
+
                 pretest_cache[cache_key] = passes
 
             if not passes:
                 if cache_key not in excluded_variant_seen:
-                    excluded_variant_labels.append(cache_key)
                     excluded_variant_seen.add(cache_key)
             return passes
 
@@ -999,14 +1043,17 @@ class ModelSearch:
                     continue
                 expanded.append(sorted_prod)
 
-        if (feature_test is not None) and (excluded_variant_labels or excluded_group_labels):
+        if (feature_test is not None) and (exclusions_by_test or excluded_group_labels):
             print("--- Feature Pre-Test Exclusions ---")
-            if excluded_variant_labels:
-                print(
-                    "Excluded "
-                    f"{len(excluded_variant_labels)} variant(s): "
-                    + ", ".join(excluded_variant_labels)
-                )
+
+            # Print exclusions grouped by test name
+            if exclusions_by_test:
+                for test_name, variants in sorted(exclusions_by_test.items()):
+                    unique_variants = sorted(list(set(variants)))
+                    count = len(unique_variants)
+                    # Simple formatting: Test Name: var1, var2, ...
+                    print(f"{test_name} ({count}): {', '.join(unique_variants)}")
+
             if excluded_group_labels:
                 print(
                     "Removed "
