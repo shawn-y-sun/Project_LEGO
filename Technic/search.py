@@ -601,8 +601,10 @@ class ModelSearch:
         # can be evaluated directly before enumeration.
         feature_test = self._prepare_feature_pretest()
         pretest_cache: Dict[str, bool] = {}
-        excluded_variant_labels: List[str] = []
+        # Changed from simple list to dict mapping test name to list of excluded features
+        exclusions_by_test: Dict[str, List[str]] = defaultdict(list)
         excluded_variant_seen: Set[str] = set()
+
         excluded_group_labels: List[str] = []
         excluded_group_seen: Set[str] = set()
 
@@ -670,8 +672,33 @@ class ModelSearch:
                 passes = pretest_cache[cache_key]
             else:
                 feature_test.feature = candidate
+                failed_reasons = []
                 try:
-                    result = feature_test.test_filter
+                    # Access underlying TestSet to identify specific failures
+                    ts = feature_test.testset
+                    passed, failed_tests = ts.filter_pass()
+
+                    # Determine expected outcome from feature_test context
+                    expected_pass = feature_test.expected_outcome
+
+                    # Evaluate based on expectation: passed == expected
+                    final_pass = (passed == expected_pass)
+                    final_pass = feature_test._apply_force_filter_pass(final_pass)
+
+                    passes = final_pass
+
+                    if not passes:
+                        # Determine why it failed
+                        if expected_pass:
+                            # Expected True, got False -> Tests failed
+                            if failed_tests:
+                                failed_reasons.extend(failed_tests)
+                            else:
+                                failed_reasons.append("Unspecified Test Failure")
+                        else:
+                            # Expected False (e.g. non-stationary), got True (stationary)
+                            failed_reasons.append("Target Alignment (Unexpected Pass)")
+
                 except Exception as exc:  # pragma: no cover - defensive logging
                     print(
                         "Feature pre-test raised "
@@ -679,15 +706,15 @@ class ModelSearch:
                     )
                     passes = True
                 else:
-                    try:
-                        passes = bool(result)
-                    except Exception:  # pragma: no cover - unexpected truthiness
-                        passes = True
+                    # If failed, record reasons
+                    if not passes:
+                        for reason in failed_reasons:
+                            exclusions_by_test[reason].append(cache_key)
+
                 pretest_cache[cache_key] = passes
 
             if not passes:
                 if cache_key not in excluded_variant_seen:
-                    excluded_variant_labels.append(cache_key)
                     excluded_variant_seen.add(cache_key)
             return passes
 
@@ -999,14 +1026,17 @@ class ModelSearch:
                     continue
                 expanded.append(sorted_prod)
 
-        if (feature_test is not None) and (excluded_variant_labels or excluded_group_labels):
+        if (feature_test is not None) and (exclusions_by_test or excluded_group_labels):
             print("--- Feature Pre-Test Exclusions ---")
-            if excluded_variant_labels:
-                print(
-                    "Excluded "
-                    f"{len(excluded_variant_labels)} variant(s): "
-                    + ", ".join(excluded_variant_labels)
-                )
+
+            # Print exclusions grouped by test name
+            if exclusions_by_test:
+                for test_name, variants in sorted(exclusions_by_test.items()):
+                    unique_variants = sorted(list(set(variants)))
+                    count = len(unique_variants)
+                    # Simple formatting: Test Name: var1, var2, ...
+                    print(f"{test_name} ({count}): {', '.join(unique_variants)}")
+
             if excluded_group_labels:
                 print(
                     "Removed "

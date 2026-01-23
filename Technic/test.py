@@ -2784,3 +2784,92 @@ class MultiStationarityTest(ModelTestBase):
         return self._apply_force_filter_pass(
             all(test.test_filter for test in self._individual_tests.values())
         )
+
+# ----------------------------------------------------------------------------
+# FeatureValidityTest class
+# ----------------------------------------------------------------------------
+
+class FeatureValidityTest(ModelTestBase):
+    """
+    Check if the in-sample period of a variable contains any invalid data like null or inf.
+
+    Parameters
+    ----------
+    variable : Union[str, TSFM, RgmVar, CondVar]
+        Variable identifier or transformation specification to build.
+    dm : DataManager
+        Data manager used to construct features and access sample indices.
+    sample : {'in', 'full'}, default 'in'
+        Which sample slice to evaluate.
+    outlier_idx : list, optional
+        Index labels to exclude from validity check.
+    alias : str, optional
+        Display name for this test (defaults to class name).
+    filter_mode : {'strict', 'moderate'}, default 'moderate'
+        PASSED/FAILED behavior.
+    filter_on : bool, default True
+        Whether this test participates in filter evaluation aggregation.
+    """
+    category = 'data_integrity'
+
+    def __init__(
+        self,
+        variable: Union[str, TSFM, RgmVar, CondVar],
+        dm: DataManager,
+        sample: str = 'in',
+        outlier_idx: Optional[List[Any]] = None,
+        alias: Optional[str] = None,
+        filter_mode: str = 'moderate',
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
+    ):
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
+        self.variable = variable
+        self.dm = dm
+        self.sample = sample.lower()
+        if self.sample not in {'in', 'full'}:
+            raise ValueError("sample must be either 'in' or 'full'")
+        self.outlier_idx = list(outlier_idx) if outlier_idx else []
+
+    @property
+    def test_result(self) -> pd.DataFrame:
+        feature_frame = self.dm.build_features([self.variable])
+        if feature_frame.empty:
+            return pd.DataFrame([
+                {'Metric': 'NaN Count', 'Value': 0, 'Passed': False},
+                {'Metric': 'Inf Count', 'Value': 0, 'Passed': False}
+            ]).set_index('Metric')
+
+        series = feature_frame.iloc[:, 0]
+
+        if self.sample == 'in':
+            sample_idx = self.dm.in_sample_idx
+        else:
+            out_idx = getattr(self.dm, 'out_sample_idx', None)
+            sample_idx = self.dm.in_sample_idx if out_idx is None else self.dm.in_sample_idx.append(out_idx)
+
+        aligned_idx = sample_idx[sample_idx.isin(series.index)]
+        series_sample = series.loc[aligned_idx]
+
+        if self.outlier_idx:
+            series_sample = series_sample.drop(index=self.outlier_idx, errors='ignore')
+
+        numeric_series = pd.to_numeric(series_sample, errors='coerce')
+        nan_count = numeric_series.isna().sum()
+        inf_count = np.isinf(numeric_series).sum()
+
+        return pd.DataFrame([
+            {'Metric': 'NaN Count', 'Value': int(nan_count), 'Passed': nan_count == 0},
+            {'Metric': 'Inf Count', 'Value': int(inf_count), 'Passed': inf_count == 0}
+        ]).set_index('Metric')
+
+    @property
+    def test_filter(self) -> bool:
+        res = self.test_result
+        passed = res['Passed'].all()
+        return self._apply_force_filter_pass(passed)
