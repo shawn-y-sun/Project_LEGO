@@ -678,43 +678,26 @@ class ModelSearch:
                     ts = feature_test.testset
                     passed, failed_tests = ts.filter_pass()
 
-                    # Replicate FeatureTest.test_filter logic locally to understand outcome
-                    expected_stationary = feature_test.expected_stationary
-                    final_pass = passed
+                    # Determine expected outcome from feature_test context
+                    expected_pass = feature_test.expected_outcome
 
-                    # When target is non-stationary, invert the outcome so non-stationary features satisfy
-                    if expected_stationary is not None:
-                        final_pass = passed if expected_stationary else not passed
-
+                    # Evaluate based on expectation: passed == expected
+                    final_pass = (passed == expected_pass)
                     final_pass = feature_test._apply_force_filter_pass(final_pass)
 
                     passes = final_pass
 
                     if not passes:
                         # Determine why it failed
-                        if expected_stationary is not None and not expected_stationary:
-                            # We expected NON-stationary (passed=False), but got stationary (passed=True)
-                            # Or if we forced pass/fail
-                            if passed:
-                                failed_reasons.append("Target Alignment (Too Stationary)")
-                            else:
-                                # passed=False (tests failed), which is what we wanted!
-                                # Wait, if expected_stationary=False, then (not passed) -> True.
-                                # So final_pass would be True.
-                                # If we are here (not passes), then final_pass is False.
-                                # If expected_stationary=False, final_pass = not passed.
-                                # If final_pass is False, then passed must be True.
-                                # So tests passed (stationary), but we wanted non-stationary.
-                                failed_reasons.append("Target Alignment (Too Stationary)")
-                        else:
-                            # Standard case: expected_stationary=True or None
-                            # We expected passed=True. If not passes, then passed=False.
-                            # So failed_tests contains the actual failures.
+                        if expected_pass:
+                            # Expected True, got False -> Tests failed
                             if failed_tests:
                                 failed_reasons.extend(failed_tests)
-                            elif not passed:
-                                # Fallback if passed is False but failed_tests is empty (shouldn't happen with standard logic)
+                            else:
                                 failed_reasons.append("Unspecified Test Failure")
+                        else:
+                            # Expected False (e.g. non-stationary), got True (stationary)
+                            failed_reasons.append("Target Alignment (Unexpected Pass)")
 
                 except Exception as exc:  # pragma: no cover - defensive logging
                     print(
