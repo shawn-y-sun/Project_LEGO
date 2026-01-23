@@ -1205,6 +1205,9 @@ class ModelSearch:
             print("")
 
             for idx, specs in enumerate(self.all_specs, start=start_index):
+                # Calculate relative index upfront so it is available even if exceptions occur
+                relative_i = idx - start_index
+
                 # Use temporary identifiers during assessment to avoid reusing
                 # final passed_* labels before models pass all tests.
                 model_id = f"temp_{idx}"
@@ -1287,7 +1290,6 @@ class ModelSearch:
                     batch_filter_test_infos.update(filter_test_info)
 
                     # Determine batch size based on progress
-                    relative_i = idx - start_index
                     batch_size = 100 if relative_i < 10000 else 10000
                     
                     # Process batch based on dynamic batch size or on first run
