@@ -690,8 +690,8 @@ def ppnr_ols_feature_pretestset_func(
         filter_on=True,
     )
     return {
-        "Feature Stationarity": test_stat,
         "Feature Validity": test_val,
+        "Feature Stationarity": test_stat,
     }
 
 
