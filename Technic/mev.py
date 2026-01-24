@@ -437,7 +437,7 @@ class MEVLoader:
 
     def load_scens(
         self,
-        source: Union[str, Dict[str, Dict[str, Union[pd.DataFrame, pd.Series]]]],
+        source: Union[str, Dict[str, Union[pd.DataFrame, pd.Series, Dict[str, Union[pd.DataFrame, pd.Series]]]]],
         scens: Optional[Dict[str, str]] = None,
         set_name: Optional[str] = None,
         freq: Optional[str] = None,
@@ -454,31 +454,34 @@ class MEVLoader:
            - ``scens``: mapping of scenario names to sheet names
            - ``set_name``: optional name for the scenario set
 
-        2. From dictionary (3-layer structure):
-           - ``source``: dictionary with structure ``{set_name: {scen_name: DataFrame}}``
-           - ``scens`` and ``set_name`` parameters are ignored
+        2. From dictionary:
+           - Two-layer structure: ``{scen_name: DataFrame}``
+             - ``set_name`` parameter is required
+           - Three-layer structure: ``{set_name: {scen_name: DataFrame}}``
+             - ``set_name`` parameter is ignored
 
         Parameters
         ----------
         source : str or dict
             Either:
             - Path to Excel workbook containing scenario data, or
+            - Dictionary with structure ``{scen_name: DataFrame}`` (requires set_name), or
             - Dictionary with structure ``{set_name: {scen_name: DataFrame}}``
         scens : dict, optional
             Required only when loading from Excel.
             Mapping of scenario names to sheet names
             Example: {"Base": "BaseSheet", "Adv": "AdverseSheet"}
         set_name : str, optional
-            Used only when loading from Excel.
-            Name of the scenario set. If None, uses the source filename without extension.
-            Example: If source is ``'EWST2024.xlsx'``, ``set_name`` defaults to ``'EWST2024'``.
+            Used when loading from Excel or when loading from a two-layer dictionary.
+            Name of the scenario set. If None and loading from Excel, uses the source filename.
         freq : str, optional
             Expected frequency (``'M'`` for monthly, ``'Q'`` for quarterly).
             If not provided, will be inferred from data.
         p0 : str, Timestamp, or dict, optional
-            Scenario jumpoff date override(s). When loading from Excel, provide a
-            single date string (e.g., ``"2024-12-31"``) or :class:`~pandas.Timestamp`
-            to override the internal loader ``scen_p0`` for that scenario set.
+            Scenario jumpoff date override(s). When loading from Excel or a two-layer
+            dictionary, provide a single date string (e.g., ``"2024-12-31"``) or
+            :class:`~pandas.Timestamp` to override the internal loader ``scen_p0``
+            for that scenario set.
             When loading from a dictionary containing multiple scenario sets,
             supply a mapping of ``{set_name: p0_string}`` to assign different
             jumpoff dates per set. Overrides are normalized to month-end dates
@@ -492,11 +495,10 @@ class MEVLoader:
         ...     scens={"Base": "Base", "Adv": "Adverse"},
         ...     p0="2024-12-31"
         ... )
+        >>> # Load from 3-layer dictionary
         >>> loader.load_scens({"EWST2025": {"Base": df_base}}, p0="2024-12-31")
-        >>> loader.load_scens(
-        ...     {"EWST2026": {"Base": df_base}, "GRST2026": {"Base": df_other}},
-        ...     p0={"EWST2026": "2024-12-31", "GRST2026": "2024-09-30"}
-        ... )
+        >>> # Load from 2-layer dictionary
+        >>> loader.load_scens({"Base": df_base, "Adv": df_adv}, set_name="EWST2025", p0="2024-12-31")
         """
         if isinstance(source, str):
             # Loading from Excel file
@@ -546,6 +548,13 @@ class MEVLoader:
                 raise TypeError(
                     "When source is not a string, it must be a dictionary mapping set names to scenario data."
                 )
+
+            # Check for 2-layer structure (dictionary of DataFrames/Series)
+            if source and isinstance(next(iter(source.values())), (pd.DataFrame, pd.Series)):
+                if set_name is None:
+                    raise ValueError("set_name must be provided when loading a dictionary of scenarios (2-layer structure).")
+                # Normalize to 3-layer structure
+                source = {set_name: source}
 
             # Track number of scenario sets to validate scalar p0 usage
             set_count = len(source)
