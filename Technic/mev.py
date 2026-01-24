@@ -437,7 +437,7 @@ class MEVLoader:
 
     def load_scens(
         self,
-        source: Union[str, Dict[str, Dict[str, Union[pd.DataFrame, pd.Series]]]],
+        source: Union[str, Dict[str, Union[pd.DataFrame, pd.Series]]],
         scens: Optional[Dict[str, str]] = None,
         set_name: Optional[str] = None,
         freq: Optional[str] = None,
@@ -454,35 +454,35 @@ class MEVLoader:
            - ``scens``: mapping of scenario names to sheet names
            - ``set_name``: optional name for the scenario set
 
-        2. From dictionary (3-layer structure):
-           - ``source``: dictionary with structure ``{set_name: {scen_name: DataFrame}}``
-           - ``scens`` and ``set_name`` parameters are ignored
+        2. From dictionary:
+           - Structure: ``{scen_name: DataFrame}``
+           - ``set_name`` parameter is required
 
         Parameters
         ----------
         source : str or dict
             Either:
             - Path to Excel workbook containing scenario data, or
-            - Dictionary with structure ``{set_name: {scen_name: DataFrame}}``
+            - Dictionary with structure ``{scen_name: DataFrame}`` (requires set_name)
         scens : dict, optional
             Required only when loading from Excel.
             Mapping of scenario names to sheet names
             Example: {"Base": "BaseSheet", "Adv": "AdverseSheet"}
         set_name : str, optional
-            Used only when loading from Excel.
-            Name of the scenario set. If None, uses the source filename without extension.
-            Example: If source is ``'EWST2024.xlsx'``, ``set_name`` defaults to ``'EWST2024'``.
+            Required when loading from a dictionary.
+            Used when loading from Excel. Name of the scenario set.
+            If None and loading from Excel, uses the source filename.
         freq : str, optional
             Expected frequency (``'M'`` for monthly, ``'Q'`` for quarterly).
             If not provided, will be inferred from data.
         p0 : str, Timestamp, or dict, optional
-            Scenario jumpoff date override(s). When loading from Excel, provide a
-            single date string (e.g., ``"2024-12-31"``) or :class:`~pandas.Timestamp`
-            to override the internal loader ``scen_p0`` for that scenario set.
-            When loading from a dictionary containing multiple scenario sets,
-            supply a mapping of ``{set_name: p0_string}`` to assign different
-            jumpoff dates per set. Overrides are normalized to month-end dates
-            and made available through :class:`~Technic.data.DataManager`.
+            Scenario jumpoff date override(s). Provide a single date string
+            (e.g., ``"2024-12-31"``) or :class:`~pandas.Timestamp` to override
+            the internal loader ``scen_p0`` for the scenario set.
+            If a dictionary is provided, it can be used to map the set_name to
+            a date, but a scalar date is preferred since only one set is loaded.
+            Overrides are normalized to month-end dates and made available
+            through :class:`~Technic.data.DataManager`.
 
         Examples
         --------
@@ -492,11 +492,8 @@ class MEVLoader:
         ...     scens={"Base": "Base", "Adv": "Adverse"},
         ...     p0="2024-12-31"
         ... )
-        >>> loader.load_scens({"EWST2025": {"Base": df_base}}, p0="2024-12-31")
-        >>> loader.load_scens(
-        ...     {"EWST2026": {"Base": df_base}, "GRST2026": {"Base": df_other}},
-        ...     p0={"EWST2026": "2024-12-31", "GRST2026": "2024-09-30"}
-        ... )
+        >>> # Load from dictionary
+        >>> loader.load_scens({"Base": df_base, "Adv": df_adv}, set_name="EWST2025", p0="2024-12-31")
         """
         if isinstance(source, str):
             # Loading from Excel file
@@ -544,14 +541,28 @@ class MEVLoader:
         else:
             if not isinstance(source, dict):
                 raise TypeError(
-                    "When source is not a string, it must be a dictionary mapping set names to scenario data."
+                    "When source is not a string, it must be a dictionary mapping scenario names to DataFrames."
                 )
 
-            # Track number of scenario sets to validate scalar p0 usage
-            set_count = len(source)
+            # Check if values are DataFrames/Series (2-layer structure)
+            if source:
+                first_val = next(iter(source.values()))
+                if not isinstance(first_val, (pd.DataFrame, pd.Series)):
+                     raise ValueError(
+                        "Source dictionary values must be DataFrames or Series. "
+                        "Nested dictionaries (3-layer structure) are no longer supported. "
+                        "Please load scenario sets one by one."
+                    )
+
+            if set_name is None:
+                raise ValueError("set_name must be provided when loading a dictionary of scenarios.")
+
+            # Normalize to what logic expects (internal handling can still iterate,
+            # effectively processing 1 set)
+            source_dict = {set_name: source}
 
             # Loading from dictionary structure
-            for curr_set_name, scenarios in source.items():
+            for curr_set_name, scenarios in source_dict.items():
                 # Initialize containers for this scenario set if not exist
                 if curr_set_name not in self._scen_mev_qtr:
                     self._scen_mev_qtr[curr_set_name] = {}
@@ -563,10 +574,6 @@ class MEVLoader:
                 if isinstance(p0, dict):
                     override_value = p0.get(curr_set_name)
                 elif p0 is not None:
-                    if set_count > 1:
-                        raise ValueError(
-                            "When loading multiple scenario sets from a dictionary, provide 'p0' as a mapping of set names to dates."
-                        )
                     override_value = p0  # type: ignore[assignment]
                 if override_value is not None:
                     normalized = self._normalize_p0_value(override_value)
