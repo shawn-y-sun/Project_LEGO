@@ -1620,6 +1620,9 @@ class CoefTest(ModelTestBase):
         Maximum number of coefficients allowed in the (0.05, 0.10) band when
         ``filter_mode`` is ``'moderate'``. Use ``None`` to keep the default
         requirement that all coefficients remain below 0.10.
+    skip : list of str, optional
+        Coefficient names to exclude from ``test_filter`` evaluation. This does
+        not alter ``test_result`` itself; it only affects filtering.
     """
     category = 'performance'
 
@@ -1636,6 +1639,7 @@ class CoefTest(ModelTestBase):
         filter_mode: str = 'moderate',
         filter_on: bool = True,
         weak_limit: Optional[int] = None,
+        skip: Optional[List[str]] = None,
         force_filter_pass: Optional[bool] = None,
     ):
         super().__init__(
@@ -1650,6 +1654,9 @@ class CoefTest(ModelTestBase):
         if weak_limit is not None and weak_limit < 0:
             raise ValueError("weak_limit must be non-negative when provided")
         self.weak_limit = weak_limit
+        if skip is not None and not all(isinstance(name, str) for name in skip):
+            raise TypeError("skip must be a list of coefficient name strings or None")
+        self.skip = skip
     
     @property
     def filter_mode_desc(self):
@@ -1698,22 +1705,28 @@ class CoefTest(ModelTestBase):
         also forces failure if ``weak_limit`` equals 1 and more than one
         p-value exceeds 0.5.
         """
+        # Apply skip filtering so the evaluation ignores specified coefficients.
+        filtered_result = self.test_result
+        filtered_pvalues = self.pvalues
+        if self.skip:
+            filtered_result = filtered_result.drop(index=self.skip, errors='ignore')
+            filtered_pvalues = filtered_pvalues.drop(index=self.skip, errors='ignore')
         # If weak_limit explicitly disallows very weak signals, fail fast when
         # multiple coefficients have extremely high p-values despite a relaxed
         # moderate filter (user-requested safeguard).
-        high_pvalue_count = int((self.pvalues > 0.5).sum())
+        high_pvalue_count = int((filtered_pvalues > 0.5).sum())
         if self.weak_limit == 1 and high_pvalue_count > 1:
             return self._apply_force_filter_pass(False)
 
         # Default rule: all coefficients below the alpha threshold.
-        base_pass = self.test_result['Passed'].all()
+        base_pass = filtered_result['Passed'].all()
         if self.filter_mode != 'moderate' or self.weak_limit is None:
             return self._apply_force_filter_pass(base_pass)
 
         # Under moderate filtering, allow up to `weak_limit` coefficients to be
         # in the (0.05, 0.10) band while still requiring everyone to remain
         # below the 0.10 alpha cut-off.
-        weak_band = (self.pvalues > 0.05) & (self.pvalues < 0.10)
+        weak_band = (filtered_pvalues > 0.05) & (filtered_pvalues < 0.10)
         weak_count = int(weak_band.sum())
         if weak_count > self.weak_limit:
             return self._apply_force_filter_pass(False)
@@ -2771,3 +2784,92 @@ class MultiStationarityTest(ModelTestBase):
         return self._apply_force_filter_pass(
             all(test.test_filter for test in self._individual_tests.values())
         )
+
+# ----------------------------------------------------------------------------
+# FeatureValidityTest class
+# ----------------------------------------------------------------------------
+
+class FeatureValidityTest(ModelTestBase):
+    """
+    Check if the in-sample period of a variable contains any invalid data like null or inf.
+
+    Parameters
+    ----------
+    variable : Union[str, TSFM, RgmVar, CondVar]
+        Variable identifier or transformation specification to build.
+    dm : DataManager
+        Data manager used to construct features and access sample indices.
+    sample : {'in', 'full'}, default 'in'
+        Which sample slice to evaluate.
+    outlier_idx : list, optional
+        Index labels to exclude from validity check.
+    alias : str, optional
+        Display name for this test (defaults to class name).
+    filter_mode : {'strict', 'moderate'}, default 'moderate'
+        PASSED/FAILED behavior.
+    filter_on : bool, default True
+        Whether this test participates in filter evaluation aggregation.
+    """
+    category = 'data_integrity'
+
+    def __init__(
+        self,
+        variable: Union[str, TSFM, RgmVar, CondVar],
+        dm: DataManager,
+        sample: str = 'in',
+        outlier_idx: Optional[List[Any]] = None,
+        alias: Optional[str] = None,
+        filter_mode: str = 'moderate',
+        filter_on: bool = True,
+        force_filter_pass: Optional[bool] = None,
+    ):
+        super().__init__(
+            alias=alias,
+            filter_mode=filter_mode,
+            filter_on=filter_on,
+            force_filter_pass=force_filter_pass,
+        )
+        self.variable = variable
+        self.dm = dm
+        self.sample = sample.lower()
+        if self.sample not in {'in', 'full'}:
+            raise ValueError("sample must be either 'in' or 'full'")
+        self.outlier_idx = list(outlier_idx) if outlier_idx else []
+
+    @property
+    def test_result(self) -> pd.DataFrame:
+        feature_frame = self.dm.build_features([self.variable])
+        if feature_frame.empty:
+            return pd.DataFrame([
+                {'Metric': 'NaN Count', 'Value': 0, 'Passed': False},
+                {'Metric': 'Inf Count', 'Value': 0, 'Passed': False}
+            ]).set_index('Metric')
+
+        series = feature_frame.iloc[:, 0]
+
+        if self.sample == 'in':
+            sample_idx = self.dm.in_sample_idx
+        else:
+            out_idx = getattr(self.dm, 'out_sample_idx', None)
+            sample_idx = self.dm.in_sample_idx if out_idx is None else self.dm.in_sample_idx.append(out_idx)
+
+        aligned_idx = sample_idx[sample_idx.isin(series.index)]
+        series_sample = series.loc[aligned_idx]
+
+        if self.outlier_idx:
+            series_sample = series_sample.drop(index=self.outlier_idx, errors='ignore')
+
+        numeric_series = pd.to_numeric(series_sample, errors='coerce')
+        nan_count = numeric_series.isna().sum()
+        inf_count = np.isinf(numeric_series).sum()
+
+        return pd.DataFrame([
+            {'Metric': 'NaN Count', 'Value': int(nan_count), 'Passed': nan_count == 0},
+            {'Metric': 'Inf Count', 'Value': int(inf_count), 'Passed': inf_count == 0}
+        ]).set_index('Metric')
+
+    @property
+    def test_filter(self) -> bool:
+        res = self.test_result
+        passed = res['Passed'].all()
+        return self._apply_force_filter_pass(passed)
