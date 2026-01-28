@@ -400,6 +400,7 @@ class CM:
         show_scens: bool = False,
         show_sens: bool = False,
         show_stab: bool = False,
+        show_backtest: bool = False,
         perf_kwargs: Optional[Dict[str, Any]] = None,
         test_kwargs: Optional[Dict[str, Any]] = None,
         scen_kwargs: Optional[Dict[str, Any]] = None
@@ -421,6 +422,8 @@ class CM:
             If True, display sensitivity testing plots for all scenarios.
         show_stab : bool, default False
             If True, display stability test results using the in-sample model's stability test.
+        show_backtest : bool, default False
+            If True, display rolling in-sample backtesting summaries.
         perf_kwargs : dict, optional
             Keyword arguments passed to performance plotting methods.
         test_kwargs : dict, optional
@@ -533,3 +536,31 @@ class CM:
                     print(f"Error generating full-sample stability test results: {e}")
             elif show_full and self.model_full is None:
                 print("\nNo full-sample model available for stability testing. Call build(sample='full' or 'both').")
+
+        # Backtesting results
+        if show_backtest:
+            def _print_backtest_summary(model, label: str) -> None:
+                try:
+                    backtest = model.backtesting_test
+                    results_df = getattr(backtest, 'results_df', None)
+                    if results_df is None or results_df.empty:
+                        print(f"\n=== Model: {self.model_id} — {label} Backtesting ===")
+                        print("No backtesting results available.")
+                        return
+                    routes = results_df['route'].dropna().unique().tolist()
+                    print(f"\n=== Model: {self.model_id} — {label} Backtesting ===")
+                    print(f"Routes: {', '.join(routes)}")
+                    print(f"Rows: {len(results_df):,}")
+                except Exception as e:
+                    print(f"Error generating {label.lower()} backtesting results: {e}")
+
+            if self.model_in is not None:
+                _print_backtest_summary(self.model_in, "In-Sample")
+            else:
+                print("\nNo in-sample model available for backtesting. Call build(sample='in' or 'both').")
+
+            if show_full:
+                if self.model_full is not None:
+                    _print_backtest_summary(self.model_full, "Full-Sample")
+                else:
+                    print("\nNo full-sample model available for backtesting. Call build(sample='full' or 'both').")
