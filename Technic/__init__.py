@@ -38,5 +38,6 @@ from .testset import *
 from .condition import *
 from .scenario import *
 from .sensitivity import *
+from .backtesting import *
 from .search import *
 from .regime import *
