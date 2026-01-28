@@ -542,13 +542,12 @@ class CM:
             def _plot_backtest(model, label: str) -> None:
                 try:
                     backtest = model.backtesting_test
-                    fig = backtest.plot(show=False)
+                    fig = backtest.plot(show=True)
                     if fig is None:
                         print(f"\n=== Model: {self.model_id} — {label} Backtesting ===")
                         print("No backtesting results available.")
                         return
                     print(f"\n=== Model: {self.model_id} — {label} Backtesting ===")
-                    plt.show()
                 except Exception as e:
                     print(f"Error generating {label.lower()} backtesting plot: {e}")
 

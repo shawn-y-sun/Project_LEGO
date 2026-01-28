@@ -542,30 +542,27 @@ class Segment:
             for cm_id in cm_ids:
                 cm = self.cms[cm_id]
 
-                def _print_backtest_summary(model, label: str) -> None:
+                def _plot_backtest(model, label: str) -> None:
                     try:
                         backtest = model.backtesting_test
-                        results_df = getattr(backtest, 'results_df', None)
-                        if results_df is None or results_df.empty:
+                        fig = backtest.plot(show=True)
+                        if fig is None:
                             print(f"\n=== Model: {cm_id} — {label} Backtesting ===")
                             print("No backtesting results available.")
                             return
-                        routes = results_df['route'].dropna().unique().tolist()
                         print(f"\n=== Model: {cm_id} — {label} Backtesting ===")
-                        print(f"Routes: {', '.join(routes)}")
-                        print(f"Rows: {len(results_df):,}")
                     except Exception as e:
-                        print(f"Error generating {label.lower()} backtesting results for {cm_id}: {e}")
+                        print(f"Error generating {label.lower()} backtesting plot for {cm_id}: {e}")
 
                 if cm.model_in is not None:
-                    _print_backtest_summary(cm.model_in, "In-Sample")
+                    _plot_backtest(cm.model_in, "In-Sample")
                 else:
                     print(f"\n=== Model: {cm_id} — No In-Sample Model Available for Backtesting ===")
                     print("In-sample model not built. Call build_cm() first.")
 
                 if report_sample == 'full':
                     if cm.model_full is not None:
-                        _print_backtest_summary(cm.model_full, "Full-Sample")
+                        _plot_backtest(cm.model_full, "Full-Sample")
                     else:
                         print(f"\n=== Model: {cm_id} — No Full-Sample Model Available for Backtesting ===")
                         print("Full-sample model not built. Call build_cm() first.")

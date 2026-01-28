@@ -121,7 +121,7 @@ class BacktestingTest:
         """
         Return backtesting results in long format.
 
-        Columns: ['date', 'model', 'route', 'value']
+        Columns: ['date', 'route', 'value']
         - route 'Actual' contains the in-sample actual series.
         - Each backtesting route is labeled by its jump-off start and end.
         """
@@ -132,13 +132,11 @@ class BacktestingTest:
         if in_sample_idx.empty:
             return None
 
-        model_id = self._get_model_id()
         actual_series = self._get_actual_series(in_sample_idx)
 
         blocks: List[pd.DataFrame] = [
             pd.DataFrame({
                 'date': in_sample_idx,
-                'model': model_id,
                 'route': 'Actual',
                 'value': actual_series.values
             })
@@ -176,7 +174,6 @@ class BacktestingTest:
             route_label = self._format_route(p0, horizon_idx[-1])
             blocks.append(pd.DataFrame({
                 'date': in_sample_idx,
-                'model': model_id,
                 'route': route_label,
                 'value': route_series.values
             }))

@@ -1909,6 +1909,7 @@ class OLSModelAdapter(ExportableModel):
             return None
 
         df = results_df.copy()
+        df.insert(1, 'model', self._model_id)
         return df[BACKTESTING_COLUMNS]
 
     def get_scenario_stats_results(self) -> Optional[pd.DataFrame]:
