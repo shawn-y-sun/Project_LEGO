@@ -65,6 +65,8 @@ class ModelBase(ABC):
         Class for generating model reports.
     stability_test_cls : type, optional
         Class for model stability testing. If None, defaults to WalkForwardTest.
+    backtesting_test_cls : type, optional
+        Class for rolling in-sample backtesting. If None, defaults to BacktestingTest.
     X : DataFrame, optional
         Pre-built in-sample features. If provided, overrides feature building.
     y : Series, optional
@@ -98,6 +100,7 @@ class ModelBase(ABC):
         scen_cls: Optional[Type] = None,
         report_cls: Optional[Type] = None,
         stability_test_cls: Optional[Type] = None,
+        backtesting_test_cls: Optional[Type] = None,
         X: Optional[pd.DataFrame] = None,
         y: Optional[pd.Series] = None,
         X_out: Optional[pd.DataFrame] = None,
@@ -184,6 +187,9 @@ class ModelBase(ABC):
         
         # Stability testing configuration
         self.stability_test_cls = stability_test_cls
+
+        # Backtesting configuration
+        self.backtesting_test_cls = backtesting_test_cls
         
         # Model metadata
         self.coefs_ = None
@@ -1069,6 +1075,28 @@ class ModelBase(ABC):
         )
 
     @property
+    def backtesting_test(self) -> Any:
+        """
+        Build and return the backtesting test instance using backtesting_test_cls.
+
+        Returns
+        -------
+        BacktestingTest instance
+            Rolling in-sample backtesting instance configured with this model.
+
+        Raises
+        ------
+        ValueError
+            If no backtesting_test_cls is provided.
+        """
+        if not self.backtesting_test_cls:
+            raise ValueError("No backtesting_test_cls provided for building backtesting test.")
+
+        return self.backtesting_test_cls(
+            model=self
+        )
+
+    @property
     def in_perf_measures(self) -> pd.Series:
         """
         In-sample performance measures from testset results.
@@ -1417,6 +1445,7 @@ class OLS(ModelBase):
         target_exposure: Optional[str] = None,
         report_cls: Type = OLS_ModelReport,
         stability_test_cls: Optional[Type] = None,
+        backtesting_test_cls: Optional[Type] = None,
         X: Optional[pd.DataFrame] = None,
         y: Optional[pd.Series] = None,
         X_out: Optional[pd.DataFrame] = None,
@@ -1427,6 +1456,11 @@ class OLS(ModelBase):
         if stability_test_cls is None:
             from .stability import WalkForwardTest
             stability_test_cls = WalkForwardTest
+
+        # Set default backtesting test class if not provided
+        if backtesting_test_cls is None:
+            from .backtesting import BacktestingTest
+            backtesting_test_cls = BacktestingTest
             
         super().__init__(
             dm=dm,
@@ -1444,6 +1478,7 @@ class OLS(ModelBase):
             target_exposure=target_exposure,
             report_cls=report_cls,
             stability_test_cls=stability_test_cls,
+            backtesting_test_cls=backtesting_test_cls,
             X=X,
             y=y,
             X_out=X_out,
@@ -1802,6 +1837,7 @@ class FixedOLS(OLS):
         target_exposure: Optional[str] = None,
         report_cls: Type = OLS_ModelReport,
         stability_test_cls: Optional[Type] = None,
+        backtesting_test_cls: Optional[Type] = None,
         X: Optional[pd.DataFrame] = None,
         y: Optional[pd.Series] = None,
         X_out: Optional[pd.DataFrame] = None,
@@ -1827,6 +1863,7 @@ class FixedOLS(OLS):
             target_exposure=target_exposure,
             report_cls=report_cls,
             stability_test_cls=stability_test_cls,
+            backtesting_test_cls=backtesting_test_cls,
             X=X,
             y=y,
             X_out=X_out,
