@@ -2235,7 +2235,7 @@ class Segment:
         self,
         rank_weights: Tuple[float, float, float],
         all_passed: bool = True,
-        overwrite: bool = False,
+        overwrite: bool = True,
         top_n: int = 10,
         sample: str = 'in',
         cm_filter_func: Optional[Callable[[CM], bool]] = None,
@@ -2253,7 +2253,7 @@ class Segment:
             available, otherwise use ``self.searcher.passed_cms``.
             When ``False``, limit the re-ranking to models currently in
             ``self.cms``.
-        overwrite : bool, default False
+        overwrite : bool, default True
             If ``True``, replace ``self.cms`` and ``self.searcher.top_cms`` with
             the newly ranked ``top_n`` models. The legacy ``override`` keyword
             remains supported for backward compatibility.
