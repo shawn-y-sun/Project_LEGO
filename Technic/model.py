@@ -625,7 +625,7 @@ class ModelBase(ABC):
 
         Examples
         --------
-        >>> idx = pd.Index(pd.date_range("2020-01-01", periods=3, freq="M"))
+        >>> idx = pd.Index(pd.date_range("2020-01-01", periods=3, freq="ME"))
         >>> self.outlier_idx = ["2020-02-29"]
         >>> self._normalize_outlier_index(idx)
         [Timestamp('2020-02-29 00:00:00')]
@@ -729,7 +729,7 @@ class ModelBase(ABC):
 
         Examples
         --------
-        >>> s = pd.Series([1.0, 2.0, 3.0], index=pd.date_range("2020-01-01", periods=3, freq="M"))
+        >>> s = pd.Series([1.0, 2.0, 3.0], index=pd.date_range("2020-01-01", periods=3, freq="ME"))
         >>> self.outlier_idx = ["2020-02-29"]
         >>> self._apply_outlier_handling(s, strict=True)
         2020-01-31    1.0
