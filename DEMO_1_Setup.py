@@ -58,14 +58,13 @@ df_mev_mth = pd.read_csv(r'Demo Data/macro_monthly.csv')
 df_mev_mth.ffill(inplace=True)
 
 # Read Scenario Macro Data
-df_scen_mev_qtr_base = pd.read_excel(r'Demo Data/macro_scenarios_quarterly.xlsx', sheet_name='baseline').set_index('observation_date')
-df_scen_mev_qtr_adv = pd.read_excel(r'Demo Data/macro_scenarios_quarterly.xlsx', sheet_name='adverse').set_index('observation_date')
-df_scen_mev_qtr_sev = pd.read_excel(r'Demo Data/macro_scenarios_quarterly.xlsx', sheet_name='severely_adverse').set_index('observation_date')
+df_scen_mev_qtr_base = pd.read_excel(r'Demo Data/macro_scenarios_quarterly.xlsx', sheet_name='baseline').set_index('observation_date').ffill()
+df_scen_mev_qtr_adv = pd.read_excel(r'Demo Data/macro_scenarios_quarterly.xlsx', sheet_name='adverse').set_index('observation_date').ffill()
+df_scen_mev_qtr_sev = pd.read_excel(r'Demo Data/macro_scenarios_quarterly.xlsx', sheet_name='severely_adverse').set_index('observation_date').ffill()
 
-df_scen_mev_mth_base = pd.read_excel(r'Demo Data/macro_scenarios_monthly.xlsx', sheet_name='baseline').set_index('observation_date')
-df_scen_mev_mth_adv = pd.read_excel(r'Demo Data/macro_scenarios_monthly.xlsx', sheet_name='adverse').set_index('observation_date')
-df_scen_mev_mth_sev = pd.read_excel(r'Demo Data/macro_scenarios_monthly.xlsx', sheet_name='severely_adverse').set_index('observation_date')
-
+df_scen_mev_mth_base = pd.read_excel(r'Demo Data/macro_scenarios_monthly.xlsx', sheet_name='baseline').set_index('observation_date').ffill()
+df_scen_mev_mth_adv = pd.read_excel(r'Demo Data/macro_scenarios_monthly.xlsx', sheet_name='adverse').set_index('observation_date').ffill()
+df_scen_mev_mth_sev = pd.read_excel(r'Demo Data/macro_scenarios_monthly.xlsx', sheet_name='severely_adverse').set_index('observation_date').ffill()
 
 # In[ ]:
 
