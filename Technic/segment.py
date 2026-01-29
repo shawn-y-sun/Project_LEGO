@@ -2868,18 +2868,36 @@ class Segment:
                     for entry in index_entries:
                         model_id = entry["model_id"]
                         cm_path = target_dir / entry["filename"]
-                        cm = load_cm(cm_path)
-                        cm.bind_data_manager(self.dm)
-                        container[model_id] = cm
+                        try:
+                            cm = load_cm(cm_path)
+                            cm.bind_data_manager(self.dm)
+                            container[model_id] = cm
+                        except Exception as e:
+                            print(f"Failed to load CM from {cm_path}: {e}")
+                            if "code() argument 13" in str(e):
+                                print(
+                                    "Hint: This error usually indicates the pickle was "
+                                    "created with an older Python version (<=3.10) and is "
+                                    "incompatible with the current Python version (>=3.11)."
+                                )
                         progress.update()
             else:
                 # Iterate quietly when progress is disabled (e.g., selected CMs).
                 for entry in index_entries:
                     model_id = entry["model_id"]
                     cm_path = target_dir / entry["filename"]
-                    cm = load_cm(cm_path)
-                    cm.bind_data_manager(self.dm)
-                    container[model_id] = cm
+                    try:
+                        cm = load_cm(cm_path)
+                        cm.bind_data_manager(self.dm)
+                        container[model_id] = cm
+                    except Exception as e:
+                        print(f"Failed to load CM from {cm_path}: {e}")
+                        if "code() argument 13" in str(e):
+                            print(
+                                "Hint: This error usually indicates the pickle was "
+                                "created with an older Python version (<=3.10) and is "
+                                "incompatible with the current Python version (>=3.11)."
+                            )
             return index_entries
 
         if which in {"selected", "both"}:
