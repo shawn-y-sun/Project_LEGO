@@ -1340,7 +1340,7 @@ class DataManager:
             start_month = first_qtr.start_time
             end_month = last_qtr.end_time
             # Build a complete monthly index spanning the quarterly range.
-            monthly_index = pd.date_range(start=start_month, end=end_month, freq='M')
+            monthly_index = pd.date_range(start=start_month, end=end_month, freq='ME')
             monthly_df = pd.DataFrame(index=monthly_index)
 
             # Access the MEV metadata directly from the loader to avoid
@@ -1408,7 +1408,7 @@ class DataManager:
 
                     valid_start = pd.Period(valid_series.index[0], freq='Q').start_time
                     valid_end = pd.Period(valid_series.index[-1], freq='Q').end_time
-                    valid_months = pd.date_range(start=valid_start, end=valid_end, freq='M')
+                    valid_months = pd.date_range(start=valid_start, end=valid_end, freq='ME')
                     monthly_x = valid_months.map(pd.Timestamp.toordinal)
                     monthly_y = spline(monthly_x)
                     m_series = pd.Series(monthly_y, index=valid_months)
