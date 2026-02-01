@@ -21,14 +21,3 @@ build/
 .vscode/
 *.swp
 *.swo
-df_corr.csv
-old forecast_df.txt
-.cursorrules
-old plot_var().txt
-cm1_b_x.csv
-LEGO_Demo.ipynb
-cm1_b_y.csv
-test_fix.py
-test_scen_manager.ipynb
-test_scen_manager.ipynb
-/Segment

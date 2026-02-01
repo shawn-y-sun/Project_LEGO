@@ -7,4 +7,3 @@ openpyxl
 PyYAML
 arch
 tqdm
-cloudpickle

@@ -1,27 +1,23 @@
 # =============================================================================
 # module: testset.py
-# Purpose: Test set builder functions for different model types.
-# Key Types/Classes: TestSet
-# Key Functions: ppnr_ols_testset_func, ppnr_ols_stationary_testset_func, fixed_ols_testset_func
+# Purpose: Test set builder functions for different model types
 # Dependencies: pandas, numpy, statsmodels, typing, .test module classes
-#
+# 
 # TESTSET FUNCTION REQUIREMENTS:
 # ==============================
 # All testset functions should define these measure tests FIRST:
-# 1. 'Fit Measures' - FitMeasure for R² and Adj R²
+# 1. 'Fit Measures' - FitMeasure for R² and Adj R² 
 # 2. 'IS Error Measures' - ErrorMeasure for in-sample ME, MAE, RMSE
 # 3. 'OOS Error Measures' - ErrorMeasure for out-of-sample ME, MAE, RMSE (if data available)
-#
+# 
 # These are used by ModelBase.in_perf_measures and ModelBase.out_perf_measures
 # for model reporting and evaluation. Define these before other tests.
 # =============================================================================
 
-import inspect
-
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
-from typing import Dict, Any, TYPE_CHECKING, List, Tuple, Optional, Callable
+from typing import Dict, Any, TYPE_CHECKING, List, Tuple
 from .test import *
 from .modeltype import Growth
 
@@ -51,180 +47,6 @@ class TestSet:
         for alias, test_obj in tests.items():
             test_obj.alias = alias
             self.tests.append(test_obj)
-
-    @classmethod
-    def from_functions(
-        cls,
-        model: 'ModelBase',
-        testset_func: Callable[['ModelBase'], Dict[str, ModelTestBase]],
-        test_update_func: Optional[Callable[..., Dict[str, Any]]] = None,
-        *,
-        subject: Any = None,
-        dm: Any = None,
-        sample: Optional[str] = None,
-        outlier_idx: Optional[Any] = None,
-    ) -> 'TestSet':
-        """
-        Build a TestSet from initializer and update functions.
-
-        Parameters
-        ----------
-        model : ModelBase
-            Model instance providing data and metadata required to construct
-            tests.
-        testset_func : callable
-            Function that generates the base mapping of tests given the model.
-        test_update_func : callable, optional
-            Optional function that returns updates to apply on top of the base
-            mapping. The callable may accept any subset of ``model``,
-            ``subject``, ``dm``, ``sample``, or ``outlier_idx`` (or no
-            arguments) and must return a dictionary whose values are
-            ModelTestBase instances (to add or replace tests) or dictionaries of
-            attribute overrides for existing tests. Override dictionaries
-            targeting aliases outside the base mapping are ignored to allow
-            lenient payloads.
-        subject : Any, optional
-            Optional subject identifier (e.g., feature name) supplied to
-            ``test_update_func`` when requested by its signature.
-        dm : Any, optional
-            Optional data manager instance supplied to ``test_update_func``
-            when requested by its signature.
-        sample : str, optional
-            Optional sample flag supplied to ``test_update_func`` when
-            requested by its signature.
-        outlier_idx : Any, optional
-            Optional outlier index collection supplied to ``test_update_func``
-            when requested by its signature.
-
-        Returns
-        -------
-        TestSet
-            An instantiated TestSet that reflects both the base and updated
-            test definitions.
-
-        Raises
-        ------
-        ValueError
-            If ``testset_func`` is not provided.
-        TypeError
-            If ``test_update_func`` requests unsupported parameters or returns
-            values that are not ModelTestBase instances or dictionaries of
-            overrides.
-
-        Examples
-        --------
-        >>> # Construct a test set with optional updates
-        >>> testset = TestSet.from_functions(model, base_func, update_func)
-        """
-        if testset_func is None:
-            raise ValueError("testset_func is required to build a TestSet.")
-
-        # Build the base test mapping.
-        tests = testset_func(model)
-
-        # Apply optional updates from the provided update function.
-        if test_update_func:
-            updates = cls._invoke_update(
-                test_update_func,
-                model=model,
-                subject=subject,
-                dm=dm,
-                sample=sample,
-                outlier_idx=outlier_idx,
-            )
-            for alias, val in updates.items():
-                if isinstance(val, ModelTestBase):
-                    tests[alias] = val
-                elif isinstance(val, dict):
-                    if alias not in tests:
-                        # Skip override dictionaries for aliases not in the
-                        # base mapping to allow lenient update payloads.
-                        continue
-                    for attr, attr_val in val.items():
-                        setattr(tests[alias], attr, attr_val)
-                else:
-                    raise TypeError(
-                        "test_update_map values must be ModelTestBase or kwargs dict"
-                    )
-
-        # Aliases are enforced in the constructor, so instantiate via cls.
-        return cls(tests)
-
-    @staticmethod
-    def _invoke_update(
-        update_func: Callable[..., Dict[str, Any]],
-        *,
-        model: 'ModelBase',
-        subject: Any = None,
-        dm: Any = None,
-        sample: Optional[str] = None,
-        outlier_idx: Optional[Any] = None,
-    ) -> Dict[str, Any]:
-        """
-        Call an update function with only the parameters it declares.
-
-        Parameters
-        ----------
-        update_func : callable
-            Update function supplied to :meth:`from_functions`.
-        model : ModelBase
-            Core model instance; always passed when requested.
-        subject : Any, optional
-            Optional subject passed when the callable declares it.
-        dm : Any, optional
-            Optional data manager passed when the callable declares it.
-        sample : str, optional
-            Optional sample flag passed when the callable declares it.
-        outlier_idx : Any, optional
-            Optional outlier index collection passed when the callable
-            declares it.
-
-        Returns
-        -------
-        dict
-            Update mapping returned by ``update_func``.
-
-        Raises
-        ------
-        TypeError
-            If the callable requests parameters outside the supported set of
-            ``model``/``mdl``, ``subject``, ``dm``, ``sample``, or
-            ``outlier_idx``.
-        """
-
-        available_args = {
-            "model": model,
-            "mdl": model,
-            "subject": subject,
-            "dm": dm,
-            "sample": sample,
-            "outlier_idx": outlier_idx,
-        }
-
-        positional_args = []
-        keyword_args: Dict[str, Any] = {}
-
-        for param in inspect.signature(update_func).parameters.values():
-            if param.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}:
-                # Allow *args/**kwargs to be handled naturally by the callable.
-                continue
-
-            if param.name not in available_args:
-                if param.default is inspect._empty:
-                    raise TypeError(
-                        f"Unsupported parameter '{param.name}' in test_update_func; "
-                        "expected one of model, subject, dm, sample, or outlier_idx."
-                    )
-                # Parameter has a default; omit to allow default binding.
-                continue
-
-            arg_value = available_args[param.name]
-            if param.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}:
-                positional_args.append(arg_value)
-            else:
-                keyword_args[param.name] = arg_value
-
-        return update_func(*positional_args, **keyword_args)
 
     @property
     def all_test_results(self) -> Dict[str, Any]:
@@ -466,10 +288,8 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
 
     # --- Target Stationarity & Cointegration ---
     # 1) Check if Y itself is stationary
-    y_stat = TargetStationarityTest(
-        target=mdl.target,
-        dm=mdl.dm,
-        outlier_idx=getattr(mdl, 'outlier_idx', None),
+    y_stat = StationarityTest(
+        series=mdl.y.copy(),
         filter_mode='moderate',
         filter_on=False
     )
@@ -484,14 +304,10 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
             # Filter to only include variables that exist in X
             available_vars = [var for var in stationarity_vars if var in mdl.X.columns]
             if available_vars:
-                # Stationarity screening leverages staged, sample-aware checks across
-                # all model specifications; search_cms() already performs pretests,
-                # so filtering is disabled here to avoid double-counting.
-                tests['X Stationarity'] = MultiFullStationarityTest(
-                    specs=mdl.specs,
-                    dm=mdl.dm,
-                    filter_mode='moderate',
-                    filter_on=False
+                X_vars_df = mdl.X[available_vars].copy()
+                tests['X Stationarity'] = MultiStationarityTest(
+                    dataframe=X_vars_df,
+                    filter_mode='moderate'
                 )
     else:
         # Y is non-stationary - test cointegration with applicable X variables
@@ -510,7 +326,7 @@ def ppnr_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
     sign_check_features = mdl.spec_map.get('SignCheck', [])
     if sign_check_features:
         tests['Sign Check'] = SignCheck(
-            feature_list=sign_check_features,
+            tsfm_list=sign_check_features,
             coefficients=mdl.params,
             filter_mode='moderate'
         )
@@ -555,173 +371,4 @@ def fixed_ols_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
             actual=mdl.y_out,
             predicted=mdl.y_pred_out
         )
-    return tests
-
-
-
-
-def ppnr_ols_stationary_testset_func(mdl: 'ModelBase') -> Dict[str, ModelTestBase]:
-    """
-    TestSet variant that always evaluates X stationarity assuming Y is stationary.
-
-    This function mirrors :func:`ppnr_ols_testset_func` for measures and
-    diagnostic coverage but simplifies the stationarity branch:
-
-    * Treats the Y-stationarity check as satisfied (assumption-based).
-    * Always adds the MultiFullStationarityTest for X variables when configured.
-    * Never includes the Y–X cointegration test.
-
-    Parameters
-    ----------
-    mdl : ModelBase
-        Model instance providing data and metadata required to construct tests.
-
-    Returns
-    -------
-    dict
-        Mapping of test aliases to configured ModelTestBase instances.
-
-    Examples
-    --------
-    >>> testset = ppnr_ols_stationary_testset_func(model)
-    >>> 'X Stationarity' in testset
-    True
-    """
-
-    tests: Dict[str, ModelTestBase] = {}
-
-    # --- Fit & Error Measures (inactive for filtering) ---
-    tests['Fit Measures'] = FitMeasure(
-        actual=mdl.y,
-        predicted=mdl.y_fitted_in,
-        n_features=len(mdl.params) - 1
-    )
-
-    tests['IS Error Measures'] = ErrorMeasure(
-        actual=mdl.y,
-        predicted=mdl.y_fitted_in
-    )
-
-    if not mdl.X_out.empty:
-        tests['OOS Error Measures'] = ErrorMeasure(
-            actual=mdl.y_out,
-            predicted=mdl.y_pred_out
-        )
-
-    # --- Filtering Tests ---
-    tests['In-Sample R-sq'] = R2Test(
-        r2=mdl.rsquared,
-        filter_mode='moderate'
-    )
-
-    coef_test_vars = mdl.spec_map.get('CoefTest', [])
-    if coef_test_vars:
-        available_vars = [var for var in coef_test_vars if var in mdl.pvalues.index]
-        if available_vars:
-            tests['Coefficient Significance'] = CoefTest(
-                pvalues=mdl.pvalues.loc[available_vars],
-                filter_mode='moderate'
-            )
-
-    for grp in mdl.spec_map.get('GroupTest', []):
-        if isinstance(grp, (list, tuple)):
-            names = list(grp)
-            available_names = [name for name in names if name in mdl.pvalues.index]
-            if not available_names:
-                continue
-
-            parts = [name.split(':', 1) if ':' in name else [None, name] for name in available_names]
-            prefixes = [p[0] for p in parts]
-            suffixes = [p[1] for p in parts]
-            if None not in prefixes and len(set(prefixes)) == 1:
-                prefix = prefixes[0] + ':'
-                label_body = "'".join(suffixes)
-                group_label = f"{prefix}{label_body}"
-            else:
-                group_label = "'".join(available_names)
-            vars_for = available_names
-        else:
-            group_label = str(grp)
-            vars_for = [grp] if grp in mdl.pvalues.index else []
-
-        if vars_for:
-            alias = f"Group Driver F-Test {group_label}"
-            tests[alias] = GroupTest(
-                model_result=mdl.fitted,
-                vars=vars_for,
-                filter_mode='moderate'
-            )
-
-    tests['Multicollinearity'] = VIFTest(
-        exog=sm.add_constant(mdl.X),
-        filter_mode='moderate'
-    )
-
-    tests['Residual Stationarity'] = StationarityTest(
-        series=mdl.resid,
-        filter_mode='moderate'
-    )
-    tests['Residual Normality'] = NormalityTest(
-        series=mdl.resid,
-        filter_mode='moderate',
-        filter_on=False
-    )
-    tests['Residual Autocorrelation'] = AutocorrTest(
-        results=mdl.fitted,
-        filter_mode='moderate',
-        filter_on=False
-    )
-    tests['Residual Heteroscedasticity'] = HetTest(
-        resids=mdl.resid,
-        exog=sm.add_constant(mdl.X),
-        filter_mode='moderate',
-        filter_on=False
-    )
-
-    # --- Target Stationarity & Cointegration ---
-    # NOTE: Y-stationarity is assumed true; cointegration is intentionally skipped.
-    y_stat = TargetStationarityTest(
-        target=mdl.target,
-        dm=mdl.dm,
-        outlier_idx=getattr(mdl, 'outlier_idx', None),
-        filter_mode='moderate',
-        filter_on=False
-    )
-    # Keep the target-stationarity test present but inactive for filtering to
-    # reflect the assumption-driven workflow without forcing a pass flag.
-    tests['Y Stationarity'] = y_stat
-
-    stationarity_vars = mdl.spec_map.get('StationarityTest', [])
-    if stationarity_vars:
-        available_vars = [var for var in stationarity_vars if var in mdl.X.columns]
-        if available_vars:
-            tests['X Stationarity'] = MultiFullStationarityTest(
-                specs=mdl.specs,
-                dm=mdl.dm,
-                filter_mode='moderate',
-                filter_on=False
-            )
-
-    # --- Sign Check Test ---
-    sign_check_features = mdl.spec_map.get('SignCheck', [])
-    if sign_check_features:
-        tests['Sign Check'] = SignCheck(
-            feature_list=sign_check_features,
-            coefficients=mdl.params,
-            filter_mode='moderate'
-        )
-
-    # --- Base Growth Test (for Growth model types) ---
-    if getattr(mdl, 'model_type', None) is Growth:
-        try:
-            freq = mdl.dm.freq if hasattr(mdl, 'dm') and hasattr(mdl.dm, 'freq') else 'M'
-            tests['Base Growth'] = BaseGrowthTest(
-                coeffs=mdl.params,
-                freq=freq,
-                filter_on=False
-            )
-        except Exception:
-            # If anything goes wrong (e.g., params not ready), skip adding this test
-            pass
-
     return tests

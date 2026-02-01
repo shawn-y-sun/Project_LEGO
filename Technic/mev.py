@@ -21,14 +21,14 @@ _DEFAULT_TSFM_PATH = _SUPPORT_DIR / 'type_tsfm.yaml'
 def _process_quarterly_excel(workbook: str, sheet: Optional[str] = None) -> pd.DataFrame:
     """
     Process quarterly MEV data from Excel with standard format.
-
+    
     Parameters
     ----------
     workbook : str
         Path to Excel workbook
     sheet : str, optional
         Sheet name to process. If None, uses first sheet.
-
+        
     Returns
     -------
     DataFrame
@@ -50,21 +50,21 @@ def _process_quarterly_excel(workbook: str, sheet: Optional[str] = None) -> pd.D
     df_mev.index = [i.replace(':', 'Q') for i in df_mev.index]
     df_mev.index = pd.PeriodIndex(df_mev.index, freq='Q').to_timestamp(how='end')
     df_mev.index = pd.to_datetime(df_mev.index).normalize()
-
+    
     return df_mev
 
 def _process_monthly_excel(workbook: str, sheet: Optional[str] = None) -> pd.DataFrame:
     """
     Process monthly MEV data from Excel with standard format.
     Assumes data starts from row 1 with dates in first column.
-
+    
     Parameters
     ----------
     workbook : str
         Path to Excel workbook
     sheet : str, optional
         Sheet name to process. If None, uses first sheet.
-
+        
     Returns
     -------
     DataFrame
@@ -74,8 +74,6 @@ def _process_monthly_excel(workbook: str, sheet: Optional[str] = None) -> pd.Dat
     df = df.set_index('Unnamed: 1').iloc[10:, 1:]
     df.index.name = None
     df.index = pd.to_datetime(df.index).normalize()
-    # Reformat index to timestamps at period end
-    df.index = pd.PeriodIndex(df.index, freq='M').to_timestamp(how='end').normalize()
     return df
 
 class MEVLoader:
@@ -84,11 +82,11 @@ class MEVLoader:
     Supports loading from Excel files or pre-loaded DataFrames.
     Can handle both monthly and quarterly frequencies for base MEVs.
     Handles scenario MEVs separately with internal processing.
-
+    
     The loader maintains two types of MEVs:
     1. Model MEVs: Base MEVs used for model training/testing
     2. Scenario MEVs: Multiple sets of scenario MEVs for forecasting
-
+    
     Parameters
     ----------
     mev_map : dict, optional
@@ -113,33 +111,33 @@ class MEVLoader:
         Path to YAML file containing transform mappings.
         Must have a 'transforms' key mapping types to transform lists.
         If None, uses default from support/type_tsfm.yaml.
-
+        
     Examples
     --------
     Basic Usage:
     >>> # Initialize loader
     >>> loader = MEVLoader()
-    >>>
+    >>> 
     >>> # Load model MEVs from Excel
     >>> loader.load("model_mevs.xlsx")
-    >>>
+    >>> 
     >>> # Load scenario MEVs from Excel with multiple scenarios
     >>> loader.load_scens(
     ...     "EWST2024.xlsx",
     ...     scens={"Base": "Base", "Adv": "Adverse", "Sev": "Severe"}
     ... )
-
+    
     Working with Model MEVs:
     >>> # Load from DataFrame
     >>> loader.load(df_mevs, date_col="Date")
-    >>>
+    >>> 
     >>> # Access model MEVs
     >>> qtr_mevs = loader.model_mev_qtr  # Quarterly MEVs
     >>> mth_mevs = loader.model_mev_mth  # Monthly MEVs
-    >>>
+    >>> 
     >>> # Clean model MEVs
     >>> loader.clean_model_mevs()
-
+    
     Working with Scenario MEVs:
     >>> # Load multiple scenario sets
     >>> loader.load_scens(
@@ -150,23 +148,23 @@ class MEVLoader:
     ...     "GRST2024.xlsx",
     ...     scens={"Base": "Base", "Sev": "Severe"}
     ... )
-    >>>
+    >>> 
     >>> # Access scenario MEVs
     >>> ewst_scens = loader.scen_mev_qtr["EWST2024"]  # All EWST scenarios
     >>> base_scen = ewst_scens["Base"]  # Base scenario data
-    >>>
+    >>> 
     >>> # Update specific scenarios
     >>> loader.update_scen_mevs(
     ...     {"Base": df_update, "Adv": df_update},
     ...     set_name="EWST2024"
     ... )
-    >>>
+    >>> 
     >>> # Clean specific scenario set
     >>> loader.clean_scen_mevs(set_name="EWST2024")
-    >>>
+    >>> 
     >>> # Clean all scenarios
     >>> loader.clean_scen_mevs()
-
+    
     Advanced Usage:
     >>> # Load external data with custom preprocessing
     >>> loader.load(
@@ -174,7 +172,7 @@ class MEVLoader:
     ...     external=True,
     ...     date_col="DATE"
     ... )
-    >>>
+    >>> 
     >>> # Update multiple scenario sets at once
     >>> loader.update_scen_mevs({
     ...     "EWST2024": {
@@ -186,13 +184,13 @@ class MEVLoader:
     ...         "Sev": df_grst_sev
     ...     }
     ... })
-    >>>
+    >>> 
     >>> # Get MEV metadata
     >>> mev_info = loader.get_mev_info("GDP")
     >>> mev_type = mev_info["type"]
     >>> mev_desc = mev_info["description"]
     >>> mev_category = mev_info["category"]
-    >>>
+    >>> 
     >>> # Update MEV mapping
     >>> loader.update_mev_map({
     ...     'CUSTOM_GDP': {
@@ -204,7 +202,7 @@ class MEVLoader:
     ...         'category': 'Economic Growth'  # Update existing MEV
     ...     }
     ... })
-
+    
     Notes
     -----
     - All dates are normalized to midnight UTC
@@ -214,7 +212,7 @@ class MEVLoader:
     - Maintains separate containers for model and scenario MEVs
     - Scenario MEVs are organized in a three-layer structure:
       {set_name: {scenario_name: DataFrame}}
-
+    
     See Also
     --------
     DataManager : Higher-level class that combines MEVs with internal data
@@ -238,25 +236,25 @@ class MEVLoader:
         # Load mapping tables
         self._mev_map = self._load_mev_map(mev_map_path) if mev_map_path else self._load_mev_map()
         self._tsfm_map = self._load_tsfm_map(tsfm_path) if tsfm_path else self._load_tsfm_map()
-
+        
         # Initialize empty data containers for model MEVs
         self._model_mev_qtr: Optional[pd.DataFrame] = None
         self._model_mev_mth: Optional[pd.DataFrame] = None
-
+        
         # Initialize empty containers for scenario MEVs
         self._scen_mev_qtr: Dict[str, Dict[str, pd.DataFrame]] = {}
         self._scen_mev_mth: Dict[str, Dict[str, pd.DataFrame]] = {}
 
         # Track scenario-specific jumpoff overrides supplied during loading
         self._scen_p0_overrides: Dict[str, pd.Timestamp] = {}
-
+        
         # Initialize MEV codes set
         self._mev_codes: Set[str] = set(mev_codes) if mev_codes else set()
-
+        
         # Validate initial MEV codes if provided
         if mev_codes:
             self._validate_mev_codes()
-
+        
     def _load_mev_map(self, path: Optional[Union[str, Path]] = None) -> Dict[str, Dict[str, Optional[str]]]:
         """Load MEV mapping from an Excel file.
 
@@ -331,21 +329,21 @@ class MEVLoader:
             }
 
         return mapping
-
+        
     def _load_tsfm_map(self, path: Optional[Union[str, Path]] = None) -> Dict[str, List[str]]:
         """Load transform mapping from YAML file."""
         file_path = Path(path) if path else _DEFAULT_TSFM_PATH
         if not file_path.exists():
             raise FileNotFoundError(f"Transform mapping file not found: {file_path}")
-
+            
         with open(file_path) as f:
             spec = yaml.safe_load(f)
-
+            
         if 'transforms' not in spec or not isinstance(spec['transforms'], dict):
             raise KeyError(f"Key 'transforms' missing or invalid format in {file_path}")
-
+            
         return spec['transforms']
-
+        
     def load(
         self,
         source: Union[str, pd.DataFrame],
@@ -357,7 +355,7 @@ class MEVLoader:
         """
         Load base MEV data from various sources. If MEVs with same codes already exist,
         they will be updated with new values. New MEV codes will be appended.
-
+        
         Parameters
         ----------
         source : str or DataFrame
@@ -391,7 +389,7 @@ class MEVLoader:
             else:
                 # Use preprocessing functions
                 data = self._load_from_excel(source, sheet, freq)
-
+        
         # Store data in appropriate container based on frequency
         if data.index.inferred_freq.startswith('Q'):
             if self._model_mev_qtr is None:
@@ -400,15 +398,15 @@ class MEVLoader:
                 # Update existing MEVs and append new ones
                 existing_cols = self._model_mev_qtr.columns
                 new_cols = data.columns
-
+                
                 # Align indices for proper update
                 combined_idx = self._model_mev_qtr.index.union(data.index)
                 self._model_mev_qtr = self._model_mev_qtr.reindex(combined_idx)
                 data = data.reindex(combined_idx)
-
+                
                 # Update existing columns and append new ones
                 self._model_mev_qtr[new_cols] = data[new_cols]
-
+                
         elif data.index.inferred_freq.startswith('M'):
             if self._model_mev_mth is None:
                 self._model_mev_mth = data
@@ -416,28 +414,28 @@ class MEVLoader:
                 # Update existing MEVs and append new ones
                 existing_cols = self._model_mev_mth.columns
                 new_cols = data.columns
-
+                
                 # Align indices for proper update
                 combined_idx = self._model_mev_mth.index.union(data.index)
                 self._model_mev_mth = self._model_mev_mth.reindex(combined_idx)
                 data = data.reindex(combined_idx)
-
+                
                 # Update existing columns and append new ones
                 self._model_mev_mth[new_cols] = data[new_cols]
-
+                
         else:
             raise ValueError(
                 f"Unsupported data frequency: {data.index.inferred_freq}. "
                 "Only monthly (M) and quarterly (Q) frequencies are supported."
             )
-
+            
         # Update MEV codes and validate
         self._mev_codes.update(data.columns)
         self._validate_mev_codes()
 
     def load_scens(
         self,
-        source: Union[str, Dict[str, Union[pd.DataFrame, pd.Series]]],
+        source: Union[str, Dict[str, Dict[str, Union[pd.DataFrame, pd.Series]]]],
         scens: Optional[Dict[str, str]] = None,
         set_name: Optional[str] = None,
         freq: Optional[str] = None,
@@ -454,35 +452,35 @@ class MEVLoader:
            - ``scens``: mapping of scenario names to sheet names
            - ``set_name``: optional name for the scenario set
 
-        2. From dictionary:
-           - Structure: ``{scen_name: DataFrame}``
-           - ``set_name`` parameter is required
+        2. From dictionary (3-layer structure):
+           - ``source``: dictionary with structure ``{set_name: {scen_name: DataFrame}}``
+           - ``scens`` and ``set_name`` parameters are ignored
 
         Parameters
         ----------
         source : str or dict
             Either:
             - Path to Excel workbook containing scenario data, or
-            - Dictionary with structure ``{scen_name: DataFrame}`` (requires set_name)
+            - Dictionary with structure ``{set_name: {scen_name: DataFrame}}``
         scens : dict, optional
             Required only when loading from Excel.
             Mapping of scenario names to sheet names
             Example: {"Base": "BaseSheet", "Adv": "AdverseSheet"}
         set_name : str, optional
-            Required when loading from a dictionary.
-            Used when loading from Excel. Name of the scenario set.
-            If None and loading from Excel, uses the source filename.
+            Used only when loading from Excel.
+            Name of the scenario set. If None, uses the source filename without extension.
+            Example: If source is ``'EWST2024.xlsx'``, ``set_name`` defaults to ``'EWST2024'``.
         freq : str, optional
             Expected frequency (``'M'`` for monthly, ``'Q'`` for quarterly).
             If not provided, will be inferred from data.
         p0 : str, Timestamp, or dict, optional
-            Scenario jumpoff date override(s). Provide a single date string
-            (e.g., ``"2024-12-31"``) or :class:`~pandas.Timestamp` to override
-            the internal loader ``scen_p0`` for the scenario set.
-            If a dictionary is provided, it can be used to map the set_name to
-            a date, but a scalar date is preferred since only one set is loaded.
-            Overrides are normalized to month-end dates and made available
-            through :class:`~Technic.data.DataManager`.
+            Scenario jumpoff date override(s). When loading from Excel, provide a
+            single date string (e.g., ``"2024-12-31"``) or :class:`~pandas.Timestamp`
+            to override the internal loader ``scen_p0`` for that scenario set.
+            When loading from a dictionary containing multiple scenario sets,
+            supply a mapping of ``{set_name: p0_string}`` to assign different
+            jumpoff dates per set. Overrides are normalized to month-end dates
+            and made available through :class:`~Technic.data.DataManager`.
 
         Examples
         --------
@@ -492,8 +490,11 @@ class MEVLoader:
         ...     scens={"Base": "Base", "Adv": "Adverse"},
         ...     p0="2024-12-31"
         ... )
-        >>> # Load from dictionary
-        >>> loader.load_scens({"Base": df_base, "Adv": df_adv}, set_name="EWST2025", p0="2024-12-31")
+        >>> loader.load_scens({"EWST2025": {"Base": df_base}}, p0="2024-12-31")
+        >>> loader.load_scens(
+        ...     {"EWST2026": {"Base": df_base}, "GRST2026": {"Base": df_other}},
+        ...     p0={"EWST2026": "2024-12-31", "GRST2026": "2024-09-30"}
+        ... )
         """
         if isinstance(source, str):
             # Loading from Excel file
@@ -541,28 +542,14 @@ class MEVLoader:
         else:
             if not isinstance(source, dict):
                 raise TypeError(
-                    "When source is not a string, it must be a dictionary mapping scenario names to DataFrames."
+                    "When source is not a string, it must be a dictionary mapping set names to scenario data."
                 )
 
-            # Check if values are DataFrames/Series (2-layer structure)
-            if source:
-                first_val = next(iter(source.values()))
-                if not isinstance(first_val, (pd.DataFrame, pd.Series)):
-                     raise ValueError(
-                        "Source dictionary values must be DataFrames or Series. "
-                        "Nested dictionaries (3-layer structure) are no longer supported. "
-                        "Please load scenario sets one by one."
-                    )
-
-            if set_name is None:
-                raise ValueError("set_name must be provided when loading a dictionary of scenarios.")
-
-            # Normalize to what logic expects (internal handling can still iterate,
-            # effectively processing 1 set)
-            source_dict = {set_name: source}
+            # Track number of scenario sets to validate scalar p0 usage
+            set_count = len(source)
 
             # Loading from dictionary structure
-            for curr_set_name, scenarios in source_dict.items():
+            for curr_set_name, scenarios in source.items():
                 # Initialize containers for this scenario set if not exist
                 if curr_set_name not in self._scen_mev_qtr:
                     self._scen_mev_qtr[curr_set_name] = {}
@@ -574,6 +561,10 @@ class MEVLoader:
                 if isinstance(p0, dict):
                     override_value = p0.get(curr_set_name)
                 elif p0 is not None:
+                    if set_count > 1:
+                        raise ValueError(
+                            "When loading multiple scenario sets from a dictionary, provide 'p0' as a mapping of set names to dates."
+                        )
                     override_value = p0  # type: ignore[assignment]
                 if override_value is not None:
                     normalized = self._normalize_p0_value(override_value)
@@ -599,12 +590,8 @@ class MEVLoader:
 
                     # Store in appropriate container based on frequency
                     if inferred_freq.startswith('Q'):
-                        # Standardize to quarter-end using month-end freq to preserve fiscal quarter months
-                        data.index = pd.PeriodIndex(data.index, freq='M').to_timestamp(how='end').normalize()
                         self._scen_mev_qtr[curr_set_name][scen_name] = data
                     elif inferred_freq.startswith('M'):
-                        # Standardize to month-end
-                        data.index = pd.PeriodIndex(data.index, freq='M').to_timestamp(how='end').normalize()
                         self._scen_mev_mth[curr_set_name][scen_name] = data
                     else:
                         raise ValueError(
@@ -632,7 +619,7 @@ class MEVLoader:
         """Load and process data from Excel file using preprocessing functions."""
         if freq and freq.upper() not in ['M', 'Q']:
             raise ValueError("freq must be 'M' or 'Q' if specified")
-
+            
         # Try processing as quarterly first if freq not specified
         if not freq or freq.upper() == 'Q':
             try:
@@ -642,7 +629,7 @@ class MEVLoader:
             except Exception as e:
                 if freq and freq.upper() == 'Q':
                     raise ValueError(f"Failed to process quarterly Excel file: {e}")
-
+                
         # Try processing as monthly
         try:
             df = _process_monthly_excel(source, sheet)
@@ -651,7 +638,7 @@ class MEVLoader:
             raise ValueError("Data frequency not monthly")
         except Exception as e:
             raise ValueError(f"Failed to process Excel file as either quarterly or monthly: {e}")
-
+            
     def _load_from_df(
         self,
         df: pd.DataFrame,
@@ -660,7 +647,7 @@ class MEVLoader:
     ) -> pd.DataFrame:
         """
         Process DataFrame data.
-
+        
         Parameters
         ----------
         df : DataFrame
@@ -669,7 +656,7 @@ class MEVLoader:
             Name of date column. Not required if df already has datetime index.
         freq : str, optional
             Expected frequency ('M' for monthly, 'Q' for quarterly)
-
+            
         Returns
         -------
         DataFrame
@@ -677,10 +664,10 @@ class MEVLoader:
         """
         if freq and freq.upper() not in ['M', 'Q']:
             raise ValueError("freq must be 'M' or 'Q' if specified")
-
+            
         # Create copy of input
         data = df.copy()
-
+        
         # Handle datetime index
         if isinstance(data.index, pd.DatetimeIndex):
             # Already has datetime index, just normalize
@@ -693,53 +680,28 @@ class MEVLoader:
                 )
             if date_col not in data.columns:
                 raise ValueError(f"date_col '{date_col}' not found in DataFrame")
-
+                
             data.set_index(date_col, inplace=True)
             data.index = pd.to_datetime(data.index).normalize()
-
-        # Determine frequency
-        target_freq = freq.upper() if freq else None
-
-        # We sort to ensure infer_freq works best, although not strictly required by method signature,
-        # it helps with time series.
-        data.sort_index(inplace=True)
+        
+        # Validate frequency
         inferred_freq = pd.infer_freq(data.index)
-
-        # If we cannot infer frequency and no frequency provided, we cannot proceed
-        if not inferred_freq and not target_freq:
+        if not inferred_freq:
             raise ValueError("Could not infer frequency from data")
-
-        # If freq provided, check against inferred if possible
-        if target_freq and inferred_freq:
-            if not inferred_freq.startswith(target_freq):
-                # E.g. inferred='MS' (starts with M) and target='M' is OK.
-                # inferred='Q' and target='M' is NOT OK.
+            
+        if freq:
+            if not inferred_freq.startswith(freq.upper()):
                 raise ValueError(
                     f"Data frequency ({inferred_freq}) doesn't match specified ({freq})"
                 )
-
-        # Decide frequency for standardization
-        if not target_freq:
-            # Must have inferred_freq here
-            if inferred_freq.startswith('M'):
-                target_freq = 'M'
-            elif inferred_freq.startswith('Q'):
-                target_freq = 'Q'
-            else:
-                 raise ValueError(
-                    f"Unsupported data frequency: {inferred_freq}. "
-                    "Only monthly (M) and quarterly (Q) frequencies are supported."
-                )
-
-        # Standardize to period end dates
-        if target_freq in ['M', 'Q']:
-             # Use freq='M' even for quarterly data to preserve fiscal quarter months
-             # (i.e. snap to end of the month without moving to calendar quarter end)
-             periods = pd.PeriodIndex(data.index, freq='M')
-             data.index = periods.to_timestamp(how='end').normalize()
-
+        elif not inferred_freq.startswith(('M', 'Q')):
+            raise ValueError(
+                f"Unsupported data frequency: {inferred_freq}. "
+                "Only monthly (M) and quarterly (Q) frequencies are supported."
+            )
+            
         return data
-
+        
     def _validate_mev_codes(self) -> None:
         """Validate that all MEV codes are in the MEV_MAP."""
         missing_codes = [code for code in self._mev_codes if code not in self._mev_map]
@@ -749,26 +711,26 @@ class MEVLoader:
                 "Please add them to mev_type.xlsx with appropriate type and description.",
                 UserWarning
             )
-
+            
     @property
     def model_mev_qtr(self) -> pd.DataFrame:
         """Get base quarterly MEV data."""
         if self._model_mev_qtr is None:
             return pd.DataFrame()
         return self._model_mev_qtr
-
+        
     @property
     def model_mev_mth(self) -> pd.DataFrame:
         """Get base monthly MEV data."""
         if self._model_mev_mth is None:
             return pd.DataFrame()
         return self._model_mev_mth
-
+        
     @property
     def scen_mev_qtr(self) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
         Get quarterly scenario MEVs.
-
+        
         Returns
         -------
         dict
@@ -776,7 +738,7 @@ class MEVLoader:
             {set_name: {scenario_name: DataFrame}}
         """
         return self._scen_mev_qtr
-
+        
     @property
     def scen_mev_mth(self) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
@@ -801,36 +763,36 @@ class MEVLoader:
             Mapping of scenario set names to normalized month-end P0 timestamps.
         """
         return dict(self._scen_p0_overrides)
-
+        
     @property
     def mev_codes(self) -> List[str]:
         """Get list of all MEV codes."""
         return sorted(list(self._mev_codes))
-
+        
     @property
     def mev_map(self) -> Dict[str, Dict[str, Optional[str]]]:
         """Get the MEV type mapping."""
         return self._mev_map
-
+        
     @property
     def tsfm_map(self) -> Dict[str, List[str]]:
         """Get the transform mapping."""
         return self._tsfm_map
-
+        
     def get_mev_info(self, mev_code: str) -> Dict[str, Optional[str]]:
         """
         Get type, description, and category for a MEV code.
-
+        
         Parameters
         ----------
         mev_code : str
             The MEV code to look up
-
+            
         Returns
         -------
         dict
             Dictionary with 'type', 'description', and 'category' keys
-
+            
         Raises
         ------
         KeyError
@@ -843,12 +805,12 @@ class MEVLoader:
     def update_mev_map(self, updates: Dict[str, Dict[str, Optional[str]]]) -> None:
         """
         Update the MEV mapping with new or modified MEV codes.
-
+        
         This method allows users to easily add new MEV codes or update existing ones
         without modifying the Excel file directly. For new MEV codes, it's highly
         recommended to specify both 'type' and 'category'. Description is optional
         if you can remember what the MEV code means.
-
+        
         Parameters
         ----------
         updates : dict
@@ -857,16 +819,16 @@ class MEVLoader:
             - 'type': MEV type (e.g., 'level', 'rate')
             - 'description': Human-readable description
             - 'category': MEV category (e.g., 'GDP', 'Job Market', 'Inflation')
-
+            
             For existing MEV codes, only the specified attributes will be updated;
             unspecified attributes will remain unchanged.
-
+            
             For new MEV codes, unspecified attributes will be set to None.
-
+            
         Examples
         --------
         >>> loader = MEVLoader()
-        >>>
+        >>> 
         >>> # Add new MEV codes
         >>> loader.update_mev_map({
         ...     'NEWGDP': {
@@ -880,7 +842,7 @@ class MEVLoader:
         ...         # description will be None
         ...     }
         ... })
-        >>>
+        >>> 
         >>> # Update existing MEV code (only specified attributes)
         >>> loader.update_mev_map({
         ...     'GDP': {
@@ -888,11 +850,11 @@ class MEVLoader:
         ...         # type and description remain unchanged
         ...     }
         ... })
-        >>>
+        >>> 
         >>> # Verify updates
         >>> print(loader.get_mev_info('NEWGDP'))
         >>> print(loader.get_mev_info('GDP'))
-
+        
         Notes
         -----
         - Changes are made to the in-memory MEV map only
@@ -919,7 +881,7 @@ class MEVLoader:
                     'description': attributes.get('description'),
                     'category': attributes.get('category')
                 }
-
+                
                 # Warn if important attributes are missing for new MEV codes
                 if new_entry['type'] is None or new_entry['category'] is None:
                     warnings.warn(
@@ -927,7 +889,7 @@ class MEVLoader:
                         "specify both 'type' and 'category' attributes.",
                         UserWarning
                     )
-
+                
                 # Check for unknown attributes
                 for attr in attributes:
                     if attr not in ['type', 'description', 'category']:
@@ -936,9 +898,9 @@ class MEVLoader:
                             "Valid attributes are: 'type', 'description', 'category'",
                             UserWarning
                         )
-
+                
                 self._mev_map[mev_code] = new_entry
-
+                
         # Update MEV codes tracking if new codes were added
         new_codes = set(updates.keys()) - self._mev_codes
         if new_codes:
@@ -954,7 +916,7 @@ class MEVLoader:
     def clean_scen_mevs(self, set_name: Optional[str] = None) -> None:
         """
         Clear cached scenario MEVs.
-
+        
         Parameters
         ----------
         set_name : str, optional
@@ -984,10 +946,10 @@ class MEVLoader:
         """
         # Clean model MEVs
         self.clean_model_mevs()
-
+        
         # Clean all scenario MEVs
         self.clean_scen_mevs()
-
+        
         # Clean MEV codes tracking
         self._mev_codes.clear()
 
@@ -998,7 +960,7 @@ class MEVLoader:
     ) -> None:
         """
         Update scenario MEVs with new data. Supports both two-layer and three-layer dictionary inputs.
-
+        
         Parameters
         ----------
         updates : dict
@@ -1009,14 +971,14 @@ class MEVLoader:
             2. Three-layer dictionary matching the structure of scen_mev_qtr/mth:
                {"EWST2024": {"Base": df_update1, "Adv": df_update2, "Sev": df_update3}}
                In this case, set_name parameter is ignored.
-
+            
             The update values can be either DataFrames or Series. If Series, they will
             be converted to DataFrames.
-
+            
         set_name : str, optional
             Required only when using two-layer dictionary and multiple scenario sets exist.
             Specifies which scenario set to update.
-
+            
         Examples
         --------
         >>> # Update with two-layer dictionary
@@ -1024,7 +986,7 @@ class MEVLoader:
         ...     {"Base": df_base_update, "Adv": df_adv_update},
         ...     set_name="EWST2024"
         ... )
-        >>>
+        >>> 
         >>> # Update with three-layer dictionary
         >>> loader.update_scen_mevs({
         ...     "EWST2024": {
@@ -1032,13 +994,13 @@ class MEVLoader:
         ...         "Adv": df_adv_update
         ...     }
         ... })
-        >>>
+        >>> 
         >>> # Update with Series
         >>> loader.update_scen_mevs(
         ...     {"Base": new_gdp_series, "Adv": new_gdp_series},
         ...     set_name="EWST2024"
         ... )
-
+        
         Raises
         ------
         ValueError
@@ -1047,7 +1009,7 @@ class MEVLoader:
         """
         # Determine if input is three-layer or two-layer dictionary
         is_three_layer = any(isinstance(v, dict) for v in updates.values())
-
+        
         if is_three_layer:
             update_dict = updates
         else:
@@ -1062,29 +1024,29 @@ class MEVLoader:
                 qtr_sets = set(self._scen_mev_qtr.keys())
                 mth_sets = set(self._scen_mev_mth.keys())
                 set_name = list(qtr_sets.union(mth_sets))[0]
-
+            
             update_dict = {set_name: updates}
-
+        
         # Process each scenario set
         for curr_set_name, scen_updates in update_dict.items():
             # Validate scenario set exists
-            if (curr_set_name not in self._scen_mev_qtr and
+            if (curr_set_name not in self._scen_mev_qtr and 
                 curr_set_name not in self._scen_mev_mth):
                 raise ValueError(f"Scenario set '{curr_set_name}' does not exist")
-
+            
             # Process each scenario update
             for scen_name, update_data in scen_updates.items():
                 # Convert Series to DataFrame if necessary
                 if isinstance(update_data, pd.Series):
                     update_data = update_data.to_frame()
-
+                
                 # Determine frequency and update appropriate container
                 freq = pd.infer_freq(update_data.index)
                 if freq is None:
                     raise ValueError(
                         f"Could not infer frequency from update data for scenario '{scen_name}'"
                     )
-
+                
                 if freq.startswith('Q'):
                     if curr_set_name not in self._scen_mev_qtr:
                         self._scen_mev_qtr[curr_set_name] = {}
@@ -1093,18 +1055,18 @@ class MEVLoader:
                     else:
                         # Update existing DataFrame
                         existing_df = self._scen_mev_qtr[curr_set_name][scen_name]
-
+                        
                         # Align indices
                         combined_idx = existing_df.index.union(update_data.index)
                         existing_df = existing_df.reindex(combined_idx)
                         update_data = update_data.reindex(combined_idx)
-
+                        
                         # Update columns
                         for col in update_data.columns:
                             existing_df[col] = update_data[col]
-
+                        
                         self._scen_mev_qtr[curr_set_name][scen_name] = existing_df
-
+                        
                 elif freq.startswith('M'):
                     if curr_set_name not in self._scen_mev_mth:
                         self._scen_mev_mth[curr_set_name] = {}
@@ -1113,25 +1075,25 @@ class MEVLoader:
                     else:
                         # Update existing DataFrame
                         existing_df = self._scen_mev_mth[curr_set_name][scen_name]
-
+                        
                         # Align indices
                         combined_idx = existing_df.index.union(update_data.index)
                         existing_df = existing_df.reindex(combined_idx)
                         update_data = update_data.reindex(combined_idx)
-
+                        
                         # Update columns
                         for col in update_data.columns:
                             existing_df[col] = update_data[col]
-
+                        
                         self._scen_mev_mth[curr_set_name][scen_name] = existing_df
                 else:
                     raise ValueError(
                         f"Unsupported frequency '{freq}' in update data for scenario '{scen_name}'. "
                         "Only monthly (M) and quarterly (Q) frequencies are supported."
                     )
-
+                
                 # Update MEV codes tracking
                 self._mev_codes.update(update_data.columns)
-
+        
         # Validate all MEV codes
         self._validate_mev_codes()
