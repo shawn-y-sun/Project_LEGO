@@ -17,7 +17,7 @@ class CondVar(Feature):
 
     Parameters
     ----------
-    var : str or pandas.Series
+    main_var : str or pandas.Series
         Name or series of the main variable.
     cond_var : str, pandas.Series, or list thereof
         One or more condition variable names or Series.
@@ -30,13 +30,13 @@ class CondVar(Feature):
     """
     def __init__(
         self,
-        var: Union[str, pd.Series],
+        main_var: Union[str, pd.Series],
         cond_var: Union[str, pd.Series, List[Union[str, pd.Series]]],
         cond_fn: Callable[..., pd.Series],
         cond_fn_kwargs: Optional[Dict[str, Any]] = None,
         alias: Optional[str] = None
     ):
-        super().__init__(var=var, alias=alias)
+        super().__init__(var=main_var, alias=alias)
         # Initialize list of conditional variables (names or Series)
         if isinstance(cond_var, (str, pd.Series)):
             self.cond_var = [cond_var]
@@ -164,7 +164,7 @@ class BO(CondVar):
     
     Parameters
     ----------
-    var : str or pandas.Series
+    main_var : str or pandas.Series
         Name or series of the main variable to apply burn-out to.
     cond_var : str or pandas.Series
         Name or series of the condition variable that triggers burn-out.
@@ -188,7 +188,7 @@ class BO(CondVar):
     -------
     >>> # Create burn-out variable that zeros GDP for 2 periods after UNRATE > 5%
     >>> bo_gdp = BO(
-    ...     var='GDP',
+    ...     main_var='GDP',
     ...     cond_var='UNRATE',
     ...     cond_thresh=0.05,
     ...     effect_periods=2,
@@ -197,7 +197,7 @@ class BO(CondVar):
     """
     def __init__(
         self,
-        var: Union[str, pd.Series],
+        main_var: Union[str, pd.Series],
         cond_var: Union[str, pd.Series],
         cond_thresh: float,
         main_thresh: Optional[float] = None,
@@ -229,7 +229,7 @@ class BO(CondVar):
         }
         
         super().__init__(
-            var=var,
+            main_var=main_var,
             cond_var=cond_var,
             cond_fn=BO_func,
             cond_fn_kwargs=cond_fn_kwargs,
@@ -548,7 +548,7 @@ Guidelines for creating new conditional functions that target variables as condi
    class NewCond(CondVar):
        def __init__(
            self,
-           var: Union[str, pd.Series],
+           main_var: Union[str, pd.Series],
            cond_var: Union[str, pd.Series],
            cond_thresh: float,
            main_thresh: Optional[float] = None,
@@ -567,7 +567,7 @@ Guidelines for creating new conditional functions that target variables as condi
                'main_thresh_sign': main_thresh_sign
            }
            super().__init__(
-               var=var,
+               main_var=main_var,
                cond_var=cond_var,
                cond_fn=new_cond_func,
                cond_fn_kwargs=cond_fn_kwargs,

@@ -3,7 +3,7 @@
 # Purpose: Provide model search utilities for generating and ranking CM specs.
 # Key Types/Classes: ModelSearch
 # Key Functions: _sort_specs_with_dummies_first
-# Dependencies: itertools, datetime, pandas, tqdm, logging, .pretest.PreTestSet
+# Dependencies: itertools, datetime, pandas, tqdm, .pretest.PreTestSet
 # =============================================================================
 
 from typing import List, Union, Tuple, Type, Any, Optional, Callable, Dict, Sequence, Set
@@ -11,19 +11,13 @@ import itertools
 import time
 import datetime
 import inspect
-import json
 from copy import deepcopy
 from collections import defaultdict
 import warnings
 import sys
 import os
-import logging
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
-from pathlib import Path
-
-
-LOGGER = logging.getLogger(__name__)
 
 import pandas as pd
 from tqdm import tqdm
@@ -35,17 +29,6 @@ from .model import ModelBase
 from .pretest import PreTestSet, FeatureTest
 from .cm import CM
 from .periods import default_periods_for_freq, resolve_periods_argument
-from .regime import RgmVar
-from .persistence import (
-    ensure_segment_dirs,
-    sanitize_segment_id,
-    generate_search_id,
-    get_search_paths,
-    load_index,
-    load_cm,
-    save_cm,
-    save_index,
-)
 
 
 def _sort_specs_with_dummies_first(spec_list: List[Any]) -> List[Any]:
@@ -101,17 +84,6 @@ class ModelSearch:
         Name of the response variable/target for modeling.
     model_cls : Type[ModelBase]
         The ModelBase subclass to instantiate and fit within CM.
-    model_type : Any, optional
-        Optional model type metadata forwarded to downstream builders.
-    target_base : str, optional
-        Base variable associated with the modeling target.
-    target_exposure : str, optional
-        Exposure variable when ratio models are in use.
-    qtr_method : str, default 'mean'
-        Aggregation method for quarterly transformations.
-    progress_log_interval_sec : float, optional
-        Minimum elapsed seconds between heartbeat progress logs emitted during
-        lengthy ``filter_specs`` runs. Defaults to 5 minutes.
     """
 
     def __init__(
@@ -122,8 +94,7 @@ class ModelSearch:
         model_type: Optional[Any] = None,
         target_base: Optional[str] = None,
         target_exposure: Optional[str] = None,
-        qtr_method: str = 'mean',
-        progress_log_interval_sec: float = 5 * 60
+        qtr_method: str = 'mean'
     ):
         self.dm = dm
         self.target = target
@@ -132,8 +103,6 @@ class ModelSearch:
         self.target_base = target_base
         self.target_exposure = target_exposure
         self.qtr_method = qtr_method
-        self.progress_log_interval_sec = progress_log_interval_sec
-        self.segment: Optional[Any] = None
         self.all_specs: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
         self.passed_cms: List[CM] = []
         self.failed_info: List[Tuple[List[Any], List[str]]] = []
@@ -142,232 +111,6 @@ class ModelSearch:
         self.top_cms: List[CM] = []
         self.model_pretestset: Optional[PreTestSet] = None
         self.target_pretest_result: Optional[Any] = None
-        self.current_search_config_raw: Optional[Dict[str, Any]] = None
-        self.current_search_config: Optional[Dict[str, Any]] = None
-        self.search_id: Optional[str] = None
-        self.total_combos: int = 0
-        self.completed_combos: int = 0
-
-    @staticmethod
-    def _make_serializable(obj: Any) -> Any:
-        """
-        Convert potentially non-serializable objects into JSON-safe forms.
-
-        Parameters
-        ----------
-        obj : Any
-            Object to serialize.
-
-        Returns
-        -------
-        Any
-            JSON-serializable representation.
-        """
-
-        if obj is None or isinstance(obj, (str, int, float, bool)):
-            return obj
-
-        if callable(obj):
-            module = getattr(obj, "__module__", None)
-            name = getattr(obj, "__name__", None)
-            if module and name:
-                return f"{module}.{name}"
-            return repr(obj)
-
-        if isinstance(obj, dict):
-            return {ModelSearch._make_serializable(k): ModelSearch._make_serializable(v) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple, set)):
-            return [ModelSearch._make_serializable(v) for v in obj]
-
-        return repr(obj)
-
-    @staticmethod
-    def _configs_equivalent(config_a: Dict[str, Any], config_b: Dict[str, Any]) -> bool:
-        """
-        Compare two search configurations ignoring metadata-only keys.
-
-        Parameters
-        ----------
-        config_a : dict
-            First configuration mapping.
-        config_b : dict
-            Second configuration mapping.
-
-        Returns
-        -------
-        bool
-            ``True`` when configurations match on meaningful search parameters.
-        """
-
-        ignored_keys = {"search_id", "timestamp", "total_combos"}
-        def _filtered(config: Dict[str, Any]) -> Dict[str, Any]:
-            return {k: v for k, v in config.items() if k not in ignored_keys}
-
-        return _filtered(config_a) == _filtered(config_b)
-
-    @staticmethod
-    def _latest_search_config(
-        segment_id: str, base_dir: Path
-    ) -> Optional[Tuple[str, Dict[str, Any]]]:
-        """
-        Return the most recent search configuration for a segment.
-
-        Parameters
-        ----------
-        segment_id : str
-            Segment identifier to inspect.
-        base_dir : pathlib.Path
-            Working directory that contains the capitalized ``Segment`` root.
-
-        Returns
-        -------
-        tuple[str, dict] or None
-            ``(search_id, config)`` for the most recent search when available;
-            otherwise ``None``.
-        """
-
-        dirs = ensure_segment_dirs(segment_id, base_dir)
-        index_path = dirs["cms_dir"] / "search_index.json"
-        try:
-            index = json.loads(index_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError):
-            return None
-
-        prefix = f"search_{sanitize_segment_id(segment_id)}_"
-
-        def _timestamp_value(search_label: str) -> str:
-            return search_label.rsplit("_", 1)[-1]
-
-        matching_ids = [sid for sid in index if sid.startswith(prefix)]
-        if not matching_ids:
-            return None
-
-        latest_id = max(matching_ids, key=_timestamp_value)
-        return latest_id, index.get(latest_id)
-
-    @staticmethod
-    def _find_resume_candidate(
-        segment_id: str,
-        base_dir: Path,
-        prospective_config: Dict[str, Any],
-        total_combos: int,
-    ) -> Optional[Tuple[str, Dict[str, Any], int]]:
-        """
-        Locate the newest compatible search configuration for potential resume.
-
-        Parameters
-        ----------
-        segment_id : str
-            Identifier for the active segment.
-        base_dir : pathlib.Path
-            Working directory that houses the ``Segment`` folder.
-        prospective_config : dict
-            Search parameters prepared for the current invocation.
-        total_combos : int
-            Number of combinations calculated for the current search.
-
-        Returns
-        -------
-        tuple[str, dict, int] or None
-            ``(search_id, config, completed_combos)`` for the most recent
-            matching search when available. Returns ``None`` when no compatible
-            search is found. Preference is given to the newest *incomplete*
-            search based on progress metadata; a finished run is only returned
-            when no interrupted counterpart exists.
-        """
-
-        dirs = ensure_segment_dirs(segment_id, base_dir)
-        index_path = dirs["cms_dir"] / "search_index.json"
-        try:
-            index = json.loads(index_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError):
-            return None
-
-        prefix = f"search_{sanitize_segment_id(segment_id)}_"
-
-        def _timestamp_value(search_label: str) -> str:
-            return search_label.rsplit("_", 1)[-1]
-
-        # Scan all matching search IDs in reverse chronological order so the
-        # newest compatible run is selected. Only incomplete runs are eligible
-        # for resume; fully finished searches should not trigger prompts for
-        # continuation.
-        matching_ids = [sid for sid in index if sid.startswith(prefix)]
-        matching_ids.sort(key=_timestamp_value, reverse=True)
-
-        for search_id in matching_ids:
-            config_body = index.get(search_id) or {}
-            if not ModelSearch._configs_equivalent(config_body, prospective_config):
-                continue
-            if config_body.get("total_combos") != total_combos:
-                continue
-
-            progress_path = dirs["log_dir"] / f"{search_id}.progress"
-            progress_info = ModelSearch._read_progress(progress_path)
-            completed = int(progress_info.get("completed_combos", 0)) if progress_info else 0
-            if progress_info and progress_info.get("total_combos") != total_combos:
-                continue
-
-            # Only incomplete runs can be resumed.
-            if completed < total_combos:
-                return search_id, config_body, completed
-
-        # No interrupted run available for these parameters.
-        return None
-
-    @staticmethod
-    def _load_passed_cms_from_dir(target_dir: Path, dm: Optional[DataManager]) -> List[CM]:
-        """
-        Load persisted passed candidate models from disk.
-
-        Parameters
-        ----------
-        target_dir : pathlib.Path
-            Directory containing the ``index.json`` file and CM pickles.
-        dm : DataManager, optional
-            Data manager to bind to each loaded CM if provided.
-
-        Returns
-        -------
-        List[CM]
-            Loaded candidate models; empty when none are present.
-        """
-
-        try:
-            index_entries = load_index(target_dir)
-        except FileNotFoundError:
-            return []
-
-        restored: List[CM] = []
-        for entry in index_entries:
-            cm_path = target_dir / entry["filename"]
-            try:
-                cm = load_cm(cm_path)
-                if dm is not None:
-                    cm.bind_data_manager(dm)
-                restored.append(cm)
-            except Exception:  # pragma: no cover - corrupted pickles handled gracefully
-                continue
-        return restored
-
-    @staticmethod
-    def _read_progress(progress_path: Path) -> Optional[Dict[str, int]]:
-        """Read a progress file if present."""
-
-        if not progress_path.exists():
-            return None
-        try:
-            with progress_path.open("r", encoding="utf-8") as handle:
-                return json.load(handle)
-        except (json.JSONDecodeError, OSError):
-            return None
-
-    @staticmethod
-    def _write_progress(progress_path: Path, total_combos: int, completed_combos: int) -> None:
-        """Persist progress to disk overwriting any prior file."""
-
-        with progress_path.open("w", encoding="utf-8") as handle:
-            json.dump({"total_combos": total_combos, "completed_combos": completed_combos}, handle, indent=2)
 
     def _resolve_model_pretestset(self) -> Optional[PreTestSet]:
         """Return a deep-copied default pretest bundle for ``self.model_cls``.
@@ -397,36 +140,6 @@ class ModelSearch:
         # ``ppnr_ols_pretestset`` while populating runtime dependencies.
         return deepcopy(default_bundle)
 
-    def _propagate_target_context(self, target_result: Optional[bool]) -> None:
-        """Cache and broadcast the target pre-test outcome to dependents.
-
-        Parameters
-        ----------
-        target_result : bool, optional
-            Outcome of the target-level pre-test. ``True`` preserves the
-            default expectation that downstream features should remain
-            stationary, while ``False`` inverts the expectation for
-            feature-level checks. ``None`` clears any previously cached
-            outcome.
-
-        Notes
-        -----
-        The payload always includes both ``"target_result"`` and
-        ``"target_test_result"`` so context routing rules can select the key
-        appropriate for each configured pre-test.
-        """
-
-        self.target_pretest_result = None if target_result is None else bool(target_result)
-
-        if self.model_pretestset is None:
-            return
-
-        context_payload = {
-            "target_result": self.target_pretest_result,
-            "target_test_result": self.target_pretest_result,
-        }
-        self.model_pretestset.propagate_context(context_payload)
-
     def _prepare_feature_pretest(self) -> Optional[FeatureTest]:
         """Return the active feature pre-test with the correct data context.
 
@@ -444,9 +157,6 @@ class ModelSearch:
         if self.model_pretestset is None:
             return None
 
-        if self.target_pretest_result is not None:
-            self._propagate_target_context(self.target_pretest_result)
-
         feature_test = self.model_pretestset.feature_test
         if feature_test is None:
             return None
@@ -456,70 +166,13 @@ class ModelSearch:
         if feature_test.dm is not self.dm:
             feature_test.dm = self.dm
 
+        if (
+            getattr(feature_test, "target_test_result", None) is None
+            and self.target_pretest_result is not None
+        ):
+            feature_test.target_test_result = self.target_pretest_result
+
         return feature_test
-
-    def _log_progress_heartbeat(
-        self,
-        *,
-        log_file: str,
-        segment_id: str,
-        start_ts: float,
-        last_log_ts: float,
-        evaluated_count: int,
-        passed_cms: List[CM],
-        failed_info: List[Tuple[List[Any], List[str]]],
-        error_log: List[Tuple[List[Any], str, str]],
-        force: bool = False,
-    ) -> float:
-        """Log filtering progress to stdout logger and a persistent log file.
-
-        Parameters
-        ----------
-        log_file : str
-            Destination path for the heartbeat entry.
-        segment_id : str
-            Identifier for the active segment.
-        start_ts : float
-            Start timestamp (``time.time()``) of the filtering run.
-        last_log_ts : float
-            Timestamp of the previous heartbeat.
-        evaluated_count : int
-            Number of specs evaluated so far.
-        passed_cms : List[CM]
-            Successfully passed candidate models.
-        failed_info : List[Tuple[List[Any], List[str]]]
-            Failed specifications captured during filtering.
-        error_log : List[Tuple[List[Any], str, str]]
-            Specs that raised errors during filtering.
-        force : bool, default False
-            When True, emit a log regardless of the configured interval.
-
-        Returns
-        -------
-        float
-            Updated ``last_log_ts`` timestamp.
-        """
-
-        now_ts = time.time()
-        interval = self.progress_log_interval_sec or 0
-
-        # Respect disabled heartbeat configuration unless explicitly forced.
-        if not force and (interval <= 0 or (now_ts - last_log_ts) < interval):
-            return last_log_ts
-
-        elapsed_min = (now_ts - start_ts) / 60 if start_ts else 0.0
-        timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        message = (
-            f"[{timestamp_str}] segment={segment_id}, elapsed={elapsed_min:.1f} min, "
-            f"evaluated={evaluated_count}, passed={len(passed_cms)}, errors={len(error_log)}, "
-            f"failures={len(failed_info)}"
-        )
-
-        LOGGER.info(message)
-        with open(log_file, "a", encoding="utf-8") as log_handle:
-            log_handle.write(message + "\n")
-
-        return now_ts
 
     def build_spec_combos(
         self,
@@ -529,7 +182,6 @@ class ModelSearch:
         max_lag: int = 3,
         periods: Optional[Sequence[int]] = None,
         category_limit: int = 1,
-        regime_limit: Optional[int] = None,
         exp_sign_map: Optional[Dict[str, int]] = None,
         **legacy_kwargs: Any
     ) -> List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]]:
@@ -539,19 +191,12 @@ class ModelSearch:
         - desired_pool can contain:
             * str, TSFM, Feature, tuple, or set.
           * tuple: items stay grouped together.
-          * set: treated as a pool where exactly one must be selected. When a
-            set contains :class:`RgmVar` instances, combinations of distinct
-            regimes are also enumerated (respecting ``regime_limit``) so
-            multi-regime variants are not excluded prematurely.
-        - Duplicate entries in desired_pool are removed before processing to
-          prevent redundant combination generation.
+          * set: treated as a pool where exactly one must be selected.
         - Strings at top-level are expanded into TSFM variants via DataManager.
         - Feature-level pre-tests (when configured) prune invalid candidates
           before combination enumeration.
         - Respects max_var_num (total features per combo).
         - Respects category_limit (max variables from each MEV category per combo).
-        - Excludes combinations containing a :class:`TSFM` and :class:`RgmVar`
-          referencing the same base variable.
 
         Parameters
         ----------
@@ -572,16 +217,9 @@ class ModelSearch:
             are applied automatically. The deprecated ``max_periods`` keyword is
             still accepted for backward compatibility.
         category_limit : int, default 1
-            Max variables from each MEV category per combo. Applies to both
-            top-level strings/TSFM instances in ``desired_pool`` and
-            :class:`RgmVar` entries. For regimes, the limit is evaluated per
-            ``(regime, regime_on)`` signature so that distinct activation states
-            are independently constrained.
-        regime_limit : Optional[int], default None
-            Maximum number of :class:`RgmVar` instances sharing the same
-            ``(regime, regime_on)`` signature per combo. Applies across the full
-            combination, including forced specifications.
-            When ``None`` (default), no limit is applied.
+            Max variables from each MEV category per combo. Only applies to
+            top-level strings and TSFM instances in desired_pool; other Feature
+            instances or items in nested structures are not subject to this constraint.
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             Passed to DataManager.build_tsfm_specs() for string expansion.
@@ -591,52 +229,14 @@ class ModelSearch:
         combos : list of spec lists
             Each combo is a list including str, TSFM, Feature, or tuple elements.
         """
-        if regime_limit is not None:
-            if not isinstance(regime_limit, int):
-                raise TypeError("regime_limit must be provided as an integer.")
-            if regime_limit < 1:
-                raise ValueError("regime_limit must be a positive integer.")
-
         # Run feature-level pretests later in the pipeline so TSFM expansions
         # can be evaluated directly before enumeration.
         feature_test = self._prepare_feature_pretest()
         pretest_cache: Dict[str, bool] = {}
-        # Changed from simple list to dict mapping test name to list of excluded features
-        exclusions_by_test: Dict[str, List[str]] = defaultdict(list)
+        excluded_variant_labels: List[str] = []
         excluded_variant_seen: Set[str] = set()
-
         excluded_group_labels: List[str] = []
         excluded_group_seen: Set[str] = set()
-
-        def _has_tsfm_regime_conflict(items: Sequence[Any]) -> bool:
-            """Return ``True`` when a TSFM and RgmVar share the same variable."""
-
-            tsfm_vars: Set[str] = set()
-            rgm_vars: Set[str] = set()
-
-            def _collect(obj: Any, *, in_regime: bool = False) -> None:
-                # Track TSFM variables directly and those nested inside groups.
-                if isinstance(obj, TSFM):
-                    if not in_regime and obj.var is not None:
-                        tsfm_vars.add(str(obj.var))
-                elif isinstance(obj, RgmVar):
-                    # Regime-wrapped transforms should only set ``rgm_vars`` so
-                    # they conflict with standalone TSFMs of the same base
-                    # variable without double-counting as direct TSFMs.
-                    base_var = getattr(obj, "var", None)
-                    if base_var is None and getattr(obj, "var_feature", None) is not None:
-                        base_var = obj.var_feature.var
-
-                    if base_var is not None:
-                        rgm_vars.add(str(base_var))
-
-                    _collect(getattr(obj, "var_feature", None), in_regime=True)
-                elif isinstance(obj, (list, tuple, set)):
-                    for el in obj:
-                        _collect(el, in_regime=in_regime)
-
-            _collect(items)
-            return bool(tsfm_vars & rgm_vars)
 
         def _passes_feature(candidate: Any) -> bool:
             """Return ``True`` when ``candidate`` satisfies the feature pre-test."""
@@ -663,42 +263,12 @@ class ModelSearch:
                 return passes
 
             cache_key = repr(candidate)
-            # Only TSFM objects undergo feature pre-testing; all other feature
-            # representations are allowed to pass without evaluation.
-            if not isinstance(candidate, TSFM):
-                pretest_cache[cache_key] = True
-                return True
             if cache_key in pretest_cache:
                 passes = pretest_cache[cache_key]
             else:
                 feature_test.feature = candidate
-                failed_reasons = []
                 try:
-                    # Access underlying TestSet to identify specific failures
-                    ts = feature_test.testset
-                    passed, failed_tests = ts.filter_pass()
-
-                    # Determine expected outcome from feature_test context
-                    expected_pass = feature_test.expected_outcome
-
-                    # Evaluate based on expectation: passed == expected
-                    final_pass = (passed == expected_pass)
-                    final_pass = feature_test._apply_force_filter_pass(final_pass)
-
-                    passes = final_pass
-
-                    if not passes:
-                        # Determine why it failed
-                        if expected_pass:
-                            # Expected True, got False -> Tests failed
-                            if failed_tests:
-                                failed_reasons.extend(failed_tests)
-                            else:
-                                failed_reasons.append("Unspecified Test Failure")
-                        else:
-                            # Expected False (e.g. non-stationary), got True (stationary)
-                            failed_reasons.append("Target Alignment (Unexpected Pass)")
-
+                    result = feature_test.test_filter
                 except Exception as exc:  # pragma: no cover - defensive logging
                     print(
                         "Feature pre-test raised "
@@ -706,46 +276,27 @@ class ModelSearch:
                     )
                     passes = True
                 else:
-                    # If failed, record reasons
-                    if not passes:
-                        for reason in failed_reasons:
-                            exclusions_by_test[reason].append(cache_key)
-
+                    try:
+                        passes = bool(result)
+                    except Exception:  # pragma: no cover - unexpected truthiness
+                        passes = True
                 pretest_cache[cache_key] = passes
 
             if not passes:
                 if cache_key not in excluded_variant_seen:
+                    excluded_variant_labels.append(cache_key)
                     excluded_variant_seen.add(cache_key)
             return passes
 
         # Handle forced_in being optional
         forced_specs = (forced_in or []).copy()
 
-        # Remove duplicates from desired_pool to avoid repeated combinations
-        # when users inadvertently supply the same variable more than once.
-        seen_signatures: Set[str] = set()
-        unique_desired_pool: List[Union[str, TSFM, Feature, Tuple[Any, ...], set]] = []
-
-        def _dedup_signature(item: Any) -> str:
-            """Create a deterministic signature for deduplication."""
-
-            # Using repr ensures we can handle unhashable inputs such as sets and tuples
-            # while keeping ordering stable for repeated objects.
-            return f"{type(item).__name__}:{repr(item)}"
-
-        for pool_item in desired_pool:
-            signature = _dedup_signature(pool_item)
-            if signature in seen_signatures:
-                continue
-            seen_signatures.add(signature)
-            unique_desired_pool.append(pool_item)
-
         # Step 1: Build raw combos from desired_pool with category constraints
         # Separate constrained and unconstrained items
         constrained_items = []  # top-level strings and TSFM instances
         unconstrained_items = []  # everything else (sets, tuples, other Features)
 
-        for item in unique_desired_pool:
+        for item in desired_pool:
             if isinstance(item, (str, TSFM)):
                 constrained_items.append(item)
             else:
@@ -806,20 +357,7 @@ class ModelSearch:
                         else:
                             flat.add(el)
                 _flatten(item)
-                # When a set contains regime variables, allow combinations of
-                # distinct regimes to co-occur by generating subset options.
-                # Filtering by ``regime_limit`` later in the pipeline still
-                # enforces per-regime caps, but this expansion ensures we do
-                # not artificially limit combos to a single RgmVar.
-                if any(isinstance(el, RgmVar) for el in flat):
-                    subset_pool: List[List[Any]] = []
-                    flat_list = list(flat)
-                    for r in range(1, len(flat_list) + 1):
-                        for combo in itertools.combinations(flat_list, r):
-                            subset_pool.append(list(combo))
-                    pools.append(subset_pool)
-                else:
-                    pools.append(list(flat))
+                pools.append(list(flat))
             else:
                 pools.append([item])
 
@@ -850,104 +388,6 @@ class ModelSearch:
             if len(forced_specs) + len(rc) <= max_var_num:
                 combos.append(forced_specs + rc)
 
-        def _regime_counts(items: Sequence[Any]) -> Dict[Tuple[str, int], int]:
-            """Return counts of regime occurrences for any nested :class:`RgmVar`.
-
-            Regime uniqueness accounts for the activation flag (``on``/``regime_on``)
-            so that variants targeting the same regime column with different active
-            states are treated as distinct. This enables combinations that include
-            both active and inactive variants of the same regime indicator.
-
-            Parameters
-            ----------
-            items : Sequence[Any]
-                Collection of specification elements to inspect.
-
-            Returns
-            -------
-            Dict[Tuple[str, int], int]
-                Mapping of ``(regime, regime_on)`` signatures to counts of
-                :class:`RgmVar` entries.
-            """
-
-            counts: Dict[Tuple[str, int], int] = defaultdict(int)
-
-            def _collect(obj: Any) -> None:
-                if isinstance(obj, RgmVar):
-                    # Include activation flag so on/off variants coexist.
-                    counts[(obj.regime, getattr(obj, "on", 1))] += 1
-                elif isinstance(obj, (list, tuple, set)):
-                    for el in obj:
-                        _collect(el)
-
-            _collect(items)
-            return counts
-
-        # Enforce per-regime limits across forced and desired combinations when requested
-        if regime_limit is not None:
-            filtered_combos: List[List[Any]] = []
-            for combo in combos:
-                regime_counts = _regime_counts(combo)
-                if any(count > regime_limit for count in regime_counts.values()):
-                    continue
-                filtered_combos.append(combo)
-
-            combos = filtered_combos
-
-        def _regime_category_counts(items: Sequence[Any]) -> Dict[Tuple[str, int], Dict[str, int]]:
-            """Return category counts for regime variables grouped by signature.
-
-            The category limit is enforced separately for each ``(regime, on)``
-            signature so active/inactive variants do not share a single bucket.
-            Items lacking a category definition are ignored for this constraint.
-
-            Parameters
-            ----------
-            items : Sequence[Any]
-                Specification elements to inspect.
-
-            Returns
-            -------
-            Dict[Tuple[str, int], Dict[str, int]]
-                Mapping of regime signatures to per-category counts.
-            """
-
-            counts: Dict[Tuple[str, int], Dict[str, int]] = defaultdict(lambda: defaultdict(int))
-
-            def _collect(obj: Any) -> None:
-                if isinstance(obj, RgmVar):
-                    base_var = getattr(obj, "var", None)
-                    if base_var is None and getattr(obj, "var_feature", None) is not None:
-                        base_var = obj.var_feature.var
-
-                    if base_var is not None:
-                        category = self.dm.var_map.get(base_var, {}).get("category")
-                        if category:
-                            signature = (obj.regime, getattr(obj, "on", getattr(obj, "regime_on", 1)))
-                            counts[signature][category] += 1
-                elif isinstance(obj, (list, tuple, set)):
-                    for el in obj:
-                        _collect(el)
-
-            _collect(items)
-            return counts
-
-        # Enforce per-category limits for regime-aware variables per signature
-        if category_limit is not None:
-            filtered_combos: List[List[Any]] = []
-            for combo in combos:
-                signature_counts = _regime_category_counts(combo)
-                over_limit = False
-                for category_counts in signature_counts.values():
-                    if any(count > category_limit for count in category_counts.values()):
-                        over_limit = True
-                        break
-
-                if not over_limit:
-                    filtered_combos.append(combo)
-
-            combos = filtered_combos
-
         # Step 3: Expand only top-level strings into TSFM variants
         # Gather unique strings to expand
         top_strings = {spec for combo in combos for spec in combo if isinstance(spec, str)}
@@ -975,21 +415,7 @@ class ModelSearch:
             )
 
         expanded: List[List[Union[str, TSFM, Feature, Tuple[Any, ...]]]] = []
-
-        # Display a progress bar when feature pre-testing is enabled so users can
-        # observe long-running walks through candidate specifications.
-        combo_iterable: Sequence[List[Any]]
-        if feature_test is not None:
-            combo_iterable = tqdm(
-                combos,
-                desc="Feature pre-test combos",
-                total=len(combos),
-                leave=False
-            )
-        else:
-            combo_iterable = combos
-
-        for combo in combo_iterable:
+        for combo in combos:
             variant_lists: List[List[Any]] = []
             combo_invalid = False
             for spec in combo:
@@ -1021,22 +447,16 @@ class ModelSearch:
             for prod in itertools.product(*variant_lists):
                 # Sort each spec list so quarterly and monthly dummies come first
                 sorted_prod = _sort_specs_with_dummies_first(list(prod))
-                # Skip combos that mix regime-aware and standard transforms of the same var
-                if _has_tsfm_regime_conflict(sorted_prod):
-                    continue
                 expanded.append(sorted_prod)
 
-        if (feature_test is not None) and (exclusions_by_test or excluded_group_labels):
+        if (feature_test is not None) and (excluded_variant_labels or excluded_group_labels):
             print("--- Feature Pre-Test Exclusions ---")
-
-            # Print exclusions grouped by test name
-            if exclusions_by_test:
-                for test_name, variants in sorted(exclusions_by_test.items()):
-                    unique_variants = sorted(list(set(variants)))
-                    count = len(unique_variants)
-                    # Simple formatting: Test Name: var1, var2, ...
-                    print(f"{test_name} ({count}): {', '.join(unique_variants)}")
-
+            if excluded_variant_labels:
+                print(
+                    "Excluded "
+                    f"{len(excluded_variant_labels)} variant(s): "
+                    + ", ".join(excluded_variant_labels)
+                )
             if excluded_group_labels:
                 print(
                     "Removed "
@@ -1110,16 +530,10 @@ class ModelSearch:
 
     def filter_specs(
         self,
+        model_id_prefix: str = 'cm',
         sample: str = 'in',
         test_update_func: Optional[Callable[[ModelBase], dict]] = None,
-        outlier_idx: Optional[List[Any]] = None,
-        log: bool = True,
-        start_index: int = 0,
-        total_count: Optional[int] = None,
-        log_file_path: Optional[Path] = None,
-        progress_callback: Optional[Callable[[int], None]] = None,
-        passed_cms_dir: Optional[Path] = None,
-        initial_passed: Optional[List[CM]] = None,
+        outlier_idx: Optional[List[Any]] = None
     ) -> Tuple[List[CM], List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]], List[Tuple[List[Any], str, str]]]:
         """
         Assess all built spec combos and separate passed and failed results,
@@ -1127,6 +541,8 @@ class ModelSearch:
 
         Parameters
         ----------
+        model_id_prefix : str, default 'cm'
+            Prefix for auto-generated model IDs (appended with index).
         sample : {'in','full'}
             Sample to use for all assessments (default 'in').
         test_update_func : callable, optional
@@ -1136,46 +552,6 @@ class ModelSearch:
             records to remove from the in-sample data. If provided and `build_in`
             is True, each label must exist within the in-sample period; otherwise,
             a ValueError is raised.
-        log : bool, default True
-            When True, emit heartbeat logs to ``INFO`` and persist them to the
-            segment ``log`` directory under the capitalized ``Segment`` root. A
-            notice describing the log destination is printed before filtering
-            begins.
-        start_index : int, default 0
-            Number of spec combinations already completed in a resumed search.
-            This value feeds progress reporting but the provided ``all_specs``
-            sequence will still be evaluated in full.
-        total_count : int, optional
-            Total number of combinations in the full search. When provided, the
-            progress indicator uses this denominator rather than the length of
-            the current ``all_specs`` slice.
-        log_file_path : pathlib.Path, optional
-            Explicit path for progress logging. When omitted, a timestamped
-            search-specific log file is created automatically.
-        progress_callback : callable, optional
-            Invoked after each spec is evaluated with the current completed
-            combination count. Useful for writing incremental progress files.
-        passed_cms_dir : pathlib.Path, optional
-            Destination directory for persisting passed candidate models under
-            ``cms/<search_id>/passed_cms``. When omitted, passed models are
-            not persisted to disk during filtering.
-        initial_passed : list of CM, optional
-            Previously passed models to seed the run with when resuming an
-            interrupted search. These models are included in progress updates
-            and will be re-indexed alongside newly evaluated specifications.
-
-        Notes
-        -----
-        When ``log`` is True, emits heartbeat progress logs at ``INFO`` level
-        and to a segment-scoped log file during lengthy runs. Heartbeats respect
-        ``progress_log_interval_sec`` configured on initialization; set to a
-        non-positive number to disable periodic logging. A final summary is
-        always appended at completion. Candidate models are labeled
-        ``temp_<index>`` during assessment and renamed sequentially to
-        ``passed_<n>`` upon successfully passing all tests. Passed models are
-        immediately persisted under ``Segment/<segment_id>/cms/<search_id>/passed_cms``
-        when a :class:`Segment` context is attached, mirroring
-        :meth:`Segment.save_cms` conventions.
 
         Returns
         -------
@@ -1190,7 +566,7 @@ class ModelSearch:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             
-            passed_cms: List[CM] = list(initial_passed) if initial_passed else []
+            passed_cms: List[CM] = []
             failed_info: List[Tuple[List[Union[str, TSFM, Feature, Tuple[Any, ...]]], List[str]]] = []
             error_log: List[Tuple[List[Any], str, str]] = []
 
@@ -1198,49 +574,15 @@ class ModelSearch:
             seen_test_names: set = set()
             test_info_header_printed = False
             batch_filter_test_infos: Dict[str, Dict[str, str]] = {}  # Collect all filter_test_info in current batch
-
-            total = total_count if total_count is not None else len(self.all_specs)
+            
+            total = len(self.all_specs)
             start_time = time.time()
-            last_log_ts = start_time
-
-            # Resolve segment-scoped log destination and ensure folder readiness.
-            segment_obj = getattr(self, "segment", None)
-            segment_id = getattr(segment_obj, "segment_id", "unknown_segment")
-            working_root = Path(getattr(segment_obj, "working_dir", Path.cwd()))
-            segment_dirs: Optional[Dict[str, Path]] = None
-            if segment_obj is not None:
-                # Guarantee the capitalized Segment root exists when a Segment
-                # context is attached so persisted artifacts follow the expected
-                # directory casing.
-                segment_dirs = ensure_segment_dirs(str(segment_id), working_root)
-
-            # Preserve the capitalized "Segment" directory as the root for
-            # per-segment artifacts and write logs to a lowercase ``log``
-            # subfolder when optional logging is enabled.
-            log_dir: Optional[Path] = None
-            if log and log_file_path is None:
-                if segment_dirs is None:
-                    segment_dirs = ensure_segment_dirs(str(segment_id), working_root)
-                log_dir = Path(segment_dirs["segment_dir"]) / "log"
-                log_dir.mkdir(parents=True, exist_ok=True)
-                log_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                log_file_path = log_dir / f"search_{segment_id}_{log_ts}.log"
-
-            if log and log_file_path is not None:
-                log_dir = log_file_path.parent
-                log_dir.mkdir(parents=True, exist_ok=True)
-                print(f"Log will be saved to: {log_file_path}")
-
+            
             # Print initial empty line for spacing
             print("")
-
-            for idx, specs in enumerate(self.all_specs, start=start_index):
-                # Calculate relative index upfront so it is available even if exceptions occur
-                relative_i = idx - start_index
-
-                # Use temporary identifiers during assessment to avoid reusing
-                # final passed_* labels before models pass all tests.
-                model_id = f"temp_{idx}"
+            
+            for i, specs in enumerate(self.all_specs):
+                model_id = f"{model_id_prefix}{i}"
                 try:
                     # Suppress all output during assessment
                     with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
@@ -1251,63 +593,9 @@ class ModelSearch:
                             test_update_func,
                             outlier_idx=outlier_idx
                         )
-
+                    
                     if isinstance(result, CM):
-                        # Promote passed models to sequential passed_* IDs so
-                        # the persisted identifier reflects success ordering.
-                        result.model_id = f"passed_{len(passed_cms) + 1}"
                         passed_cms.append(result)
-                        # Persist passed CMs immediately so long-running runs do
-                        # not lose progress if interrupted. Prefer a
-                        # search-scoped directory when provided and maintain an
-                        # up-to-date index so Segment.load_cms() can observe
-                        # in-flight results.
-                        target_dir = passed_cms_dir
-                        # When no per-search destination is provided, skip disk
-                        # persistence to avoid recreating legacy top-level
-                        # folders. This keeps all artifacts scoped under the
-                        # active search_id structure.
-                        if target_dir is not None:
-                            try:
-                                target_dir.mkdir(parents=True, exist_ok=True)
-                                created_at = datetime.datetime.now().isoformat(timespec="seconds")
-                                existing_entries: List[Dict[str, Any]] = []
-                                try:
-                                    existing_entries = load_index(target_dir)
-                                except FileNotFoundError:
-                                    existing_entries = []
-
-                                if segment_obj is not None:
-                                    entry = segment_obj._save_cm_entry(
-                                        result,
-                                        target_dir,
-                                        created_at,
-                                        overwrite=True,
-                                    )
-                                else:
-                                    save_cm(
-                                        result,
-                                        target_dir / f"{result.model_id}.pkl",
-                                        overwrite=True,
-                                    )
-                                    entry = {
-                                        "model_id": result.model_id,
-                                        "filename": f"{result.model_id}.pkl",
-                                        "segment_id": segment_id,
-                                        "created_at": created_at,
-                                    }
-
-                                existing_entries = [
-                                    e for e in existing_entries if e.get("model_id") != entry["model_id"]
-                                ]
-                                existing_entries.append(entry)
-                                save_index(target_dir, existing_entries, overwrite=True)
-                            except Exception as exc:  # pragma: no cover - best-effort persistence
-                                LOGGER.warning(
-                                    "Unable to persist passed CM %s: %s",
-                                    result.model_id,
-                                    exc,
-                                )
                         # Get filter test info from successful CM
                         mdl = result.model_in if sample == 'in' else result.model_full
                         filter_test_info = mdl.testset.filter_test_info
@@ -1318,12 +606,12 @@ class ModelSearch:
                     
                     # Update batch filter_test_info (will overwrite duplicates)
                     batch_filter_test_infos.update(filter_test_info)
-
+                    
                     # Determine batch size based on progress
-                    batch_size = 100 if relative_i < 10000 else 10000
+                    batch_size = 100 if i < 10000 else 10000
                     
                     # Process batch based on dynamic batch size or on first run
-                    if (relative_i + 1) % batch_size == 0 or relative_i == 0:
+                    if (i + 1) % batch_size == 0 or i == 0:
                         # Get all test names from the current batch
                         batch_test_names = set(batch_filter_test_infos.keys())
                         
@@ -1354,27 +642,10 @@ class ModelSearch:
                             
                 except Exception as e:
                     error_log.append((specs, type(e).__name__, str(e)))
-
-                # Emit periodic heartbeat logs to track long-running searches.
-                processed_count = idx + 1
-                if log and log_file_path:
-                    last_log_ts = self._log_progress_heartbeat(
-                        log_file=str(log_file_path),
-                        segment_id=str(segment_id),
-                        start_ts=start_time,
-                        last_log_ts=last_log_ts,
-                        evaluated_count=processed_count,
-                        passed_cms=passed_cms,
-                        failed_info=failed_info,
-                        error_log=error_log,
-                    )
-
-                if progress_callback is not None:
-                    progress_callback(processed_count)
-
+     
                 # Progress and ETA update (only every 10 iterations to reduce interference)
-                if (relative_i + 1) % 10 == 0 or relative_i == 0 or relative_i == len(self.all_specs) - 1:
-                    processed = processed_count
+                if (i + 1) % 10 == 0 or i == 0 or i == len(self.all_specs) - 1:
+                    processed = i + 1
                     elapsed = time.time() - start_time
                     progress = processed / total if total > 0 else 1
                     if progress > 0:
@@ -1390,25 +661,13 @@ class ModelSearch:
                     bar_width = 30
                     filled_width = int(bar_width * progress)
                     bar = '█' * filled_width + '-' * (bar_width - filled_width)
-                    processed_count_str = f"{processed}/{total}"
+                    processed_count = f"{processed}/{total}"
                     speed = processed / elapsed if elapsed > 0 else 0
-                    progress_line = f"Filtering Specs: {progress_pct:3d}%|{bar}| {processed_count_str} [{elapsed:,.0f}s, {speed:.2f}it/s, estimated_finish={eta}]"
+                    progress_line = f"Filtering Specs: {progress_pct:3d}%|{bar}| {processed_count} [{elapsed:,.0f}s, {speed:.2f}it/s, estimated_finish={eta}]"
                     print(f"\r{progress_line}", end='', flush=True)
             
             # Final newline after progress bar
             print("")
-            if log and log_file_path:
-                self._log_progress_heartbeat(
-                    log_file=str(log_file_path),
-                    segment_id=str(segment_id),
-                    start_ts=start_time,
-                    last_log_ts=last_log_ts,
-                    evaluated_count=total,
-                    passed_cms=passed_cms,
-                    failed_info=failed_info,
-                    error_log=error_log,
-                    force=True,
-                )
             return passed_cms, failed_info, error_log
 
     @staticmethod
@@ -1509,14 +768,10 @@ class ModelSearch:
         max_lag: int = 3,
         periods: Optional[Sequence[int]] = None,
         category_limit: int = 1,
-        regime_limit: Optional[int] = None,
         exp_sign_map: Optional[Dict[str, int]] = None,
         rank_weights: Tuple[float, float, float] = (1.0, 1.0, 1.0),
-        modeltest_update_func: Optional[Callable[[ModelBase], dict]] = None,
-        pretest_update_func: Optional[Callable[[], Dict[str, Any]]] = None,
+        test_update_func: Optional[Callable[[ModelBase], dict]] = None,
         outlier_idx: Optional[List[Any]] = None,
-        search_id: Optional[str] = None,
-        base_dir: Optional[Union[str, Path]] = None,
         **legacy_kwargs: Any
     ) -> List[CM]:
         """
@@ -1555,57 +810,24 @@ class ModelSearch:
             still accepted for backward compatibility.
         category_limit : int, default 1
             Maximum number of variables from each MEV category per combo.
-        regime_limit : Optional[int], default None
-            Maximum number of :class:`RgmVar` instances sharing the same
-            ``(regime, regime_on)`` signature per combo. Applies across the full
-            combination, including forced specifications. When ``None`` (default),
-            no limit is applied.
         exp_sign_map : Optional[Dict[str, int]], default=None
             Dictionary mapping MEV codes to expected coefficient signs for TSFM instances.
             Passed to build_spec_combos() and ultimately to DataManager.build_tsfm_specs().
         rank_weights : tuple, default (1.0, 1.0, 1.0)
             Weights for (Fit Measures, IS Error, OOS Error) when ranking models.
-        modeltest_update_func : callable, optional
-            Optional legacy updater for each CM's test set. The callable must
-            accept a single :class:`ModelBase` instance and return a mapping of
-            test alias to either a :class:`ModelTestBase` replacement or a
-            dictionary of overrides.
-        pretest_update_func : callable, optional
-            Optional updater for target/feature/spec pretests. The callable
-            takes no arguments and returns a mapping compatible with
-            :meth:`TestSet.from_functions`, enabling context-free pretest
-            overrides separate from model test updates.
+        test_update_func : callable, optional
+            Optional function to update each CM's test set.
         outlier_idx : list, optional
             List of index labels corresponding to outliers to exclude.
-        search_id : str, optional
-            Identifier for this search run. When omitted, a new value of the
-            form ``search_<segment_id>_<YYYYMMDD_HHMMSS>`` is generated.
-        base_dir : str or pathlib.Path, optional
-            Working directory for search artifacts. Defaults to the current
-            working directory.
 
         Returns
         -------
         top_models : list of CM
             The top_n CM instances sorted by composite score.
-
-        Notes
-        -----
-        When parameters and total combinations match the most recent search for
-        the same segment, the method prompts to resume the previous run using
-        its ``search_id``. On resume, previously passed models are loaded from
-        ``cms/<search_id>/passed_cms``, combinations recorded as completed in
-        ``log/<search_id>.progress`` are skipped, and progress continues in the
-        same per-search log and progress files. New runs always generate a
-        ``search_<segment_id>_<YYYYMMDD_HHMMSS>`` identifier.
         """
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             forced = forced_in or []
-
-            # Reset cached target outcome to avoid bleeding across runs when
-            # ``run_search`` is invoked multiple times on the same instance.
-            self.target_pretest_result = None
 
             legacy_max_periods = legacy_kwargs.pop("max_periods", None)
             if legacy_kwargs:
@@ -1623,12 +845,6 @@ class ModelSearch:
             else:
                 periods_summary = resolved_periods
 
-            working_root = Path(base_dir) if base_dir is not None else Path.cwd()
-            segment_label = getattr(self.segment, "segment_id", "unknown_segment")
-            sanitized_segment = sanitize_segment_id(segment_label)
-            effective_search_id = search_id or generate_search_id(sanitized_segment)
-            self.search_id = effective_search_id
-
             # 1. Configuration
             print("=== ModelSearch Configuration ===")
             print(f"Target          : {self.target}")
@@ -1640,53 +856,15 @@ class ModelSearch:
                   f"Max lag         : {max_lag}\n"
                   f"Periods         : {periods_summary}\n"
                   f"Category limit  : {category_limit}\n"
-                  f"Regime limit    : {regime_limit}\n"
                   f"Exp sign map    : {exp_sign_map}\n"
                   f"Top N           : {top_n}\n"
                   f"Rank weights    : {rank_weights}\n"
-                  f"Model test update func: {modeltest_update_func}\n"
-                  f"Pretest update func   : {pretest_update_func}\n"
+                  f"Test update func: {test_update_func}\n"
                   f"Outlier idx     : {outlier_idx}\n")
             print("==================================\n")
 
-            search_config_raw = {
-                "search_id": None,
-                "search_id": effective_search_id,
-                "segment_id": segment_label,
-                "target": self.target,
-                "model_cls": self.model_cls.__name__,
-                "model_type": self.model_type,
-                "target_base": self.target_base,
-                "target_exposure": self.target_exposure,
-                "max_var_num": max_var_num,
-                "desired_pool": desired_pool,
-                "forced_in": forced,
-                "sample": sample,
-                "max_lag": max_lag,
-                "periods": periods_summary,
-                "category_limit": category_limit,
-                "regime_limit": regime_limit,
-                "exp_sign_map": exp_sign_map,
-                "rank_weights": rank_weights,
-                "modeltest_update_func": modeltest_update_func,
-                "pretest_update_func": pretest_update_func,
-                "outlier_idx": outlier_idx,
-            }
-
             # Execute optional target-level pretests before heavy computations.
             self.model_pretestset = self._resolve_model_pretestset()
-            # Ensure any caller-provided pretest updates are forwarded to all
-            # configured pretests so their TestSet construction mirrors the
-            # overrides intended for the pretest stage (distinct from model
-            # evaluations).
-            if self.model_pretestset is not None and pretest_update_func is not None:
-                for pretest in (
-                    self.model_pretestset.target_test,
-                    self.model_pretestset.feature_test,
-                    self.model_pretestset.spec_test,
-                ):
-                    if pretest is not None:
-                        pretest.test_update_func = pretest_update_func
             target_test_result: Optional[Any] = None
             if (
                 self.model_pretestset is not None
@@ -1699,11 +877,7 @@ class ModelSearch:
                     target_test.target = self.target
 
                 try:
-                    # Build once so the filter decision and the tabular results
-                    # originate from the same evaluation run.
-                    target_testset = target_test.testset
-                    target_passed, _ = target_testset.filter_pass()
-                    target_test_result = target_passed
+                    target_test_result = target_test.test_filter
                 except Exception as exc:
                     print(
                         "Target pre-test raised "
@@ -1726,18 +900,15 @@ class ModelSearch:
                     print("--- Target Pre-Test Result ---")
                     if description:
                         print(description)
-                    # Leverage the aggregated view so we always display
-                    # the full set of tabular results produced during the
-                    # evaluation pass.
-                    for name, result in target_testset.all_test_results.items():
-                        print(f"{name} Test Result:\n{result}\n")
-                    print(f"Target filter passed: {target_test_result}\n")
+                    print(target_test_result)
+                    print("")
 
-                if self.model_pretestset is not None:
-                    self._propagate_target_context(target_test_result)
-            else:
-                self.target_pretest_result = None
-
+                if self.model_pretestset.feature_test is not None:
+                    self.model_pretestset.feature_test.target_test_result = (
+                        target_test_result
+                    )
+            self.target_pretest_result = target_test_result
+        
             # Warn about interpolated MEV variables within the candidate pool
             def _flatten(items: Any) -> List[Union[str, TSFM]]:
                 flat: List[Union[str, TSFM]] = []
@@ -1762,132 +933,15 @@ class ModelSearch:
                 max_lag,
                 periods=resolved_periods,
                 category_limit=category_limit,
-                regime_limit=regime_limit,
                 exp_sign_map=exp_sign_map,
             )
             print(f"Built {len(combos)} spec combinations.\n")
 
-            self.total_combos = len(combos)
-            self.completed_combos = 0
-            search_config_raw["total_combos"] = self.total_combos
-
-            # Determine whether a prior run should be resumed.
-            resume_from = 0
-            initial_passed: List[CM] = []
-            resume_paths: Optional[Dict[str, Path]] = None
-            prospective_config = self._make_serializable(search_config_raw)
-            resume_candidate = self._find_resume_candidate(
-                segment_label, working_root, prospective_config, self.total_combos
-            )
-            if resume_candidate is not None:
-                latest_search_id, _, prior_completed = resume_candidate
-                answer = input(
-                    "A previous search with identical parameters was found:\n"
-                    f"  search_id = {latest_search_id}\n"
-                    f"  total_combos = {self.total_combos}\n"
-                    "It appears that run may have been interrupted.\n"
-                    "Do you want to continue from where it stopped? [y/N]: "
-                ).strip()
-                if answer.lower() == "y":
-                    resume_paths = get_search_paths(segment_label, latest_search_id, working_root)
-                    progress_info = self._read_progress(resume_paths["progress_file"])
-                    if (
-                        progress_info is not None
-                        and progress_info.get("total_combos") == self.total_combos
-                    ):
-                        resume_from = int(progress_info.get("completed_combos", 0))
-                        initial_passed = self._load_passed_cms_from_dir(
-                            resume_paths["passed_cms_dir"], self.dm
-                        )
-                    else:
-                        # Fall back to prior completed count recorded via index when
-                        # progress metadata is missing.
-                        resume_from = prior_completed
-                        if resume_from:
-                            initial_passed = self._load_passed_cms_from_dir(
-                                resume_paths["passed_cms_dir"], self.dm
-                            )
-
-                    if resume_from:
-                        effective_search_id = latest_search_id
-                        self.search_id = effective_search_id
-                    else:
-                        resume_paths = None
-
-            if resume_paths is None:
-                effective_search_id = search_id or generate_search_id(sanitized_segment)
-                self.search_id = effective_search_id
-                resume_paths = get_search_paths(segment_label, effective_search_id, working_root)
-
-            search_paths = resume_paths
-            search_paths["search_cms_dir"].mkdir(parents=True, exist_ok=True)
-            search_paths["log_dir"].mkdir(parents=True, exist_ok=True)
-
-            search_config_raw["search_id"] = effective_search_id
-            search_config_serializable = self._make_serializable(search_config_raw)
-            self.current_search_config_raw = search_config_raw
-            self.current_search_config = search_config_serializable
-
-            with search_paths["log_file"].open("a", encoding="utf-8") as log_handle:
-                log_handle.write("=" * 80 + "\n")
-                log_handle.write(
-                    f"Search started at {datetime.datetime.now().isoformat(timespec='seconds')}\n"
-                )
-                log_handle.write(f"search_id: {effective_search_id}\n")
-                if resume_from:
-                    log_handle.write(f"Resuming from combo {resume_from + 1}.\n")
-                log_handle.write("Configuration:\n")
-                log_handle.write(json.dumps(search_config_serializable, indent=2))
-                log_handle.write("\n")
-
-            index_path = search_paths["cms_root"] / "search_index.json"
-            try:
-                existing_index = json.loads(index_path.read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                existing_index = {}
-            except json.JSONDecodeError:
-                existing_index = {}
-            existing_index[effective_search_id] = search_config_serializable
-            index_path.parent.mkdir(parents=True, exist_ok=True)
-            index_path.write_text(json.dumps(existing_index, indent=2, sort_keys=True), encoding="utf-8")
-
-            search_paths["config_file"].parent.mkdir(parents=True, exist_ok=True)
-            search_paths["config_file"].write_text(
-                json.dumps(search_config_serializable, indent=2),
-                encoding="utf-8",
-            )
-
-            self.completed_combos = resume_from
-
-            def _progress_callback(completed: int) -> None:
-                self.completed_combos = completed
-                if completed % 1000 == 0 or completed == self.total_combos:
-                    self._write_progress(
-                        search_paths["progress_file"],
-                        self.total_combos,
-                        completed,
-                    )
-
-            self._write_progress(search_paths["progress_file"], self.total_combos, resume_from)
-
-            # Skip combinations already evaluated when resuming.
-            if resume_from:
-                self.all_specs = combos[resume_from:]
-            else:
-                self.all_specs = combos
-            self._write_progress(search_paths["progress_file"], self.total_combos, 0)
-
             # 3) Filter specs
             passed, failed, errors = self.filter_specs(
                 sample=sample,
-                test_update_func=modeltest_update_func,
-                outlier_idx=outlier_idx,
-                start_index=resume_from,
-                total_count=self.total_combos,
-                log_file_path=search_paths["log_file"],
-                progress_callback=_progress_callback,
-                passed_cms_dir=search_paths["passed_cms_dir"],
-                initial_passed=initial_passed,
+                test_update_func=test_update_func,
+                outlier_idx=outlier_idx
             )
             # Print empty line after test info
             print("")  # Empty line after test info

@@ -306,7 +306,7 @@ class Interaction(Feature):
     
     Parameters
     ----------
-    var : list of str or pandas.Series
+    vars : list of str or pandas.Series
         List of variable names or Series to interact.
     interaction_type : str, default 'multiply'
         Type of interaction: 'multiply', 'divide', 'add', 'subtract', 'ratio', 'polynomial'
@@ -340,7 +340,7 @@ class Interaction(Feature):
     """
     def __init__(
         self,
-        var: List[Union[str, pd.Series]],
+        vars: List[Union[str, pd.Series]],
         interaction_type: str = 'multiply',
         powers: Optional[List[int]] = None,
         lag: int = 0,
@@ -348,25 +348,25 @@ class Interaction(Feature):
         alias: Optional[str] = None
     ):
         # Initialize with first variable as the main var
-        super().__init__(var=var[0], alias=alias)
-
+        super().__init__(var=vars[0], alias=alias)
+        
         # Store additional variables
-        self.all_vars = var
+        self.all_vars = vars
         self.interaction_type = interaction_type.lower()
-        self.powers = powers if powers else [1] * len(var)
+        self.powers = powers if powers else [1] * len(vars)
         self.lag = lag
         self.exp_sign = exp_sign
-
+        
         # Validate inputs
-        if len(var) < 2:
+        if len(vars) < 2:
             raise ValueError("At least two variables required for interaction")
         if interaction_type not in ['multiply', 'divide', 'add', 'subtract', 'ratio', 'polynomial']:
             raise ValueError(f"Unknown interaction type: {interaction_type}")
-        if powers and len(powers) != len(var):
+        if powers and len(powers) != len(vars):
             raise ValueError("Number of powers must match number of variables")
         
         # Initialize series cache for additional variables
-        self.var_series_list: List[Optional[pd.Series]] = [None] * len(var)
+        self.var_series_list: List[Optional[pd.Series]] = [None] * len(vars)
 
     @property
     def name(self) -> str:
