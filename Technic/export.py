@@ -1155,6 +1155,30 @@ class OLSModelAdapter(ExportableModel):
                             'value_type': var_name,
                             'value': float(vif_value)
                         })
+
+        # Add Partial R2 values if available
+        if hasattr(self.model, 'partial_r2') and self.model.partial_r2 is not None:
+            partial_r2_values = self.model.partial_r2
+            if isinstance(partial_r2_values, pd.Series):
+                for var_name, r2_value in partial_r2_values.items():
+                    if pd.notnull(r2_value):
+                        stats_list.append({
+                            'category': 'Model Estimation',
+                            'model': model_id,
+                            'type': 'Partial R2',
+                            'value_type': var_name,
+                            'value': float(r2_value)
+                        })
+            elif isinstance(partial_r2_values, dict):
+                for var_name, r2_value in partial_r2_values.items():
+                    if pd.notnull(r2_value):
+                        stats_list.append({
+                            'category': 'Model Estimation',
+                            'model': model_id,
+                            'type': 'Partial R2',
+                            'value_type': var_name,
+                            'value': float(r2_value)
+                        })
         
         # Add Summary Statistics for all variables
         def _append_summary_stats(data_series: Optional[pd.Series], var_name: str, category: str) -> None:
