@@ -388,6 +388,7 @@ class Segment:
         show_scens: bool = False,
         show_sens: bool = False,
         show_stab: bool = False,
+        show_backtest: bool = False,
         perf_kwargs: Optional[Dict[str, Any]] = None,
         params_kwargs: Optional[Dict[str, Any]] = None,
         test_kwargs: Optional[Dict[str, Any]] = None,
@@ -420,6 +421,8 @@ class Segment:
             Whether to include sensitivity testing plots for all scenarios.
         show_stab : bool, default False
             Whether to include stability test results for each model.
+        show_backtest : bool, default False
+            Whether to include rolling in-sample backtesting summaries for each model.
         perf_kwargs : Optional[Dict[str, Any]], default None
             Additional kwargs for performance display.
         params_kwargs : Optional[Dict[str, Any]], default None
@@ -532,6 +535,36 @@ class Segment:
                             print(f"Error generating full-sample stability test results for {cm_id}: {e}")
                     else:
                         print(f"\n=== Model: {cm_id} — No Full-Sample Model Available for Stability Testing ===")
+                        print("Full-sample model not built. Call build_cm() first.")
+
+        # Backtesting results (handled separately since it's not part of ReportSet)
+        if show_backtest:
+            for cm_id in cm_ids:
+                cm = self.cms[cm_id]
+
+                def _plot_backtest(model, label: str) -> None:
+                    try:
+                        backtest = model.backtesting_test
+                        fig = backtest.plot(show=True)
+                        if fig is None:
+                            print(f"\n=== Model: {cm_id} — {label} Backtesting ===")
+                            print("No backtesting results available.")
+                            return
+                        print(f"\n=== Model: {cm_id} — {label} Backtesting ===")
+                    except Exception as e:
+                        print(f"Error generating {label.lower()} backtesting plot for {cm_id}: {e}")
+
+                if cm.model_in is not None:
+                    _plot_backtest(cm.model_in, "In-Sample")
+                else:
+                    print(f"\n=== Model: {cm_id} — No In-Sample Model Available for Backtesting ===")
+                    print("In-sample model not built. Call build_cm() first.")
+
+                if report_sample == 'full':
+                    if cm.model_full is not None:
+                        _plot_backtest(cm.model_full, "Full-Sample")
+                    else:
+                        print(f"\n=== Model: {cm_id} — No Full-Sample Model Available for Backtesting ===")
                         print("Full-sample model not built. Call build_cm() first.")
     
     def plot_vars(
@@ -1224,6 +1257,7 @@ class Segment:
             - 'stability_testing': Walk-forward stability testing results
             - 'stability_testing_stats': Walk-forward stability testing statistical metrics
             - 'scenario_testing_stats': Scenario testing statistical metrics for base variables
+            - 'backtesting_results': Rolling in-sample backtesting results
         overwrite : bool, default True
             Whether to overwrite existing files. If False and files exist, the operation
             will be cancelled with a warning message.
@@ -1278,6 +1312,8 @@ class Segment:
                 expected_files.append(output_dir / 'stability_testing_stats.csv')
             elif content_type == 'scenario_testing_stats':
                 expected_files.append(output_dir / 'scenario_testing_stats.csv')
+            elif content_type == 'backtesting_results':
+                expected_files.append(output_dir / 'backtesting_results.csv')
         
         # Check if any expected files exist
         existing_files = [f for f in expected_files if f.exists()]
@@ -1427,7 +1463,8 @@ class Segment:
             'test_results': 'test_results.csv',
             'stability_testing': 'stability_testing.csv',
             'stability_testing_stats': 'stability_testing_stats.csv',
-            'scenario_testing_stats': 'scenario_testing_stats.csv'
+            'scenario_testing_stats': 'scenario_testing_stats.csv',
+            'backtesting_results': 'backtesting_results.csv'
         }
         
         empty_files = []
@@ -1483,6 +1520,8 @@ class Segment:
                 self._diagnose_stability_stats_empty(model_diagnostics)
             elif content_type == 'scenario_testing_stats':
                 self._diagnose_scenario_stats_empty(model_diagnostics)
+            elif content_type == 'backtesting_results':
+                self._diagnose_backtesting_empty(model_diagnostics)
         
         # Provide general recommendations
         self._provide_general_recommendations(empty_files, model_diagnostics)
@@ -1508,6 +1547,7 @@ class Segment:
             'has_scen_manager': False,
             'has_testset': False,
             'has_stability_test': False,
+            'has_backtesting': False,
             'model_type': type(cm.model_in).__name__ if cm.model_in else 'None',
             'fitted_successfully': False,
             'has_data': False,
@@ -1527,6 +1567,8 @@ class Segment:
                                              cm.model_in.scen_manager is not None)
             diagnostics['has_stability_test'] = (hasattr(cm.model_in, 'stability_test') and 
                                                cm.model_in.stability_test is not None)
+            diagnostics['has_backtesting'] = (hasattr(cm.model_in, 'backtesting_test') and
+                                            cm.model_in.backtesting_test is not None)
             
             # Check for scenario and sensitivity data
             if diagnostics['has_scen_manager']:
@@ -1678,6 +1720,23 @@ class Segment:
             print("     → Base variable quarterly forecasts not available")
             print("     → Check if base variable scenario forecasting was completed")
 
+    def _diagnose_backtesting_empty(self, model_diagnostics: Dict[str, Dict]) -> None:
+        """Provide diagnostic information for empty backtesting results."""
+        print("   🔍 Possible causes:")
+
+        models_without_backtesting = [mid for mid, diag in model_diagnostics.items() if not diag['has_backtesting']]
+        models_not_fitted = [mid for mid, diag in model_diagnostics.items() if not diag['fitted_successfully']]
+
+        if models_without_backtesting:
+            print(f"   • Models without backtesting test: {', '.join(models_without_backtesting)}")
+            print("     → Backtesting helper not available")
+            print("     → Ensure model is built with backtesting_test_cls")
+
+        if models_not_fitted:
+            print(f"   • Models that failed to fit: {', '.join(models_not_fitted)}")
+            print("     → Backtesting requires fitted in-sample values")
+            print("     → Fit the model before exporting backtesting results")
+
     def _provide_general_recommendations(self, empty_files: List[Tuple[str, str]], model_diagnostics: Dict[str, Dict]) -> None:
         """Provide general recommendations based on empty file analysis."""
         if not empty_files:
@@ -1712,6 +1771,11 @@ class Segment:
             print("   • Stability testing exports are empty:")
             print("     → Run walk-forward stability tests: model.stability_test.run()")
             print("     → Ensure sufficient historical data for multiple periods")
+
+        if 'backtesting_results' in empty_content_types:
+            print("   • Backtesting exports are empty:")
+            print("     → Ensure model is fitted with in-sample predictions")
+            print("     → Verify base_predictor is available for base conversions")
         
         if 'test_results' in empty_content_types:
             print("   • Test results are empty:")

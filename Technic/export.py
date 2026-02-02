@@ -35,6 +35,7 @@ SENSITIVITY_COLUMNS = ['model', 'test', 'scenario_name', 'severity', 'variable/p
 STABILITY_COLUMNS = ['date', 'model', 'test_period', 'value_type', 'value']
 STABILITY_STATS_COLUMNS = ['model', 'trial', 'category', 'value_type', 'value']
 SCENARIO_STATS_COLUMNS = ['model', 'scenario_name', 'metric', 'severity', 'value']
+BACKTESTING_COLUMNS = ['date', 'model', 'route', 'value']
 
 # Series type constants
 SERIES_TYPE_TARGET = 'Target'
@@ -60,7 +61,8 @@ EXPORT_CONTENT_TYPES = {
     'sensitivity_testing': 'Sensitivity testing results for parameters and inputs',
     'stability_testing': 'Walk-forward stability testing results',
     'stability_testing_stats': 'Walk-forward stability testing statistical metrics',
-    'scenario_testing_stats': 'Scenario testing statistical metrics for base variables'
+    'scenario_testing_stats': 'Scenario testing statistical metrics for base variables',
+    'backtesting_results': 'Rolling in-sample backtesting results'
 }
 
 # Utility functions for scenario testing
@@ -219,6 +221,11 @@ class ExportableModel(ABC):
         pass
 
     @abstractmethod
+    def get_backtesting_results(self) -> Optional[pd.DataFrame]:
+        """Return rolling in-sample backtesting results in long format."""
+        pass
+
+    @abstractmethod
     def get_scenario_stats_results(self) -> Optional[pd.DataFrame]:
         """Return scenario testing statistical metrics for base variables."""
         pass
@@ -299,6 +306,11 @@ class ExportStrategy(ABC):
     @abstractmethod
     def export_stability_stats(self, model: ExportableModel, output_dir: Path) -> None:
         """Export walk-forward stability testing statistical metrics to CSV if available."""
+        pass
+
+    @abstractmethod
+    def export_backtesting_results(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export rolling in-sample backtesting results to CSV if available."""
         pass
 
     @abstractmethod
@@ -438,6 +450,14 @@ class ExportManager:
                                 f"Failed to export scenario_testing_stats for {model.get_model_id()}: {e}"
                             )
 
+                    if self.strategy.should_export('backtesting_results'):
+                        try:
+                            self.strategy.export_backtesting_results(model, output_dir)
+                        except Exception as e:
+                            self._log_warning(
+                                f"Failed to export backtesting_results for {model.get_model_id()}: {e}"
+                            )
+
                 except Exception as e:
                     self._log_error(
                         f"Failed to process model {model.get_model_id()}: {e}"
@@ -472,6 +492,7 @@ class OLSExportStrategy(ExportStrategy):
         self._stability_chunks = []  # New container for stability results
         self._stability_stats_chunks = [] # New container for stability stats
         self._scenario_stats_chunks = [] # New container for scenario stats
+        self._backtesting_chunks = [] # New container for backtesting results
         # Per-content chunk counters
         self._chunk_sizes = {
             'timeseries_data': 0,
@@ -481,7 +502,8 @@ class OLSExportStrategy(ExportStrategy):
             'sensitivity_testing': 0,
             'stability_testing': 0,
             'stability_testing_stats': 0,
-            'scenario_testing_stats': 0
+            'scenario_testing_stats': 0,
+            'backtesting_results': 0
         }
         self._written_files = set()  # Track which files have been written
     
@@ -534,6 +556,11 @@ class OLSExportStrategy(ExportStrategy):
                 'chunks': self._scenario_stats_chunks,
                 'columns': SCENARIO_STATS_COLUMNS,
                 'filename': 'scenario_testing_stats.csv'
+            },
+            'backtesting_results': {
+                'chunks': self._backtesting_chunks,
+                'columns': BACKTESTING_COLUMNS,
+                'filename': 'backtesting_results.csv'
             }
         }
         
@@ -696,6 +723,18 @@ class OLSExportStrategy(ExportStrategy):
             self._chunk_sizes['stability_testing_stats'] += len(df)
             if self._chunk_sizes['stability_testing_stats'] >= self.chunk_size:
                 self._write_chunk(output_dir, 'stability_testing_stats')
+
+    def export_backtesting_results(self, model: ExportableModel, output_dir: Path) -> None:
+        """Export rolling in-sample backtesting results with chunking support."""
+        if not self.should_export('backtesting_results'):
+            return
+
+        df = model.get_backtesting_results()
+        if isinstance(df, pd.DataFrame):
+            self._backtesting_chunks.append(df)
+            self._chunk_sizes['backtesting_results'] += len(df)
+            if self._chunk_sizes['backtesting_results'] >= self.chunk_size:
+                self._write_chunk(output_dir, 'backtesting_results')
     
     def export_scenario_stats(self, model: ExportableModel, output_dir: Path) -> None:
         """Export scenario testing statistical metrics with chunking support."""
@@ -736,6 +775,9 @@ class OLSExportStrategy(ExportStrategy):
         
         if self.should_export('scenario_testing_stats'):
             self._write_chunk(output_dir, 'scenario_testing_stats', force_write=True)
+
+        if self.should_export('backtesting_results'):
+            self._write_chunk(output_dir, 'backtesting_results', force_write=True)
         
         # Reset containers but preserve written files tracking
         written_files_backup = self._written_files.copy()
@@ -1854,6 +1896,21 @@ class OLSModelAdapter(ExportableModel):
         df = stats_df.copy()
         df.insert(0, 'model', self._model_id)
         return df[STABILITY_STATS_COLUMNS]
+
+    def get_backtesting_results(self) -> Optional[pd.DataFrame]:
+        """Return rolling in-sample backtesting results in long format."""
+        try:
+            backtest = self.model.backtesting_test
+        except Exception:
+            return None
+
+        results_df = getattr(backtest, 'results_df', None)
+        if results_df is None or results_df.empty:
+            return None
+
+        df = results_df.copy()
+        df.insert(1, 'model', self._model_id)
+        return df[BACKTESTING_COLUMNS]
 
     def get_scenario_stats_results(self) -> Optional[pd.DataFrame]:
         """Return scenario testing statistical metrics for base variables."""
