@@ -1532,11 +1532,18 @@ class OLS(ModelBase):
         self.fvalue = res.fvalue
         self.f_pvalue = res.f_pvalue
         self.llf = res.llf  # Store log-likelihood
+        # Partial R2 per driver (excluding constant)
+        try:
+            df_resid = float(res.df_resid)
+            partial_r2 = (self.tvalues ** 2) / ((self.tvalues ** 2) + df_resid)
+            self.partial_r2 = partial_r2.drop(index='const', errors='ignore')
+        except Exception:
+            self.partial_r2 = pd.Series(dtype=float)
         # VIF
         self.vif = pd.Series({
             col: variance_inflation_factor(Xc.values, i)
             for i, col in enumerate(Xc.columns)
-        })
+        }).drop(index='const', errors='ignore')
         self.is_fitted = True
 
         # Set initial conf_int, AIC, BIC
