@@ -80,7 +80,8 @@ class ModelEvaluator:
             metrics['in_sample'] = {
                 'R2': in_perf.get('R²', in_perf.get('R2', None)),
                 'Adj_R2': in_perf.get('Adj R²', in_perf.get('Adj R2', None)),
-                'MAPE': in_perf.get('MAPE', None),
+                'ME': in_perf.get('ME', None),
+                'MAE': in_perf.get('MAE', None),
                 'RMSE': in_perf.get('RMSE', None)
             }
 
@@ -92,7 +93,8 @@ class ModelEvaluator:
                 raise ValueError("Model out-of-sample performance measures are empty.")
 
             metrics['out_sample'] = {
-                'MAPE': out_perf.get('MAPE', None),
+                'ME': out_perf.get('ME', None),
+                'MAE': out_perf.get('MAE', None),
                 'RMSE': out_perf.get('RMSE', None)
             }
         else:
@@ -135,7 +137,7 @@ class ModelEvaluator:
         prompt += """
                 **Instructions:**
                 1. Evaluate the In-Sample fit quality (R2, Adj R2). High is generally > 0.6, but depends on context.
-                2. Compare In-Sample vs Out-of-Sample errors (MAPE/RMSE) to check for overfitting. If OOS error is significantly higher than IS error, flag it.
+                2. Compare In-Sample vs Out-of-Sample errors (MAE/RMSE) to check for overfitting. If OOS error is significantly higher than IS error, flag it.
                 3. Provide a final verdict: "Strong Candidate", "Potential Candidate" (with caveats), or "Weak Candidate".
                 4. Keep the response under 150 words.
                 """
