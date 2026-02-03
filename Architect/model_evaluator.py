@@ -15,7 +15,7 @@ class ModelEvaluator:
     and generating a natural-language summary using an LLM (Gemini).
     """
 
-    def __init__(self, api_key: Optional[str] = None, model_name: str = 'gemini-pro'):
+    def __init__(self, api_key: Optional[str] = None, model_name: str = 'gemini-3-flash-preview'):
         """
         Initialize the ModelEvaluator.
 
@@ -104,16 +104,16 @@ class ModelEvaluator:
         Construct the prompt for the LLM.
         """
         prompt = f"""
-You are an expert econometrician and model evaluator.
-Review the following Candidate Model (CM) performance metrics and provide a concise, professional summary of its fitness.
+                You are an expert econometrician and model evaluator.
+                Review the following Candidate Model (CM) performance metrics and provide a concise, professional summary of its fitness.
 
-**Model Identification:**
-- ID: {metrics['model_id']}
-- Target: {metrics['target']}
-- Formula: {metrics['formula']}
+                **Model Identification:**
+                - ID: {metrics['model_id']}
+                - Target: {metrics['target']}
+                - Formula: {metrics['formula']}
 
-**In-Sample Performance:**
-"""
+                **In-Sample Performance:**
+                """
         in_sample = metrics.get('in_sample', {})
         for k, v in in_sample.items():
             if v is not None:
@@ -131,12 +131,12 @@ Review the following Candidate Model (CM) performance metrics and provide a conc
                 prompt += f"- {k}: N/A\n"
 
         prompt += """
-**Instructions:**
-1. Evaluate the In-Sample fit quality (R2, Adj R2). High is generally > 0.8, but depends on context.
-2. Compare In-Sample vs Out-of-Sample errors (MAPE/RMSE) to check for overfitting. If OOS error is significantly higher than IS error, flag it.
-3. Provide a final verdict: "Strong Candidate", "Potential Candidate" (with caveats), or "Weak Candidate".
-4. Keep the response under 150 words.
-"""
+                **Instructions:**
+                1. Evaluate the In-Sample fit quality (R2, Adj R2). High is generally > 0.8, but depends on context.
+                2. Compare In-Sample vs Out-of-Sample errors (MAPE/RMSE) to check for overfitting. If OOS error is significantly higher than IS error, flag it.
+                3. Provide a final verdict: "Strong Candidate", "Potential Candidate" (with caveats), or "Weak Candidate".
+                4. Keep the response under 150 words.
+                """
         return prompt
 
     def evaluate(self, cm) -> str:
