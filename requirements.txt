@@ -8,3 +8,5 @@ PyYAML
 arch
 tqdm
 cloudpickle
+google-generativeai
+python-dotenv
