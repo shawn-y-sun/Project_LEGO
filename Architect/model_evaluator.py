@@ -38,6 +38,8 @@ class ModelEvaluator:
                 # Log error or print warning, but don't crash init
                 # (allows instantiation without key for limited usage)
                 print(f"Warning: Failed to configure Gemini API: {e}")
+        else:
+            print("Warning: Gemini API key not found. Please set GENAI_API_KEY environment variable or pass it to the constructor.")
 
     def _extract_metrics(self, cm) -> Dict[str, Any]:
         """
