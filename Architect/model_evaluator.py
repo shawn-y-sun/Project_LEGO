@@ -134,7 +134,7 @@ class ModelEvaluator:
 
         prompt += """
                 **Instructions:**
-                1. Evaluate the In-Sample fit quality (R2, Adj R2). High is generally > 0.8, but depends on context.
+                1. Evaluate the In-Sample fit quality (R2, Adj R2). High is generally > 0.6, but depends on context.
                 2. Compare In-Sample vs Out-of-Sample errors (MAPE/RMSE) to check for overfitting. If OOS error is significantly higher than IS error, flag it.
                 3. Provide a final verdict: "Strong Candidate", "Potential Candidate" (with caveats), or "Weak Candidate".
                 4. Keep the response under 150 words.
