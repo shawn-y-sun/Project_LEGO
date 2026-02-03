@@ -74,23 +74,20 @@ class ModelEvaluator:
                 raise ValueError("Model in-sample performance measures are empty.")
 
             # Keys are usually 'R²', 'Adj R²', 'RMSE', 'MAE', 'ME'
-            # We map them to standard keys for the prompt
             metrics['in_sample'] = {
                 'R2': in_perf.get('R²', in_perf.get('R2', None)),
                 'Adj_R2': in_perf.get('Adj R²', in_perf.get('Adj R2', None)),
-                'MAPE': in_perf.get('MAPE', None),
+                'MAE': in_perf.get('MAE', None),
                 'RMSE': in_perf.get('RMSE', None)
             }
 
             # Access out-of-sample metrics
-            # Note: out_perf_measures is a property of the model instance (model_in)
-            # if the testset was built with OOS measures.
             out_perf = cm.model_in.out_perf_measures
             if out_perf.empty:
                 raise ValueError("Model out-of-sample performance measures are empty.")
 
             metrics['out_sample'] = {
-                'MAPE': out_perf.get('MAPE', None),
+                'MAE': out_perf.get('MAE', None),
                 'RMSE': out_perf.get('RMSE', None)
             }
         else:
@@ -133,7 +130,7 @@ Review the following Candidate Model (CM) performance metrics and provide a conc
         prompt += """
 **Instructions:**
 1. Evaluate the In-Sample fit quality (R2, Adj R2). High is generally > 0.8, but depends on context.
-2. Compare In-Sample vs Out-of-Sample errors (MAPE/RMSE) to check for overfitting. If OOS error is significantly higher than IS error, flag it.
+2. Compare In-Sample vs Out-of-Sample errors (MAE, RMSE) to check for overfitting. If OOS error is significantly higher than IS error, flag it.
 3. Provide a final verdict: "Strong Candidate", "Potential Candidate" (with caveats), or "Weak Candidate".
 4. Keep the response under 150 words.
 """

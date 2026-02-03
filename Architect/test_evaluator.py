@@ -26,12 +26,12 @@ class TestModelEvaluator(unittest.TestCase):
             'R²': 0.85,
             'Adj R²': 0.83,
             'RMSE': 120.5,
-            'MAPE': 0.05
+            'MAE': 85.0  # Changed from MAPE to MAE
         })
 
         self.mock_model_in.out_perf_measures = pd.Series({
             'RMSE': 130.0,
-            'MAPE': 0.06
+            'MAE': 90.0  # Changed from MAPE to MAE
         })
 
         self.mock_cm.model_in = self.mock_model_in
@@ -66,6 +66,8 @@ class TestModelEvaluator(unittest.TestCase):
         self.assertIn("0.8300", prompt) # Adj R2
         self.assertIn("120.5000", prompt) # RMSE IS
         self.assertIn("130.0000", prompt) # RMSE OOS
+        self.assertIn("85.0000", prompt)  # MAE IS
+        self.assertIn("90.0000", prompt)  # MAE OOS
 
     def test_missing_api_key(self):
         # Unset env var if present
