@@ -75,22 +75,40 @@ class TestModelEvaluator(unittest.TestCase):
             self.assertTrue(result.startswith("Error: Gemini API key not found"))
 
     @patch('Architect.model_evaluator.genai')
-    def test_metrics_extraction_missing_oos(self, mock_genai):
+    def test_metrics_extraction_missing_oos_error(self, mock_genai):
         # Setup mock with empty OOS
         self.mock_model_in.out_perf_measures = pd.Series(dtype=float)
 
         mock_model_instance = MagicMock()
-        mock_response = MagicMock()
-        mock_response.text = "Summary"
-        mock_model_instance.generate_content.return_value = mock_response
         mock_genai.GenerativeModel.return_value = mock_model_instance
 
         evaluator = ModelEvaluator(api_key='dummy')
-        evaluator.evaluate(self.mock_cm)
+        result = evaluator.evaluate(self.mock_cm)
 
-        args, _ = mock_model_instance.generate_content.call_args
-        prompt = args[0]
-        self.assertIn("No out-of-sample metrics available", prompt)
+        # Assert that the result contains the error message about OOS metrics
+        self.assertIn("Error extracting metrics", result)
+        self.assertIn("Model out-of-sample performance measures are empty", result)
+
+        # Ensure LLM was NOT called
+        mock_model_instance.generate_content.assert_not_called()
+
+    @patch('Architect.model_evaluator.genai')
+    def test_metrics_extraction_missing_is_error(self, mock_genai):
+        # Setup mock with empty IS
+        self.mock_model_in.in_perf_measures = pd.Series(dtype=float)
+
+        mock_model_instance = MagicMock()
+        mock_genai.GenerativeModel.return_value = mock_model_instance
+
+        evaluator = ModelEvaluator(api_key='dummy')
+        result = evaluator.evaluate(self.mock_cm)
+
+        # Assert that the result contains the error message about IS metrics
+        self.assertIn("Error extracting metrics", result)
+        self.assertIn("Model in-sample performance measures are empty", result)
+
+        # Ensure LLM was NOT called
+        mock_model_instance.generate_content.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()

@@ -52,6 +52,11 @@ class ModelEvaluator:
         -------
         dict
             Dictionary containing extracted metrics.
+
+        Raises
+        ------
+        ValueError
+            If in-sample or out-of-sample performance metrics are empty.
         """
         metrics = {
             'model_id': getattr(cm, 'model_id', 'Unknown'),
@@ -65,25 +70,32 @@ class ModelEvaluator:
         if hasattr(cm, 'model_in') and cm.model_in is not None:
             # We use the public property in_perf_measures which aggregates Fit and Error measures
             in_perf = cm.model_in.in_perf_measures
-            if not in_perf.empty:
-                # Keys are usually 'R²', 'Adj R²', 'RMSE', 'MAE', 'ME'
-                # We map them to standard keys for the prompt
-                metrics['in_sample'] = {
-                    'R2': in_perf.get('R²', in_perf.get('R2', None)),
-                    'Adj_R2': in_perf.get('Adj R²', in_perf.get('Adj R2', None)),
-                    'MAPE': in_perf.get('MAPE', None),
-                    'RMSE': in_perf.get('RMSE', None)
-                }
+            if in_perf.empty:
+                raise ValueError("Model in-sample performance measures are empty.")
+
+            # Keys are usually 'R²', 'Adj R²', 'RMSE', 'MAE', 'ME'
+            # We map them to standard keys for the prompt
+            metrics['in_sample'] = {
+                'R2': in_perf.get('R²', in_perf.get('R2', None)),
+                'Adj_R2': in_perf.get('Adj R²', in_perf.get('Adj R2', None)),
+                'MAPE': in_perf.get('MAPE', None),
+                'RMSE': in_perf.get('RMSE', None)
+            }
 
             # Access out-of-sample metrics
             # Note: out_perf_measures is a property of the model instance (model_in)
             # if the testset was built with OOS measures.
             out_perf = cm.model_in.out_perf_measures
-            if not out_perf.empty:
-                metrics['out_sample'] = {
-                    'MAPE': out_perf.get('MAPE', None),
-                    'RMSE': out_perf.get('RMSE', None)
-                }
+            if out_perf.empty:
+                raise ValueError("Model out-of-sample performance measures are empty.")
+
+            metrics['out_sample'] = {
+                'MAPE': out_perf.get('MAPE', None),
+                'RMSE': out_perf.get('RMSE', None)
+            }
+        else:
+            # Fallback if model_in is missing entirely
+             raise ValueError("Model in-sample performance measures are empty (model_in is None).")
 
         return metrics
 
@@ -111,14 +123,12 @@ Review the following Candidate Model (CM) performance metrics and provide a conc
 
         prompt += "\n**Out-of-Sample Performance:**\n"
         out_sample = metrics.get('out_sample', {})
-        if out_sample:
-            for k, v in out_sample.items():
-                if v is not None:
-                    prompt += f"- {k}: {v:.4f}\n"
-                else:
-                    prompt += f"- {k}: N/A\n"
-        else:
-            prompt += "No out-of-sample metrics available.\n"
+        # OOS is now guaranteed by _extract_metrics
+        for k, v in out_sample.items():
+            if v is not None:
+                prompt += f"- {k}: {v:.4f}\n"
+            else:
+                prompt += f"- {k}: N/A\n"
 
         prompt += """
 **Instructions:**
@@ -154,7 +164,11 @@ Review the following Candidate Model (CM) performance metrics and provide a conc
              except Exception as e:
                  return f"Error configuring Gemini API: {str(e)}"
 
-        metrics = self._extract_metrics(cm)
+        try:
+            metrics = self._extract_metrics(cm)
+        except ValueError as ve:
+             return f"Error extracting metrics: {str(ve)}"
+
         prompt = self._construct_prompt(metrics)
 
         try:
