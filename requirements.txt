@@ -10,3 +10,4 @@ tqdm
 cloudpickle
 google-generativeai
 python-dotenv
+google
