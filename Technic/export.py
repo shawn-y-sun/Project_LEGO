@@ -1224,7 +1224,7 @@ class OLSModelAdapter(ExportableModel):
         def aggregate_to_quarterly(series: pd.Series) -> pd.Series:
             series_copy = series.copy()
             series_copy.index = pd.to_datetime(series_copy.index)
-            quarterly_grouped = series_copy.groupby(pd.Grouper(freq='Q'))
+            quarterly_grouped = series_copy.groupby(pd.Grouper(freq='QE'))
             if qtr_method == 'mean':
                 result = quarterly_grouped.mean()
             elif qtr_method == 'sum':
@@ -1497,7 +1497,7 @@ class OLSModelAdapter(ExportableModel):
 
                             driver_q = driver_data.copy()
                             driver_q.index = pd.to_datetime(driver_q.index)
-                            driver_q = driver_q.groupby(pd.Grouper(freq='Q')).mean()
+                            driver_q = driver_q.groupby(pd.Grouper(freq='QE')).mean()
                             driver_q.index = driver_q.index.to_period('Q').to_timestamp(how='end').normalize()
                             for driver_name in driver_q.columns:
                                 driver_series = driver_q[driver_name].dropna()

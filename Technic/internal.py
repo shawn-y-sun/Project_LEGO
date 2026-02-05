@@ -372,7 +372,7 @@ class DataLoader(ABC):
         
         >>> # Load from pre-processed DataFrames
         >>> base_scen = pd.DataFrame({
-        ...     "date": pd.date_range("2024-01-01", "2025-12-31", freq="M"),
+        ...     "date": pd.date_range("2024-01-01", "2025-12-31", freq="ME"),
         ...     "gdp_growth": np.random.normal(2, 0.5, 24),
         ...     "unemployment": np.random.normal(4, 0.3, 24)
         ... })
@@ -542,11 +542,11 @@ class DataLoader(ABC):
         >>> loader = TimeSeriesLoader(freq="M", scen_p0="2023-12-31")
         >>> # Create sample historical and scenario data
         >>> historical = pd.DataFrame({
-        ...     "date": pd.date_range("2023-01-01", "2023-12-31", freq="M"),
+        ...     "date": pd.date_range("2023-01-01", "2023-12-31", freq="ME"),
         ...     "value": range(12)
         ... }).set_index("date")
         >>> forecast = pd.DataFrame({
-        ...     "date": pd.date_range("2024-01-01", "2024-12-31", freq="M"),
+        ...     "date": pd.date_range("2024-01-01", "2024-12-31", freq="ME"),
         ...     "value": range(12, 24)
         ... }).set_index("date")
         >>> # Load data
@@ -611,15 +611,15 @@ class DataLoader(ABC):
         >>> loader = TimeSeriesLoader(freq="M", scen_p0="2023-12-31")
         >>> # Create sample data
         >>> historical = pd.DataFrame({
-        ...     "date": pd.date_range("2023-01-01", "2023-12-31", freq="M"),
+        ...     "date": pd.date_range("2023-01-01", "2023-12-31", freq="ME"),
         ...     "value": range(12)
         ... }).set_index("date")
         >>> base_scen = pd.DataFrame({
-        ...     "date": pd.date_range("2024-01-01", "2024-12-31", freq="M"),
+        ...     "date": pd.date_range("2024-01-01", "2024-12-31", freq="ME"),
         ...     "value": range(12, 24)
         ... }).set_index("date")
         >>> adverse_scen = pd.DataFrame({
-        ...     "date": pd.date_range("2024-01-01", "2024-12-31", freq="M"),
+        ...     "date": pd.date_range("2024-01-01", "2024-12-31", freq="ME"),
         ...     "value": range(-12, 0)
         ... }).set_index("date")
         >>> # Load data
@@ -669,12 +669,12 @@ class DataLoader(ABC):
         >>> # Create sample panel data
         >>> historical = pd.DataFrame({
         ...     "firm_id": [1, 1, 2, 2] * 6,
-        ...     "report_date": pd.date_range("2023-01-01", periods=12, freq="M").repeat(2),
+        ...     "report_date": pd.date_range("2023-01-01", periods=12, freq="ME").repeat(2),
         ...     "value": range(24)
         ... })
         >>> base_scen = pd.DataFrame({
         ...     "firm_id": [1, 1, 2, 2] * 6,
-        ...     "report_date": pd.date_range("2024-01-01", periods=12, freq="M").repeat(2),
+        ...     "report_date": pd.date_range("2024-01-01", periods=12, freq="ME").repeat(2),
         ...     "value": range(24, 48)
         ... })
         >>> # Load data
@@ -731,7 +731,7 @@ class TimeSeriesLoader(DataLoader):
     >>> out_sample = loader.internal_data.loc[loader.out_sample_idx]
     
     >>> # Load quarterly data from DataFrame
-    >>> dates = pd.date_range("2020-01-01", "2023-12-31", freq="Q")
+    >>> dates = pd.date_range("2020-01-01", "2023-12-31", freq="QE")
     >>> df = pd.DataFrame({"value": range(len(dates))}, index=dates)
     >>> loader = TimeSeriesLoader(freq="Q")
     >>> loader.load(df)  # DataFrame already has datetime index
@@ -834,7 +834,7 @@ class TimeSeriesLoader(DataLoader):
         
         >>> # Load from DataFrame
         >>> df = pd.DataFrame({
-        ...     "date": pd.date_range("2020-01-01", "2023-12-31", freq="M"),
+        ...     "date": pd.date_range("2020-01-01", "2023-12-31", freq="ME"),
         ...     "value": np.random.randn(48)
         ... })
         >>> loader.load(df, date_col="date")  # With date column
@@ -1422,7 +1422,7 @@ class PanelLoader(DataLoader):
         >>> # Random splitting
         >>> df = pd.DataFrame({
         ...     "entity_id": [1, 1, 2, 2] * 3,
-        ...     "date": pd.date_range("2023-01-01", periods=12, freq="M").repeat(2),
+        ...     "date": pd.date_range("2023-01-01", periods=12, freq="ME").repeat(2),
         ...     "value": range(24)
         ... })
         >>> loader = PanelLoader(split_method="random", test_size=0.25, freq="M")
@@ -1521,13 +1521,13 @@ class PPNRInternalLoader(TimeSeriesLoader):
     ... )
     >>> # Create sample data
     >>> historical = pd.DataFrame({
-    ...     "date": pd.date_range("2020-01-01", "2023-12-31", freq="M"),
+    ...     "date": pd.date_range("2020-01-01", "2023-12-31", freq="ME"),
     ...     "net_interest_income": np.random.normal(1000, 50, 48),
     ...     "non_interest_income": np.random.normal(500, 30, 48),
     ...     "operating_expense": np.random.normal(800, 40, 48)
     ... })
     >>> base_scen = pd.DataFrame({
-    ...     "date": pd.date_range("2024-01-01", "2025-12-31", freq="M"),
+    ...     "date": pd.date_range("2024-01-01", "2025-12-31", freq="ME"),
     ...     "net_interest_income": np.random.normal(1100, 60, 24),
     ...     "non_interest_income": np.random.normal(550, 35, 24),
     ...     "operating_expense": np.random.normal(850, 45, 24)
@@ -1593,13 +1593,13 @@ class SMRInternalLoader(PanelLoader):
     >>> # Create sample data
     >>> df = pd.DataFrame({
     ...     "account_id": [1001, 1001, 1002, 1002] * 3,
-    ...     "date": pd.date_range("2023-01-01", periods=6, freq="M").repeat(2),
+    ...     "date": pd.date_range("2023-01-01", periods=6, freq="ME").repeat(2),
     ...     "balance": np.random.lognormal(10, 0.5, 12),
     ...     "interest_rate": np.random.normal(0.05, 0.01, 12)
     ... })
     >>> base_scen = pd.DataFrame({
     ...     "account_id": [1001, 1001, 1002, 1002] * 2,
-    ...     "date": pd.date_range("2024-01-01", periods=4, freq="M").repeat(2),
+    ...     "date": pd.date_range("2024-01-01", periods=4, freq="ME").repeat(2),
     ...     "balance": np.random.lognormal(10, 0.6, 8),
     ...     "interest_rate": np.random.normal(0.06, 0.015, 8)
     ... })

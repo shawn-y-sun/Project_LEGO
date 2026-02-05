@@ -224,3 +224,43 @@ def GR2(series: pd.Series) -> pd.Series:
 def GR3(series: pd.Series) -> pd.Series:
     """3-period growth rate."""
     return GR(series, periods=3)
+
+
+def DF4(series: pd.Series) -> pd.Series:
+    """4-period difference."""
+    return DF(series, periods=4)
+
+
+def DF6(series: pd.Series) -> pd.Series:
+    """6-period difference."""
+    return DF(series, periods=6)
+
+
+def DF9(series: pd.Series) -> pd.Series:
+    """9-period difference."""
+    return DF(series, periods=9)
+
+
+def DF12(series: pd.Series) -> pd.Series:
+    """12-period difference."""
+    return DF(series, periods=12)
+
+
+def GR4(series: pd.Series) -> pd.Series:
+    """4-period growth rate."""
+    return GR(series, periods=4)
+
+
+def GR6(series: pd.Series) -> pd.Series:
+    """6-period growth rate."""
+    return GR(series, periods=6)
+
+
+def GR9(series: pd.Series) -> pd.Series:
+    """9-period growth rate."""
+    return GR(series, periods=9)
+
+
+def GR12(series: pd.Series) -> pd.Series:
+    """12-period growth rate."""
+    return GR(series, periods=12)
