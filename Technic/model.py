@@ -1496,6 +1496,7 @@ class OLS(ModelBase):
         self.bse = None
         self.tvalues = None
         self.vif = None
+        self.partial_r2 = None
         self.fvalue = None
         self.f_pvalue = None
         self.llf = None  # Log-likelihood
@@ -1532,11 +1533,6 @@ class OLS(ModelBase):
         self.fvalue = res.fvalue
         self.f_pvalue = res.f_pvalue
         self.llf = res.llf  # Store log-likelihood
-        # VIF
-        self.vif = pd.Series({
-            col: variance_inflation_factor(Xc.values, i)
-            for i, col in enumerate(Xc.columns)
-        })
         self.is_fitted = True
 
         # Set initial conf_int, AIC, BIC
@@ -1772,6 +1768,32 @@ class OLS(ModelBase):
         if not self.is_fitted or self.fitted is None:
             return pd.DataFrame()
         
+        # Compute VIF from design matrix and cache non-constant slice.
+        vif_series = pd.Series(np.nan, index=self.params.index, dtype=float)
+        try:
+            Xc = sm.add_constant(self.X, has_constant='add')
+            for i, col in enumerate(Xc.columns):
+                if col == 'const':
+                    continue
+                try:
+                    vif_series[col] = float(variance_inflation_factor(Xc.values, i))
+                except Exception:
+                    vif_series[col] = np.nan
+        except Exception:
+            pass
+        self.vif = vif_series.drop(index='const', errors='ignore')
+
+        # Compute partial R2 from t-values and residual dof, cache non-constant slice.
+        partial_r2_series = pd.Series(np.nan, index=self.params.index, dtype=float)
+        df_resid = getattr(self.fitted, 'df_resid', np.nan)
+        if pd.notna(df_resid) and df_resid > 0 and self.tvalues is not None:
+            try:
+                tvals_sq = pd.Series(self.tvalues, index=self.params.index, dtype=float) ** 2
+                partial_r2_series = tvals_sq / (tvals_sq + float(df_resid))
+            except Exception:
+                partial_r2_series = pd.Series(np.nan, index=self.params.index, dtype=float)
+        self.partial_r2 = partial_r2_series.drop(index='const', errors='ignore')
+
         # Create base parameter measures
         param_data = []
         for var in self.params.index:
@@ -1779,7 +1801,8 @@ class OLS(ModelBase):
                 'variable': var,
                 'coef': float(self.params[var]),
                 'pvalue': float(self.pvalues[var]),
-                'vif': float(self.vif.get(var, np.nan)) if var != 'const' else np.nan,
+                'vif': float(vif_series.get(var, np.nan)) if var != 'const' else np.nan,
+                'partial_r2': float(partial_r2_series.get(var, np.nan)) if var != 'const' else np.nan,
                 'se': float(self.bse.get(var, np.nan))
             }
             
@@ -1891,6 +1914,7 @@ class FixedOLS(OLS):
         self.se = self.bse
         self.tvalues = pd.Series(np.nan, index=params.index, dtype=float)
         self.vif = pd.Series(np.nan, index=params.index, dtype=float)
+        self.partial_r2 = pd.Series(np.nan, index=params.index, dtype=float)
         self.fvalue = None
         self.f_pvalue = None
         self.llf = None

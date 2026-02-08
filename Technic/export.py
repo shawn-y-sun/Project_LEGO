@@ -1077,84 +1077,37 @@ class OLSModelAdapter(ExportableModel):
                                 'value': result['pvalue']
                             })
         
-        # Process model estimation statistics
-        params = self.model.params
-        pvalues = self.model.pvalues
-        std_errors = self.model.bse
-        
-        # Ensure conf_int is a DataFrame with proper index
-        conf_int_result = self.model.conf_int()
-        if isinstance(conf_int_result, np.ndarray):
-            conf_int = pd.DataFrame(
-                conf_int_result,
-                index=params.index,
-                columns=[0, 1]
-            )
-        else:
-            conf_int = conf_int_result
-        
-        for var in params.index:
-            stats_list.extend([
-                {
-                    'category': 'Model Estimation',
-                    'model': model_id,
-                    'type': 'Coefficient',
-                    'value_type': var,
-                    'value': params[var]
-                },
-                {
-                    'category': 'Model Estimation',
-                    'model': model_id,
-                    'type': 'P-value',
-                    'value_type': var,
-                    'value': pvalues[var]
-                },
-                {
-                    'category': 'Model Estimation',
-                    'model': model_id,
-                    'type': 'Std Error',
-                    'value_type': var,
-                    'value': std_errors[var]
-                },
-                {
-                    'category': 'Model Estimation',
-                    'model': model_id,
-                    'type': 'CI Lower',
-                    'value_type': var,
-                    'value': conf_int.loc[var, 0]
-                },
-                {
-                    'category': 'Model Estimation',
-                    'model': model_id,
-                    'type': 'CI Upper',
-                    'value_type': var,
-                    'value': conf_int.loc[var, 1]
-                }
-            ])
-        
-        # Add VIF values if available
-        if hasattr(self.model, 'vif') and self.model.vif is not None:
-            vif_values = self.model.vif
-            if isinstance(vif_values, pd.Series):
-                for var_name, vif_value in vif_values.items():
-                    if pd.notnull(vif_value):
-                        stats_list.append({
-                            'category': 'Model Estimation',
-                            'model': model_id,
-                            'type': 'VIF',
-                            'value_type': var_name,
-                            'value': float(vif_value)
-                        })
-            elif isinstance(vif_values, dict):
-                for var_name, vif_value in vif_values.items():
-                    if pd.notnull(vif_value):
-                        stats_list.append({
-                            'category': 'Model Estimation',
-                            'model': model_id,
-                            'type': 'VIF',
-                            'value_type': var_name,
-                            'value': float(vif_value)
-                        })
+        # Process model estimation statistics from model.param_measures
+        param_measures = getattr(self.model, 'param_measures', pd.DataFrame())
+        if isinstance(param_measures, pd.DataFrame) and not param_measures.empty:
+            metric_map = {
+                'coef': 'Coefficient',
+                'pvalue': 'P-value',
+                'se': 'Std Error',
+                'CI_2_5': 'CI Lower',
+                'CI_97_5': 'CI Upper',
+                'vif': 'VIF',
+                'partial_r2': 'Partial R2',
+            }
+
+            for _, row in param_measures.iterrows():
+                var = row.get('variable')
+                if pd.isna(var):
+                    continue
+
+                for src_col, metric_name in metric_map.items():
+                    if src_col not in param_measures.columns:
+                        continue
+                    value = row.get(src_col)
+                    if pd.isna(value):
+                        continue
+                    stats_list.append({
+                        'category': 'Model Estimation',
+                        'model': model_id,
+                        'type': metric_name,
+                        'value_type': str(var),
+                        'value': float(value)
+                    })
         
         # Add Summary Statistics for all variables
         def _append_summary_stats(data_series: Optional[pd.Series], var_name: str, category: str) -> None:
