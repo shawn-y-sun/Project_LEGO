@@ -1087,7 +1087,7 @@ class OLSModelAdapter(ExportableModel):
                 'CI_2_5': 'CI Lower',
                 'CI_97_5': 'CI Upper',
                 'vif': 'VIF',
-                'partial_r2': 'Partial R2',
+                'semi_partial_r2': 'Semi-Partial R2',
             }
 
             for _, row in param_measures.iterrows():

@@ -1757,13 +1757,14 @@ class OLS(ModelBase):
     @property
     def param_measures(self) -> pd.DataFrame:
         """
-        Parameter measures: coefficient, pvalue, VIF, standard error, and confidence intervals.
+        Parameter measures: coefficient, pvalue, VIF, semi-partial R2,
+        standard error, and confidence intervals.
         
         Returns
         -------
         pd.DataFrame
-            DataFrame with parameter measures including coef, pvalue, vif, se, CI_2_5, 
-            and CI_97_5.
+            DataFrame with parameter measures including coef, pvalue, vif,
+            semi_partial_r2, se, CI_2_5, and CI_97_5.
         """
         if not self.is_fitted or self.fitted is None:
             return pd.DataFrame()
@@ -1783,16 +1784,43 @@ class OLS(ModelBase):
             pass
         self.vif = vif_series.drop(index='const', errors='ignore')
 
-        # Compute partial R2 from t-values and residual dof, cache non-constant slice.
-        partial_r2_series = pd.Series(np.nan, index=self.params.index, dtype=float)
-        df_resid = getattr(self.fitted, 'df_resid', np.nan)
-        if pd.notna(df_resid) and df_resid > 0 and self.tvalues is not None:
-            try:
-                tvals_sq = pd.Series(self.tvalues, index=self.params.index, dtype=float) ** 2
-                partial_r2_series = tvals_sq / (tvals_sq + float(df_resid))
-            except Exception:
-                partial_r2_series = pd.Series(np.nan, index=self.params.index, dtype=float)
-        self.partial_r2 = partial_r2_series.drop(index='const', errors='ignore')
+        # Compute semi-partial R2 via R2(full) - R2(reduced without driver).
+        # Group multi-df drivers (e.g., dummy-expanded categorical variables)
+        # by their prefix before ':' so all degrees of freedom are removed together.
+        semi_partial_r2_series = pd.Series(np.nan, index=self.params.index, dtype=float)
+        try:
+            Xc = sm.add_constant(self.X, has_constant='add')
+            y_vals = self.y
+            full_r2 = float(self.rsquared) if self.rsquared is not None else np.nan
+
+            if pd.notna(full_r2):
+                driver_groups: Dict[str, List[str]] = {}
+                for col in Xc.columns:
+                    if col == 'const':
+                        continue
+                    driver_key = col.split(':', 1)[0] if ':' in col else col
+                    driver_groups.setdefault(driver_key, []).append(col)
+
+                for driver_cols in driver_groups.values():
+                    reduced_cols = [c for c in Xc.columns if c not in driver_cols]
+                    try:
+                        reduced_fit = sm.OLS(y_vals, Xc[reduced_cols]).fit()
+                        reduced_r2 = float(reduced_fit.rsquared)
+                        sr2_val = full_r2 - reduced_r2
+                        # numerical guardrails
+                        if np.isfinite(sr2_val):
+                            sr2_val = min(max(sr2_val, 0.0), 1.0)
+                        else:
+                            sr2_val = np.nan
+                    except Exception:
+                        sr2_val = np.nan
+
+                    for col in driver_cols:
+                        semi_partial_r2_series[col] = sr2_val
+        except Exception:
+            pass
+
+        self.partial_r2 = semi_partial_r2_series.drop(index='const', errors='ignore')
 
         # Create base parameter measures
         param_data = []
@@ -1802,7 +1830,7 @@ class OLS(ModelBase):
                 'coef': float(self.params[var]),
                 'pvalue': float(self.pvalues[var]),
                 'vif': float(vif_series.get(var, np.nan)) if var != 'const' else np.nan,
-                'partial_r2': float(partial_r2_series.get(var, np.nan)) if var != 'const' else np.nan,
+                'semi_partial_r2': float(semi_partial_r2_series.get(var, np.nan)) if var != 'const' else np.nan,
                 'se': float(self.bse.get(var, np.nan))
             }
             
