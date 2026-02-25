@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from typing import Any, Dict, List, Optional, Union, Tuple
 import warnings
+import re
 import matplotlib.pyplot as plt
 import os
 import statsmodels.api as sm
@@ -10,6 +11,22 @@ from .scenario import ScenManager
 from .model import ModelBase
 from .data import DataManager
 from .internal import PanelLoader, TimeSeriesLoader
+
+
+_SHOCK_COL_PATTERN = re.compile(
+    r"^(?P<name>.+)(?P<sign>[+-])(?P<shock>\d+(?:\.\d+)?)(?P<suffix>se|sd)$"
+)
+
+
+def _parse_shock_column(col: str, suffix: Optional[str] = None) -> Optional[Tuple[str, str]]:
+    match = _SHOCK_COL_PATTERN.match(col)
+    if not match:
+        return None
+    if suffix is not None and match.group("suffix") != suffix:
+        return None
+    param_name = match.group("name")
+    shock = f"{match.group('sign')}{match.group('shock')}{match.group('suffix')}"
+    return param_name, shock
 
 
 class SensitivityTest:
@@ -718,9 +735,11 @@ class SensitivityTest:
         param_names = []
         suffix = "se" if shock_type == "param" else "sd"
         for col in df.columns:
-            if col != baseline_col and f'+' in col and col.endswith(suffix):
-                # Extract parameter name from shock column (e.g., 'pricing+1se' -> 'pricing')
-                param_name = col.split('+')[0]
+            if col == baseline_col:
+                continue
+            parsed = _parse_shock_column(col, suffix=suffix)
+            if parsed:
+                param_name, _ = parsed
                 if param_name not in param_names:
                     param_names.append(param_name)
         
@@ -776,7 +795,11 @@ class SensitivityTest:
             ax.plot(baseline_data.index, baseline_data.values, 'b-', linewidth=2, label=scenario_name)
             
             # Plot shock results with simplified labels (just shock value)
-            shock_cols = [col for col in df.columns if col.startswith(param + '+') or col.startswith(param + '-')]
+            shock_cols = []
+            for col in df.columns:
+                parsed = _parse_shock_column(col, suffix=suffix)
+                if parsed and parsed[0] == param:
+                    shock_cols.append(col)
             shock_cols.sort()  # Sort to ensure consistent order
             
             for j, shock_col in enumerate(shock_cols):
@@ -784,7 +807,8 @@ class SensitivityTest:
                 shock_data_vals = df[shock_col]
                 
                 # Extract just the shock part (e.g., 'pricing+1se' -> '+1se')
-                shock_part = shock_col[len(param):]
+                parsed = _parse_shock_column(shock_col, suffix=suffix)
+                shock_part = parsed[1] if parsed else shock_col
                 ax.plot(shock_data_vals.index, shock_data_vals.values, '--', color=color, 
                        linewidth=1.5, label=shock_part)
             
@@ -973,8 +997,10 @@ class SensitivityTest:
                 for col in df.columns:
                     if col == baseline_col:
                         continue
-                    param_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
-                    shock = ('+' if '+' in col else '-') + shock
+                    parsed = _parse_shock_column(col, suffix="se")
+                    if not parsed:
+                        continue
+                    param_name, shock = parsed
                     df_data = {
                         'test': 'Parameter Sensitivity Test',
                         'scenario_name': scen_set,
@@ -1014,8 +1040,10 @@ class SensitivityTest:
                     for col in qtr_df.columns:
                         if col == baseline_col:
                             continue
-                        param_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
-                        shock = ('+' if '+' in col else '-') + shock
+                        parsed = _parse_shock_column(col, suffix="se")
+                        if not parsed:
+                            continue
+                        param_name, shock = parsed
                         qtr_forecast = qtr_df[col].dropna()
                         if not qtr_forecast.empty:
                             df_data = {
@@ -1055,8 +1083,10 @@ class SensitivityTest:
                 for col in df.columns:
                     if col == baseline_col:
                         continue
-                    var_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
-                    shock = ('+' if '+' in col else '-') + shock
+                    parsed = _parse_shock_column(col, suffix="sd")
+                    if not parsed:
+                        continue
+                    var_name, shock = parsed
                     df_data = {
                         'test': 'Input Sensitivity Test',
                         'scenario_name': scen_set,
@@ -1096,8 +1126,10 @@ class SensitivityTest:
                     for col in qtr_df.columns:
                         if col == baseline_col:
                             continue
-                        var_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
-                        shock = ('+' if '+' in col else '-') + shock
+                        parsed = _parse_shock_column(col, suffix="sd")
+                        if not parsed:
+                            continue
+                        var_name, shock = parsed
                         qtr_forecast = qtr_df[col].dropna()
                         if not qtr_forecast.empty:
                             df_data = {
@@ -1136,8 +1168,10 @@ class SensitivityTest:
                     for col in df.columns:
                         if col == baseline_col:
                             continue
-                        param_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
-                        shock = ('+' if '+' in col else '-') + shock
+                        parsed = _parse_shock_column(col, suffix="se")
+                        if not parsed:
+                            continue
+                        param_name, shock = parsed
                         base_values = self.model.base_predictor.predict_base(df[col], self.dm.scen_p0)
                         df_data = {
                             'test': 'Parameter Sensitivity Test',
@@ -1178,8 +1212,10 @@ class SensitivityTest:
                         for col in qtr_df.columns:
                             if col == baseline_col:
                                 continue
-                            param_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
-                            shock = ('+' if '+' in col else '-') + shock
+                            parsed = _parse_shock_column(col, suffix="se")
+                            if not parsed:
+                                continue
+                            param_name, shock = parsed
                             qtr_forecast = qtr_df[col].dropna()
                             if not qtr_forecast.empty:
                                 base_values = self.model.base_predictor.predict_base(qtr_forecast, self.dm.scen_p0)
@@ -1217,8 +1253,10 @@ class SensitivityTest:
                     for col in df.columns:
                         if col == baseline_col:
                             continue
-                        var_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
-                        shock = ('+' if '+' in col else '-') + shock
+                        parsed = _parse_shock_column(col, suffix="sd")
+                        if not parsed:
+                            continue
+                        var_name, shock = parsed
                         base_values = self.model.base_predictor.predict_base(df[col], self.dm.scen_p0)
                         df_data = {
                             'test': 'Input Sensitivity Test',
@@ -1259,8 +1297,10 @@ class SensitivityTest:
                         for col in qtr_df.columns:
                             if col == baseline_col:
                                 continue
-                            var_name, shock = col.rsplit('+', 1) if '+' in col else col.rsplit('-', 1)
-                            shock = ('+' if '+' in col else '-') + shock
+                            parsed = _parse_shock_column(col, suffix="sd")
+                            if not parsed:
+                                continue
+                            var_name, shock = parsed
                             qtr_forecast = qtr_df[col].dropna()
                             if not qtr_forecast.empty:
                                 base_values = self.model.base_predictor.predict_base(qtr_forecast, self.dm.scen_p0)
@@ -1443,4 +1483,3 @@ class SensitivityTest:
         # Run input sensitivity testing plots
         self.plot_all_input_shock(sev_only=sev_only)
             
-

@@ -1496,6 +1496,7 @@ class OLS(ModelBase):
         self.bse = None
         self.tvalues = None
         self.vif = None
+        self.partial_r2 = None
         self.fvalue = None
         self.f_pvalue = None
         self.llf = None  # Log-likelihood
@@ -1532,11 +1533,6 @@ class OLS(ModelBase):
         self.fvalue = res.fvalue
         self.f_pvalue = res.f_pvalue
         self.llf = res.llf  # Store log-likelihood
-        # VIF
-        self.vif = pd.Series({
-            col: variance_inflation_factor(Xc.values, i)
-            for i, col in enumerate(Xc.columns)
-        })
         self.is_fitted = True
 
         # Set initial conf_int, AIC, BIC
@@ -1761,17 +1757,71 @@ class OLS(ModelBase):
     @property
     def param_measures(self) -> pd.DataFrame:
         """
-        Parameter measures: coefficient, pvalue, VIF, standard error, and confidence intervals.
+        Parameter measures: coefficient, pvalue, VIF, semi-partial R2,
+        standard error, and confidence intervals.
         
         Returns
         -------
         pd.DataFrame
-            DataFrame with parameter measures including coef, pvalue, vif, se, CI_2_5, 
-            and CI_97_5.
+            DataFrame with parameter measures including coef, pvalue, vif,
+            semi_partial_r2, se, CI_2_5, and CI_97_5.
         """
         if not self.is_fitted or self.fitted is None:
             return pd.DataFrame()
         
+        # Compute VIF from design matrix and cache non-constant slice.
+        vif_series = pd.Series(np.nan, index=self.params.index, dtype=float)
+        try:
+            Xc = sm.add_constant(self.X, has_constant='add')
+            for i, col in enumerate(Xc.columns):
+                if col == 'const':
+                    continue
+                try:
+                    vif_series[col] = float(variance_inflation_factor(Xc.values, i))
+                except Exception:
+                    vif_series[col] = np.nan
+        except Exception:
+            pass
+        self.vif = vif_series.drop(index='const', errors='ignore')
+
+        # Compute semi-partial R2 via R2(full) - R2(reduced without driver).
+        # Group multi-df drivers (e.g., dummy-expanded categorical variables)
+        # by their prefix before ':' so all degrees of freedom are removed together.
+        semi_partial_r2_series = pd.Series(np.nan, index=self.params.index, dtype=float)
+        try:
+            Xc = sm.add_constant(self.X, has_constant='add')
+            y_vals = self.y
+            full_r2 = float(self.rsquared) if self.rsquared is not None else np.nan
+
+            if pd.notna(full_r2):
+                driver_groups: Dict[str, List[str]] = {}
+                for col in Xc.columns:
+                    if col == 'const':
+                        continue
+                    driver_key = col.split(':', 1)[0] if ':' in col else col
+                    driver_groups.setdefault(driver_key, []).append(col)
+
+                for driver_cols in driver_groups.values():
+                    reduced_cols = [c for c in Xc.columns if c not in driver_cols]
+                    try:
+                        reduced_fit = sm.OLS(y_vals, Xc[reduced_cols]).fit()
+                        reduced_r2 = float(reduced_fit.rsquared)
+                        sr2_val = full_r2 - reduced_r2
+                        # numerical guardrails
+                        if np.isfinite(sr2_val):
+                            sr2_val = min(max(sr2_val, 0.0), 1.0)
+                        else:
+                            sr2_val = np.nan
+                    except Exception:
+                        sr2_val = np.nan
+
+                    for col in driver_cols:
+                        semi_partial_r2_series[col] = sr2_val
+        except Exception:
+            pass
+
+        self.partial_r2 = semi_partial_r2_series.drop(index='const', errors='ignore')
+
         # Create base parameter measures
         param_data = []
         for var in self.params.index:
@@ -1779,7 +1829,8 @@ class OLS(ModelBase):
                 'variable': var,
                 'coef': float(self.params[var]),
                 'pvalue': float(self.pvalues[var]),
-                'vif': float(self.vif.get(var, np.nan)) if var != 'const' else np.nan,
+                'vif': float(vif_series.get(var, np.nan)) if var != 'const' else np.nan,
+                'semi_partial_r2': float(semi_partial_r2_series.get(var, np.nan)) if var != 'const' else np.nan,
                 'se': float(self.bse.get(var, np.nan))
             }
             
@@ -1891,6 +1942,7 @@ class FixedOLS(OLS):
         self.se = self.bse
         self.tvalues = pd.Series(np.nan, index=params.index, dtype=float)
         self.vif = pd.Series(np.nan, index=params.index, dtype=float)
+        self.partial_r2 = pd.Series(np.nan, index=params.index, dtype=float)
         self.fvalue = None
         self.f_pvalue = None
         self.llf = None
