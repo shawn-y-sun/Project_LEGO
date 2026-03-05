@@ -538,7 +538,7 @@ class ScenManager:
             if base_actual is not None and not base_actual.empty:
                 base_actual_q = base_actual.copy()
                 base_actual_q.index = pd.to_datetime(base_actual_q.index)
-                base_actual_q = base_actual_q.groupby(pd.Grouper(freq='Q')).mean()
+                base_actual_q = base_actual_q.groupby(pd.Grouper(freq='QE')).mean()
                 base_actual_q.index = base_actual_q.index.to_period('Q').to_timestamp(how='end').normalize()
 
                 jump_off_date = self._get_p0_for_set(scen_set)
@@ -1105,7 +1105,7 @@ class ScenManager:
             series_copy.index = pd.to_datetime(series_copy.index)
             
             # Group by quarter and aggregate
-            quarterly_grouped = series_copy.groupby(pd.Grouper(freq='Q'))
+            quarterly_grouped = series_copy.groupby(pd.Grouper(freq='QE'))
             
             if qtr_method == 'mean':
                 result = quarterly_grouped.mean()
